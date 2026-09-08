@@ -24,10 +24,10 @@ Full `./mvnw -B clean verify` green with Docker up.
 
 | Module | Tests | Notes |
 |---|---|---|
-| `gdpr-shredding-core` | 68 | includes 11 Cipher probes and the Testcontainers PostgreSQL suite |
+| `gdpr-shredding-core` | 70 | includes 11 Cipher probes and the Testcontainers PostgreSQL suite |
 | `gdpr-shredding-spring-boot-starter` | 14 | 3 Cipher probes, plus the two startup checks Dollar ruled in |
 | `gdpr-shredding-sample` | 10 | 3 Cipher probes, full Spring Boot context on Testcontainers PostgreSQL |
-| **total** | **92** | |
+| **total** | **94** | |
 
 Nothing is skipped and nothing is `@Disabled`.
 
@@ -121,6 +121,21 @@ compact constructor, so hashed material can only ever hold values the store give
 whatever precision the caller's `Clock` has. Truncation and not rounding, so an erasure is never
 timestamped later than it happened.
 
+**A second instance, unmasked by the first fix** (CI run 34264742233). With the chain green,
+`CipherProbeErasureTest.the_record_holds_a_pseudonym_and_the_backup_clearance_date` failed on the
+same nanosecond input: `ErasureResult.completeInBackupsAt` was untruncated while the record's
+`backupRetentionUntil` was, so the date the API hands a caller and the date in the proof of erasure
+were two different instants. That is a real inconsistency, not a test artefact, so the fix is in
+`ErasureResult`, not in the assertion. `DataKey.createdAt` was truncated at the same time on the
+same reasoning, so a key held in memory and the same key read back are equal.
+
+**Guard against the next one.** `every_instant_that_crosses_the_storage_boundary_is_truncated`
+walks the record components of `ErasureRecord`, `ErasureResult` and `DataKey` by reflection,
+constructs each from a nanosecond instant, and fails if any `Instant` keeps sub-microsecond
+precision. A new `Instant` field added to any of them without truncation now fails on every machine
+instead of on Linux CI three commits later. The test also asserts the exact list of components it
+checked, so adding a field silently is not possible either.
+
 **Tests that would have caught it**, both RED before the fix:
 
 - `ErasureRecordPrecisionTest` (core, no database, runs everywhere): the record holds only
@@ -130,6 +145,9 @@ timestamped later than it happened.
   **explicit nanosecond-precision `Clock`** rather than the system clock, so the CI condition is
   reproduced on every machine, and asserts the read-back record equals the written one field for
   field, not just that the verifier is happy.
+- `CipherProbeErasureTest.the_result_and_the_record_agree_under_a_nanosecond_precision_clock`: the
+  same explicit nanosecond clock one layer up, asserting the API's date and the proof's date are
+  the same instant.
 
 The lesson generalises: anything inside hashed material must survive its column type exactly, and a
 test must not depend on the host clock's resolution to produce the interesting input.

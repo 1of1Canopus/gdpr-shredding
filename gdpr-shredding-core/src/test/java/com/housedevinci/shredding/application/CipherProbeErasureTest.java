@@ -151,6 +151,60 @@ class CipherProbeErasureTest {
   }
 
   /**
+   * The same nanosecond-precision trap that broke the JDBC chain, one layer up: the instant an API
+   * hands a caller and the instant in the proof of erasure must be the same instant, not two
+   * renderings of the same moment at different precisions.
+   *
+   * <p>The clock is nanosecond-precision on purpose. macOS's {@code Clock.systemUTC()} is only
+   * microsecond-precision, so with the system clock this passes on a developer's machine and fails
+   * on Linux CI, which is exactly what happened.
+   */
+  @Test
+  void the_result_and_the_record_agree_under_a_nanosecond_precision_clock() {
+    java.time.Instant nanos = java.time.Instant.parse("2026-09-08T10:00:00.123456789Z");
+    Clock nanoClock =
+        new Clock() {
+          @Override
+          public java.time.ZoneId getZone() {
+            return java.time.ZoneOffset.UTC;
+          }
+
+          @Override
+          public Clock withZone(java.time.ZoneId zone) {
+            return this;
+          }
+
+          @Override
+          public java.time.Instant instant() {
+            return nanos;
+          }
+        };
+    var store =
+        new InMemoryErasureStore(
+            ErasureChain.keyed(SECRET, "k1"), (t, s) -> new int[] {keys.destroy(t, s), 0});
+    var service =
+        new ErasureService(
+            store,
+            cache,
+            new Pseudonymiser(SECRET),
+            List.of(),
+            Duration.ofDays(30),
+            nanoClock,
+            1,
+            2);
+    cipher.encrypt(TENANT, SUBJECT, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
+
+    var result = service.erase(new ErasureRequest(TENANT, SUBJECT, "dpo", "art 17"));
+    var record = result.records().get(0);
+
+    assertThat(result.completeInBackupsAt()).isEqualTo(record.backupRetentionUntil());
+    assertThat(result.completeInBackupsAt().getNano() % 1000)
+        .as("only what the store can give back unchanged may reach the proof")
+        .isZero();
+    assertThat(record.timestamp().getNano() % 1000).isZero();
+  }
+
+  /**
    * A trail whose rows are unkeyed, or whose anchor row is missing, must never be rendered with the
    * same word as a clean keyed trail. INTACT on an unkeyed trail is a claim its data cannot
    * support: without a secret, anyone who can write the table can rewrite the whole chain

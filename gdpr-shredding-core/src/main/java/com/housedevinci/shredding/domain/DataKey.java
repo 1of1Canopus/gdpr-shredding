@@ -19,7 +19,8 @@ import java.util.Objects;
  *     tenant|subject|version}
  * @param state lifecycle
  * @param encryptionCount how many values this key has encrypted (control 3)
- * @param createdAt when the key was minted
+ * @param createdAt when the key was minted, truncated to {@link ErasureRecord#STORAGE_PRECISION} so
+ *     a key held in memory and the same key read back out of its column are equal
  */
 public record DataKey(
     TenantId tenant,
@@ -34,7 +35,8 @@ public record DataKey(
     Objects.requireNonNull(tenant, "tenant");
     Objects.requireNonNull(subject, "subject");
     Objects.requireNonNull(state, "state");
-    Objects.requireNonNull(createdAt, "createdAt");
+    createdAt =
+        Objects.requireNonNull(createdAt, "createdAt").truncatedTo(ErasureRecord.STORAGE_PRECISION);
     if (version < 1) {
       throw new ShreddingException(ErrorCodes.INVALID, "key version must be >= 1, was " + version);
     }

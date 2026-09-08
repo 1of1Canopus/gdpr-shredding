@@ -70,6 +70,57 @@ class ErasureRecordPrecisionTest {
     assertThat(recordAt(exact, exact).timestamp()).isEqualTo(exact);
   }
 
+  /**
+   * The guard for the next one, not just this one.
+   *
+   * <p>Every {@code Instant} component of a value object that crosses the storage boundary is
+   * constructed from a nanosecond instant by reflection and checked. A new {@code Instant} field
+   * added to any of these records without truncation fails here, on every machine, rather than on
+   * Linux CI three commits later.
+   */
+  @Test
+  void every_instant_that_crosses_the_storage_boundary_is_truncated() throws Exception {
+    var nano = Instant.parse("2026-09-08T10:00:00.123456789Z");
+    var checked = new java.util.ArrayList<String>();
+
+    for (Object value :
+        List.of(
+            recordAt(nano, nano),
+            new com.housedevinci.shredding.application.ErasureResult(
+                ErasureOutcome.COMPLETE, false, 1, 0, List.of(), List.of(), nano),
+            new DataKey(
+                TenantId.of("acme"),
+                SubjectId.of("s-1"),
+                1,
+                new byte[16],
+                KeyState.ACTIVE,
+                0,
+                nano))) {
+      for (var component : value.getClass().getRecordComponents()) {
+        if (component.getType() != Instant.class) {
+          continue;
+        }
+        var read = value.getClass().getMethod(component.getName());
+        var instant = (Instant) read.invoke(value);
+        String where = value.getClass().getSimpleName() + "." + component.getName();
+        checked.add(where);
+        assertThat(instant.getNano() % 1000)
+            .as(
+                where
+                    + " keeps sub-microsecond precision, which PostgreSQL timestamptz cannot store"
+                    + " and will round; truncate it in the compact constructor")
+            .isZero();
+      }
+    }
+
+    assertThat(checked)
+        .containsExactlyInAnyOrder(
+            "ErasureRecord.timestamp",
+            "ErasureRecord.backupRetentionUntil",
+            "ErasureResult.completeInBackupsAt",
+            "DataKey.createdAt");
+  }
+
   @Test
   void withChain_and_withSequence_keep_the_truncated_values() {
     var record = recordAt(NANOS, NANOS).withChain("prev", "sh2h", "k1", "hash").withSequence(7);
