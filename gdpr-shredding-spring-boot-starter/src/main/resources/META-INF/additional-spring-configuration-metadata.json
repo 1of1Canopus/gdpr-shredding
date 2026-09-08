@@ -1,0 +1,84 @@
+{
+  "properties": [
+    {
+      "name": "shredding.master-key",
+      "type": "java.lang.String",
+      "description": "Base64 master key that wraps every per-subject data key. Required, at least 32 bytes, supplied through the environment. No default and none is generated; sample-looking values are refused at startup."
+    },
+    {
+      "name": "shredding.dev-mode",
+      "type": "java.lang.Boolean",
+      "defaultValue": false,
+      "description": "Permits the in-memory key provider, which loses every data key on restart. Local development only; WARNs at every startup while on."
+    },
+    {
+      "name": "shredding.allow-second-level-cache",
+      "type": "java.lang.Boolean",
+      "defaultValue": false,
+      "description": "Permits a @Shredded entity to be second-level cached, accepting that a cached entity keeps serving the decrypted value after the key is destroyed."
+    },
+    {
+      "name": "shredding.erased-value.policy",
+      "type": "com.housedevinci.shredding.domain.ErasedValuePolicy",
+      "defaultValue": "sentinel",
+      "description": "What a read returns once the key is gone: sentinel, exception, or null. One policy per application. null WARNs at every startup."
+    },
+    {
+      "name": "shredding.crypto.max-encryptions-per-key",
+      "type": "java.lang.Long",
+      "defaultValue": 4294967296,
+      "description": "Values one data key may encrypt before it is rotated. Cannot be raised above 2^32."
+    },
+    {
+      "name": "shredding.data-key-cache.ttl",
+      "type": "java.time.Duration",
+      "defaultValue": "60s",
+      "description": "How long a node may hold an unwrapped data key. This is also how long a peer node can still read an erased subject's data after the erasure commits."
+    },
+    {
+      "name": "shredding.data-key-cache.max-size",
+      "type": "java.lang.Integer",
+      "defaultValue": 10000,
+      "description": "How many unwrapped data keys a node may hold."
+    },
+    {
+      "name": "shredding.erasure-log.hmac-secret",
+      "type": "java.lang.String",
+      "description": "HMAC secret for the erasure chain, at least 32 bytes. Required unless shredding.erasure-log.unkeyed=true. Never destroyed by an erasure, and never stored beside the datasource password."
+    },
+    {
+      "name": "shredding.erasure-log.hmac-key-id",
+      "type": "java.lang.String",
+      "defaultValue": "k1",
+      "description": "Key id written inside the hashed material of every erasure record, so key rotation is data rather than a chain-format change."
+    },
+    {
+      "name": "shredding.erasure-log.hmac-keys",
+      "type": "java.util.Map<java.lang.String,java.lang.String>",
+      "description": "Every key id that may have signed a row, for verification across a rotation window."
+    },
+    {
+      "name": "shredding.erasure-log.unkeyed",
+      "type": "java.lang.Boolean",
+      "defaultValue": false,
+      "description": "Runs the erasure chain unkeyed, so its integrity rests only on database privilege separation. WARNs at every startup."
+    },
+    {
+      "name": "shredding.blind-index.hmac-secret",
+      "type": "java.lang.String",
+      "description": "Secret for the blind index, at least 32 bytes. Required when the application declares any @BlindIndex column. Never the data key or the erasure-chain material."
+    },
+    {
+      "name": "shredding.blind-index.bits",
+      "type": "java.lang.Integer",
+      "defaultValue": 64,
+      "description": "Blind-index width. The index is a prefilter: the query path always re-verifies by decrypting."
+    },
+    {
+      "name": "shredding.erasure.backup-retention",
+      "type": "java.time.Duration",
+      "defaultValue": "30d",
+      "description": "How long backups, PITR archives and WAL keep a copy of the wrapped key. The erasure is complete only at erasedAt plus this, and the proof of erasure prints that date."
+    }
+  ]
+}

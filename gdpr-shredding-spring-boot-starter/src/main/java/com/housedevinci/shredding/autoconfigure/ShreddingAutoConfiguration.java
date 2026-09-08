@@ -1,0 +1,250 @@
+package com.housedevinci.shredding.autoconfigure;
+
+import com.housedevinci.shredding.adapter.jdbc.JdbcErasureStore;
+import com.housedevinci.shredding.adapter.jdbc.JdbcKeyProvider;
+import com.housedevinci.shredding.adapter.jdbc.JdbcSupport;
+import com.housedevinci.shredding.application.DataKeyCache;
+import com.housedevinci.shredding.application.ErasureChainVerifier;
+import com.housedevinci.shredding.application.ErasureService;
+import com.housedevinci.shredding.application.FieldCipher;
+import com.housedevinci.shredding.application.KeyProvider;
+import com.housedevinci.shredding.application.PostErasureHook;
+import com.housedevinci.shredding.domain.BlindIndex;
+import com.housedevinci.shredding.domain.ErasureChain;
+import com.housedevinci.shredding.domain.ErrorCodes;
+import com.housedevinci.shredding.domain.MasterKey;
+import com.housedevinci.shredding.domain.Pseudonymiser;
+import com.housedevinci.shredding.domain.RandomSource;
+import com.housedevinci.shredding.domain.ShreddingException;
+import com.housedevinci.shredding.jpa.ShreddingRuntime;
+import jakarta.annotation.PreDestroy;
+import jakarta.persistence.EntityManagerFactory;
+import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import javax.sql.DataSource;
+import org.hibernate.jpa.boot.spi.IntegratorProvider;
+import org.hibernate.jpa.boot.spi.JpaSettings;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.hibernate.autoconfigure.HibernatePropertiesCustomizer;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Lazy;
+
+/**
+ * Wires the module. Everything a security control depends on is decided here, at startup, and a
+ * misconfiguration is a startup failure naming the property.
+ */
+@AutoConfiguration
+@ConditionalOnClass({EntityManagerFactory.class, DataSource.class})
+@EnableConfigurationProperties(ShreddingProperties.class)
+public class ShreddingAutoConfiguration {
+
+  private static final Logger log = LoggerFactory.getLogger(ShreddingAutoConfiguration.class);
+
+  @Bean
+  @ConditionalOnMissingBean
+  public Clock shreddingClock() {
+    return Clock.systemUTC();
+  }
+
+  @Bean
+  @ConditionalOnMissingBean
+  public RandomSource shreddingRandomSource() {
+    return RandomSource.secure();
+  }
+
+  @Bean
+  @ConditionalOnMissingBean
+  public MasterKey shreddingMasterKey(ShreddingProperties properties) {
+    return MasterKey.fromBase64("shredding.master-key", properties.getMasterKey());
+  }
+
+  @Bean
+  @ConditionalOnMissingBean
+  public ErasureChain shreddingErasureChain(ShreddingProperties properties) {
+    var log0 = properties.getErasureLog();
+    if (log0.isUnkeyed()) {
+      if (log0.getHmacSecret() != null && !log0.getHmacSecret().isBlank()) {
+        throw new ShreddingException(
+            ErrorCodes.CONFIG,
+            "shredding.erasure-log.unkeyed=true and shredding.erasure-log.hmac-secret are both"
+                + " set; pick one.");
+      }
+      log.warn(
+          "shredding: the erasure log is UNKEYED (shredding.erasure-log.unkeyed=true). Its"
+              + " integrity then rests only on database privilege separation: anyone who can write"
+              + " the table can rewrite the whole chain consistently. Set"
+              + " shredding.erasure-log.hmac-secret instead.");
+      return ErasureChain.unkeyed();
+    }
+    byte[] secret = requiredSecret("shredding.erasure-log.hmac-secret", log0.getHmacSecret());
+    return ErasureChain.keyed(secret, log0.getHmacKeyId());
+  }
+
+  @Bean
+  @ConditionalOnMissingBean
+  public Pseudonymiser shreddingPseudonymiser(ShreddingProperties properties) {
+    var log0 = properties.getErasureLog();
+    byte[] secret =
+        log0.isUnkeyed()
+            ? "sh/unkeyed-pseudonym-pepper/not-a-secret".getBytes(StandardCharsets.UTF_8)
+            : requiredSecret("shredding.erasure-log.hmac-secret", log0.getHmacSecret());
+    return new Pseudonymiser(secret);
+  }
+
+  @Bean
+  @ConditionalOnMissingBean
+  public DataKeyCache shreddingDataKeyCache(ShreddingProperties properties, Clock clock) {
+    var cache = properties.getDataKeyCache();
+    return new DataKeyCache(cache.getTtl(), cache.getMaxSize(), clock);
+  }
+
+  @Bean
+  @ConditionalOnMissingBean
+  public KeyProvider shreddingKeyProvider(
+      DataSource dataSource, MasterKey masterKey, RandomSource random, Clock clock) {
+    JdbcSupport.initializeSchema(dataSource);
+    return new JdbcKeyProvider(dataSource, masterKey, random, clock);
+  }
+
+  @Bean
+  @ConditionalOnMissingBean
+  public ShreddedModel shreddedModel(
+      EntityManagerFactory entityManagerFactory, ShreddingProperties properties) {
+    var entities = new ArrayList<Class<?>>();
+    entityManagerFactory.getMetamodel().getEntities().forEach(e -> entities.add(e.getJavaType()));
+    return ShreddedModel.scan(entities, properties.isAllowSecondLevelCache());
+  }
+
+  @Bean
+  @ConditionalOnMissingBean
+  public FieldCipher shreddingFieldCipher(
+      KeyProvider keys, DataKeyCache cache, RandomSource random, ShreddingProperties properties) {
+    return new FieldCipher(keys, cache, random, properties.getCrypto().getMaxEncryptionsPerKey());
+  }
+
+  @Bean
+  @ConditionalOnMissingBean
+  public BlindIndex shreddingBlindIndex(ShreddingProperties properties) {
+    var index = properties.getBlindIndex();
+    if (index.getHmacSecret() == null || index.getHmacSecret().isBlank()) {
+      // Not an error yet: an application with no @BlindIndex column never needs it. The event
+      // listener refuses at the first indexed write if it is still missing.
+      return null;
+    }
+    return new BlindIndex(
+        requiredSecret("shredding.blind-index.hmac-secret", index.getHmacSecret()),
+        index.getBits());
+  }
+
+  @Bean
+  @ConditionalOnMissingBean
+  public JdbcErasureStore shreddingErasureStore(
+      DataSource dataSource, ErasureChain chain, @Lazy ShreddedModel model) {
+    JdbcSupport.initializeSchema(dataSource);
+    return new JdbcErasureStore(dataSource, chain, model.blindIndexColumns());
+  }
+
+  @Bean
+  @ConditionalOnMissingBean
+  public ErasureService shreddingErasureService(
+      JdbcErasureStore store,
+      DataKeyCache cache,
+      Pseudonymiser pseudonymiser,
+      ObjectProvider<PostErasureHook> hooks,
+      ShreddingProperties properties,
+      Clock clock,
+      ShreddedModel model) {
+    return new ErasureService(
+        store,
+        cache,
+        pseudonymiser,
+        hooks.orderedStream().toList(),
+        properties.getErasure().getBackupRetention(),
+        clock,
+        model.entityCount(),
+        model.fieldCount());
+  }
+
+  @Bean
+  @ConditionalOnMissingBean
+  public ErasureChainVerifier shreddingErasureChainVerifier(
+      JdbcErasureStore store, ShreddingProperties properties) {
+    var log0 = properties.getErasureLog();
+    var keyring = new LinkedHashMap<String, byte[]>();
+    if (!log0.isUnkeyed()) {
+      keyring.put(
+          log0.getHmacKeyId(),
+          requiredSecret("shredding.erasure-log.hmac-secret", log0.getHmacSecret()));
+      log0.getHmacKeys()
+          .forEach(
+              (id, secret) ->
+                  keyring.put(id, requiredSecret("shredding.erasure-log.hmac-keys." + id, secret)));
+    }
+    return new ErasureChainVerifier(store, store, Map.copyOf(keyring));
+  }
+
+  @Bean
+  @ConditionalOnMissingBean
+  public ShreddingEventListener.TenantSupplier shreddingTenantSupplier() {
+    // No default tenant (control 15): the fallback supplier hands back null, and the listener
+    // turns that into SHRED-TENANT-MISSING rather than an empty string.
+    return () -> null;
+  }
+
+  @Bean
+  public HibernatePropertiesCustomizer shreddingHibernateCustomizer(
+      @Lazy ShreddedModel model,
+      ShreddingEventListener.TenantSupplier tenantSupplier,
+      ObjectProvider<BlindIndex> blindIndex) {
+    return properties ->
+        properties.put(
+            JpaSettings.INTEGRATOR_PROVIDER,
+            (IntegratorProvider)
+                () ->
+                    List.of(
+                        new ShreddingIntegrator(
+                            new ShreddingEventListener(
+                                model, tenantSupplier, blindIndex.getIfAvailable()))));
+  }
+
+  @Bean
+  public ShreddingStartupCheck shreddingStartupCheck(
+      ShreddingProperties properties, FieldCipher cipher, @Lazy ShreddedModel model) {
+    return new ShreddingStartupCheck(properties, cipher, model);
+  }
+
+  static byte[] requiredSecret(String property, String value) {
+    if (value == null || value.isBlank()) {
+      throw new ShreddingException(
+          ErrorCodes.CONFIG,
+          property + " is required. Supply at least 32 bytes through the environment.");
+    }
+    byte[] raw;
+    try {
+      raw = Base64.getDecoder().decode(value.strip());
+    } catch (IllegalArgumentException notBase64) {
+      raw = value.getBytes(StandardCharsets.UTF_8);
+    }
+    if (raw.length < 32) {
+      throw new ShreddingException(
+          ErrorCodes.CONFIG, property + " must be at least 32 bytes; it is " + raw.length + ".");
+    }
+    return raw;
+  }
+
+  @PreDestroy
+  public void clearRuntime() {
+    ShreddingRuntime.clear();
+  }
+}
