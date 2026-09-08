@@ -16,15 +16,16 @@ Full `./mvnw -B clean verify` green with Docker up.
 | 7 | Starter: converters, write-path listeners, SpEL, properties, startup refusals, actuator | done |
 | 8 | Sample: customer, audit table, erasure endpoint, end-to-end proof | done |
 | 9 | Docs, `SECURITY-NOTES.md`, `CHANGELOG.md`, `QUESTIONS.md`, draft PR | done |
+| 10 | Dollar's rulings on all ten QUESTIONS applied (2026-09-08) | done |
 
 ## Tests
 
 | Module | Tests | Notes |
 |---|---|---|
 | `gdpr-shredding-core` | 62 | includes 11 Cipher probes and the Testcontainers PostgreSQL suite |
-| `gdpr-shredding-spring-boot-starter` | 12 | 3 Cipher probes |
+| `gdpr-shredding-spring-boot-starter` | 14 | 3 Cipher probes, plus the two startup checks Dollar ruled in |
 | `gdpr-shredding-sample` | 10 | 3 Cipher probes, full Spring Boot context on Testcontainers PostgreSQL |
-| **total** | **84** | |
+| **total** | **86** | |
 
 Nothing is skipped and nothing is `@Disabled`.
 
@@ -97,16 +98,31 @@ Fixed with a `shredding_erased_subject` tombstone holding no key material: the k
 deleted outright, and `mint` refuses for a tombstoned subject. Recorded as QUESTIONS #3, because it
 adds a table Cipher's section does not name.
 
+## Dollar's rulings, 2026-09-08
+
+All ten questions ruled on. What changed in the code:
+
+| # | Ruling | Change |
+|---|---|---|
+| 1 | Converter per field accepted; an annotation processor is a later improvement | note in `docs/index.md` |
+| 2 | Shared chain library after module D | none |
+| 3 | Tombstone accepted in principle, Cipher verifies | `SECURITY-NOTES.md` section, one line in `SPEC.md` Threats |
+| 4 | Ship the per-thread approach; Cipher picks the stricter design | both options written out in QUESTIONS with my recommendation (c); the gap stated as a residual |
+| 5 | No fake sentinel values; WARN listing the fields that cannot carry one | `ShreddedConverter.carriesSentinel()`, `ShreddedModel.fieldsWithoutSentinel()`, WARN in `ShreddingStartupCheck`, one test |
+| 8 | Local-only invalidation accepted for core; Pro gets cluster invalidation | `docs/index.md` section and a free-vs-Pro row |
+| 9 | Add the startup check for records and generated renderings | `ShreddedModel.refuseGeneratedRendering`, one test; sample ArchUnit rule kept as the user reference |
+| 10 | Odin verifies the citations; leave them greppable | three `TODO-CITATION` markers in `docs/index.md` |
+
 ## Open questions
 
-Ten, in `QUESTIONS.md`. The ones that want an answer before Cipher's pass: **#1** (one converter
-class per field, and whether to generate them instead), **#3** (the tombstone), **#4** (the bounded
-map behind subject immutability, and its gap), **#8** (no cross-node cache invalidation in the free
-core) and **#10** (the regulatory citations are unverified placeholders).
+Two are still genuinely open: **#4** (Cipher chooses between a shadow subject column and reading the
+stored blob in `PreUpdate`; my recommendation is the latter) and **#10** (`grep -r TODO-CITATION`
+until Odin returns the EDPB / CNIL / ICO section numbers). The other eight are ruled and applied.
 
 ## Deliberately not done
 
-- No cross-node cache invalidation (QUESTIONS #8); the 60-second window is documented instead.
+- No cross-node cache invalidation (QUESTIONS #8, ruled); the 60-second window is documented
+  instead, and Pro gets invalidation with the KMS adapters.
 - No batch migrator for existing plaintext columns; Pro only, per control 17.
 - No `PostErasureHook` retry scheduler. A failed hook makes the erasure `PARTIAL` and the outcome is
   in the log; who retries it is the application's decision.

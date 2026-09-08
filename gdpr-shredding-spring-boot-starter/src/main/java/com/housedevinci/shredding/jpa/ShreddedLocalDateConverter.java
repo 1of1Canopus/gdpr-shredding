@@ -40,6 +40,12 @@ public abstract class ShreddedLocalDateConverter extends ShreddedConverter<Local
     return null;
   }
 
+  /** No date can stand for "erased"; see {@link ShreddedConverter#carriesSentinel()}. */
+  @Override
+  public boolean carriesSentinel() {
+    return false;
+  }
+
   @Override
   protected boolean isErasedSentinel(LocalDate attribute) {
     return false;

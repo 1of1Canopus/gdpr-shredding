@@ -62,6 +62,20 @@ public abstract class ShreddedConverter<T> implements AttributeConverter<T, byte
   /** True when the value handed back for writing is the erased sentinel this type reads as. */
   protected abstract boolean isErasedSentinel(T attribute);
 
+  /**
+   * Whether this type has a value that can stand for "erased".
+   *
+   * <p>{@code String} and {@code byte[]} do. {@code LocalDate} and {@code BigDecimal} do not: every
+   * date and every number is a legitimate value, and picking {@code 0} or {@code LocalDate.EPOCH}
+   * would make an erased amount indistinguishable from a real zero balance. Those fields read as
+   * {@code null} under the {@code sentinel} policy, and the startup check WARNs with the full list
+   * so nobody discovers it from a null pointer (Dollar's ruling on QUESTIONS #5). Under the {@code
+   * exception} policy they throw like every other type.
+   */
+  public boolean carriesSentinel() {
+    return true;
+  }
+
   @Override
   public final byte[] convertToDatabaseColumn(T attribute) {
     if (attribute == null) {

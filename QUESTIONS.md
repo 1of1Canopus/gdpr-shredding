@@ -1,7 +1,8 @@
 # QUESTIONS — open decisions on the GDPR Shredding free core
 
-Numbered, with the answer I took and why. Anything Dollar or Souhaile disagrees with, say so and I
-will change it; I did not wait on any of these, because none of them blocks the rest of the work.
+Numbered, with the answer I took and why. **Dollar ruled on all ten on 2026-09-08**; each entry
+carries the ruling and what it changed in the code. #4 stays open for Cipher to pick between two
+options, and #10 stays open until Odin returns the citations.
 
 ---
 
@@ -33,6 +34,11 @@ the AAD binds (Cipher's control 2). Without it, a ciphertext can be moved from `
 **Cost.** Two lines of user code per shredded field, cross-checked at startup so a copy-pasted
 converter fails the build rather than binding two fields to one AAD.
 
+**Ruling (Dollar, 2026-09-08): accepted.** Hibernate caches one converter per class, so a two-line
+converter per shredded field is the honest design. An annotation processor that generates them is a
+later improvement, not now. **Applied:** noted as such in `docs/index.md` under "Why one converter
+class per field".
+
 ---
 
 ## #2 A shared chain library (deferred, as instructed)
@@ -44,6 +50,8 @@ subject, and the fact that this chain's key is explicitly never destroyed by an 
 
 **Recommendation.** Extract `housedevinci-chain` after module D, when there are three call sites and
 the shape has stopped moving. Extracting it now would freeze an API on a sample of two.
+
+**Ruling (Dollar, 2026-09-08): agreed, after module D.**
 
 ---
 
@@ -59,8 +67,10 @@ genuinely deleted, and a separate marker records that this subject is erased so 
 This is not the "overwrite then delete" theatre control 6 rejects (that leaves a second heap tuple
 holding the same key); it is the record that makes control 11 enforceable at all.
 
-**Please confirm.** I read it as within the spirit of controls 6 and 11, but it is an addition to
-the data model that Cipher's section does not name.
+**Ruling (Dollar, 2026-09-08): accepted in principle; Cipher verifies it.** **Applied:**
+`SECURITY-NOTES.md` gains a section stating that the tombstone holds no key material and exists only
+so a concurrent writer cannot mint a fresh key for an erased subject, and `SPEC.md`'s Threats
+section gains the case as one line.
 
 ---
 
@@ -75,10 +85,25 @@ resolved subject differs.
 **The gap.** If the entry has been evicted, or the entity is updated in a thread that never loaded
 it (a detached merge from another request), the check cannot fire and the update is allowed.
 
-**Options.** (a) accept it and document it, which is what I have done; (b) require entities with
-`@Shredded` fields to carry a `@Version` and stash the subject in a shadow column, which changes the
-user's schema; (c) read the stored blob in `PreUpdate` with a second query, which costs a round trip
-per shredded update. I would take (a) for the free core and (b) or (c) as a Pro strictness mode.
+**The two stricter options, for Cipher to choose between.**
+
+- **(b) A shadow subject column.** The entity carries a persistent column holding the subject
+  captured at first persist; `PreUpdate` compares against the loaded value, which is always present
+  because it came out of the row. Cost: it changes the user's schema and adds a column to every
+  shredded entity. Benefit: the check can never fail to fire, in any thread, detached or not.
+- **(c) Read the stored blob in `PreUpdate`.** A second query fetches the row's current ciphertext
+  and decodes the subject from its header, which is already there. Cost: one extra round trip per
+  shredded update, on the hot path. Benefit: no schema change, and it is correct for detached
+  merges too.
+
+**My recommendation: (c).** The blob already carries the subject, so (c) needs no new state
+anywhere and cannot drift out of sync with the ciphertext the way a shadow column can. The round
+trip is on updates to shredded entities only, and it can be skipped entirely when no shredded field
+is dirty. (b)'s schema change is the kind of thing that stops a team adopting the library.
+
+**Ruling (Dollar, 2026-09-08): ship the per-thread approach now; Cipher picks between (b) and (c)
+in its pass.** **Applied:** both options are written out above with my recommendation, and the gap
+is stated as a residual in `SECURITY-NOTES.md` until Cipher decides.
 
 ---
 
@@ -88,8 +113,14 @@ There is no `LocalDate` or `BigDecimal` value that means "erased". Those two typ
 after an erasure whatever `shredding.erased-value.policy` says. I refused to use `0` or
 `LocalDate.EPOCH`: a zero balance is a fact and an erased balance is not.
 
-Documented in the Javadoc and in `docs/index.md`. If Dollar prefers, the alternative is to require
-those fields to be boxed and force the `exception` policy for them.
+Documented in the Javadoc and in `docs/index.md`.
+
+**Ruling (Dollar, 2026-09-08): accepted, no fake sentinel values.** The rule is: under policy
+`sentinel` those types read as `null` **and the startup scan logs a WARN listing every shredded
+field whose type cannot carry a sentinel**; under policy `exception` they throw like the others.
+**Applied:** `ShreddedConverter.carriesSentinel()` (false on the `LocalDate` and `BigDecimal` base
+classes), `ShreddedModel.fieldsWithoutSentinel()`, and the WARN in `ShreddingStartupCheck`, covered
+by `the_scan_names_the_fields_whose_type_cannot_carry_a_sentinel`.
 
 ---
 
@@ -127,6 +158,10 @@ It does **not** publish a cluster-wide invalidation, because core has no message
 which the proof of erasure states - and put the cross-node invalidation in Pro alongside the KMS
 adapters.
 
+**Ruling (Dollar, 2026-09-08): accepted for core; Pro gets cluster invalidation with the KMS
+adapters.** **Applied:** `docs/index.md` gains a "The cross-node cache window" section and a row in
+the free-versus-Pro table.
+
 ---
 
 ## #9 The `toString` leak rule is a sample-level ArchUnit test (taken)
@@ -138,8 +173,14 @@ its users' builds.
 
 **Recommendation.** Ship the rule as a documented snippet users paste into their own test sources
 (the sample is that snippet), and add the record check to the startup scan so at least the worst
-case - an entity that is a record - fails without any test at all. I have not added that startup
-check yet; say the word and it is four lines.
+case - an entity that is a record - fails without any test at all.
+
+**Ruling (Dollar, 2026-09-08): add the startup check; keep the ArchUnit rule in the sample as the
+reference for users.** **Applied:** `ShreddedModel.refuseGeneratedRendering` fails startup for a
+`@Shredded` entity that is a record or is annotated `@Data`, `@Value`, `@ToString` or
+`@EqualsAndHashCode` - all of which generate a rendering over every field. Covered by
+`a_record_entity_with_a_shredded_field_fails_startup`. The sample's ArchUnit rule stays as the
+copyable reference for the cases only the user's own code can see.
 
 ---
 
@@ -147,5 +188,9 @@ check yet; say the word and it is four lines.
 
 `docs/index.md` names EDPB Guidelines 5/2019, the CNIL's encryption guidance and the ICO's right-to-
 erasure page. The acceptance check asks for exact section numbers and links. I have not verified the
-section numbers, and I will not invent them. Someone with the documents open needs to fill them in
-before the article and the launch.
+section numbers, and I will not invent them.
+
+**Ruling (Dollar, 2026-09-08): Odin is verifying the EDPB / CNIL / ICO section numbers; leave the
+placeholders greppable.** **Applied:** the three citations in `docs/index.md` are prefixed
+`TODO-CITATION`, so `grep -r TODO-CITATION` finds every one and none can ship by accident. Open
+until Odin returns.

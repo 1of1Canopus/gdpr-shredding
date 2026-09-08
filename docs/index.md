@@ -40,9 +40,18 @@ The startup scan cross-checks every `@Shredded` field against the `@Convert` tha
 refuses to start if the names disagree. Base classes ship for `String`, `byte[]`, `LocalDate`,
 `BigDecimal` and JSON-as-`String`.
 
-`LocalDate` and `BigDecimal` have no value that can stand for "erased", so an erased date or amount
-reads as `null` whatever `shredding.erased-value.policy` says. `0` is deliberately not used: a zero
-balance is a fact and an erased balance is not.
+> Two lines per field is boilerplate, and we know it. An annotation processor that generates these
+> converters from `@Shredded` alone is a later improvement, deliberately not in this release: the
+> generated code would sit in the one part of the module that has to be obviously correct, and it
+> buys convenience rather than a control. (Dollar's ruling on QUESTIONS #1, 2026-09-08.)
+
+`LocalDate` and `BigDecimal` have no value that can stand for "erased". `0` and `LocalDate.EPOCH`
+are deliberately not used: a zero balance is a fact and an erased balance is not. The rule is:
+
+- under `shredding.erased-value.policy=sentinel` those fields read as `null`, and the startup check
+  logs a WARN **naming every shredded field whose type cannot carry a sentinel**, so nobody
+  discovers it from a null pointer;
+- under `shredding.erased-value.policy=exception` they throw like every other type.
 
 ## How the write path finds the data subject
 
@@ -146,6 +155,28 @@ must re-verify by decrypting the candidates - see `CustomerService.findByEmail` 
 
 An erasure nulls the erased subject's blind-index columns. That is not configurable.
 
+## The cross-node cache window
+
+An erasure evicts the local unwrapped-key cache immediately. It does **not** publish a cluster-wide
+invalidation in the free core, so another node may still read the erased subject's data for up to
+`shredding.data-key-cache.ttl` (default 60s). That window is documented here, appears in
+`SECURITY-NOTES.md`, and is implied by the `completeInBackupsAt` date the erasure record carries.
+Cluster-wide invalidation ships in Pro alongside the KMS adapters.
+
+## What fails at startup
+
+- a `@Shredded` field with no `@Convert`, or one whose converter names another entity or field;
+- a `@Shredded` entity that is `@Cacheable`/`@Cache`, unless `shredding.allow-second-level-cache=true`;
+- a `@Shredded` entity that is a **record**, or is annotated `@Data`, `@Value`, `@ToString` or
+  `@EqualsAndHashCode`: all of those generate a rendering over every field, so the decrypted value
+  reaches the first log line that prints the entity. The sample ships an ArchUnit rule you can copy
+  into your own test sources for the cases only your code can see;
+- a subject expression that does not parse, or that reaches a bean, a static type, a constructor or
+  a method call;
+- a missing, short, non-base64 or sample-looking `shredding.master-key`;
+- a missing `shredding.erasure-log.hmac-secret` without `unkeyed=true`, or both at once;
+- `shredding.crypto.max-encryptions-per-key` above 2^32.
+
 ## Health
 
 The health contributor reports `DOWN` when the key store is unreachable, and includes the erasure
@@ -166,17 +197,22 @@ application that is merely returning erased values.
 | Admin UI: subjects, keys, erasure log, verification endpoint | - | yes |
 | Retention rules (auto-erase after N days) | - | yes |
 | Batch migrator for existing plaintext columns | - | yes |
+| Cluster-wide data-key cache invalidation | - | yes |
 
 ## Regulatory references
 
-- EDPB Guidelines 5/2019 on the right to be forgotten in search engine cases, and the EDPB's
-  position that data rendered irreversibly unreadable is no longer personal data in practice.
-- CNIL, "Chiffrement, hachage, signature" and its guidance on anonymisation versus pseudonymisation.
-- ICO, "Right to erasure" and its guidance on what "putting data beyond use" requires.
+- `TODO-CITATION` EDPB Guidelines 5/2019, section and paragraph, on the right to be forgotten, and
+  the EDPB's position that data rendered irreversibly unreadable is no longer personal data in
+  practice.
+- `TODO-CITATION` CNIL, "Chiffrement, hachage, signature", page and section, and its guidance on
+  anonymisation versus pseudonymisation.
+- `TODO-CITATION` ICO, "Right to erasure", section, and its guidance on what "putting data beyond
+  use" requires.
 
-These are pointers for your DPO, not legal advice, and the exact citations are checked before each
-release. What this library can attest to is stated in `SECURITY-NOTES.md`, and it is narrower than
-"the data is gone".
+The section numbers and links are being verified by Odin and are marked `TODO-CITATION` until then,
+so they are greppable and cannot ship by accident. They are pointers for your DPO, not legal advice.
+What this library can attest to is stated in `SECURITY-NOTES.md`, and it is narrower than "the data
+is gone".
 
 ## FAQ
 

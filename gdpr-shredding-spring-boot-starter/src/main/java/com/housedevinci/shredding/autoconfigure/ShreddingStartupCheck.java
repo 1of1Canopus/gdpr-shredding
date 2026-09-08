@@ -48,6 +48,17 @@ public final class ShreddingStartupCheck implements InitializingBean {
               + " from one that was never filled in, and application code cannot tell the"
               + " difference. Prefer sentinel or exception.");
     }
+    if (properties.getErasedValue().getPolicy() == ErasedValuePolicy.SENTINEL
+        && !model.fieldsWithoutSentinel().isEmpty()) {
+      // Dollar's ruling on QUESTIONS #5: no fake sentinel values, but nobody should discover this
+      // from a null pointer at three in the morning.
+      log.warn(
+          "shredding: shredding.erased-value.policy=sentinel, but these field(s) have a type with"
+              + " no value that can stand for \"erased\" and will read as null once their subject"
+              + " is erased: {}. Set shredding.erased-value.policy=exception if the application"
+              + " cannot tell an erased value from one that was never filled in.",
+          String.join(", ", model.fieldsWithoutSentinel()));
+    }
     if (properties.getErasureLog().isUnkeyed()) {
       log.warn(
           "shredding: shredding.erasure-log.unkeyed=true. The erasure log's integrity rests only on"

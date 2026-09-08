@@ -32,6 +32,7 @@ public final class ShreddedModel {
       String entityName,
       String fieldName,
       SubjectExpression subject,
+      boolean carriesSentinel,
       SubjectExpression tenant) {}
 
   /** One blind-index column and the shredded field it indexes. */
@@ -72,6 +73,14 @@ public final class ShreddedModel {
     return shreddedFields.size();
   }
 
+  /** Fields whose type has no value that can stand for "erased" (QUESTIONS #5). */
+  public List<String> fieldsWithoutSentinel() {
+    return shreddedFields.stream()
+        .filter(f -> !f.carriesSentinel())
+        .map(f -> f.entityName() + "." + f.fieldName())
+        .toList();
+  }
+
   public Map<String, List<ShreddedField>> byEntityName() {
     var map = new LinkedHashMap<String, List<ShreddedField>>();
     shreddedFields.forEach(f -> map.computeIfAbsent(f.entityName(), k -> new ArrayList<>()).add(f));
@@ -106,13 +115,14 @@ public final class ShreddedModel {
         if (Modifier.isStatic(field.getModifiers())) {
           throw config("@Shredded on " + where + " must be an instance field");
         }
-        requireMatchingConverter(field, entityName, where);
+        ShreddedConverter<?> converter = requireMatchingConverter(field, entityName, where);
         shredded.add(
             new ShreddedField(
                 type,
                 entityName,
                 field.getName(),
                 new SubjectExpression(where, annotation.subject()),
+                converter.carriesSentinel(),
                 annotation.tenant().isBlank()
                     ? null
                     : new SubjectExpression(where, annotation.tenant())));
@@ -154,6 +164,7 @@ public final class ShreddedModel {
 
       if (!shreddedHere.isEmpty()) {
         refuseSecondLevelCache(type, entityName, allowSecondLevelCache);
+        refuseGeneratedRendering(type, entityName);
       }
     }
     return new ShreddedModel(shredded, indexes);
@@ -164,7 +175,8 @@ public final class ShreddedModel {
    * AAD binds a value to a pair that does not describe where it lives. A copy-pasted converter is
    * the obvious way to get this wrong, so it is checked rather than trusted.
    */
-  private static void requireMatchingConverter(Field field, String entityName, String where) {
+  private static ShreddedConverter<?> requireMatchingConverter(
+      Field field, String entityName, String where) {
     Convert convert = field.getAnnotation(Convert.class);
     if (convert == null
         || Void.class.equals(convert.converter())
@@ -217,6 +229,7 @@ public final class ShreddedModel {
               + "). The pair is bound into the AAD, so it must describe where the value actually"
               + " lives.");
     }
+    return converter;
   }
 
   /**
@@ -235,6 +248,38 @@ public final class ShreddedModel {
               + " the decrypted value after the subject's key is destroyed, so the erasure is"
               + " invisible until the cache region is evicted. Remove the cache annotation, or set"
               + " shredding.allow-second-level-cache=true and accept that residual in writing.");
+    }
+  }
+
+  /**
+   * Control 12, the half that can be checked without running anything: a class that generates
+   * {@code toString}, {@code equals} and {@code hashCode} over every field cannot hold a
+   * {@code @Shredded} one.
+   *
+   * <p>A record does exactly that, by language rule. Lombok's {@code @Data}, {@code @Value} and
+   * {@code @ToString} do the same at compile time. Either way the decrypted value ends up in the
+   * first log line that interpolates the entity, and a log line outlives the erasure. The sample
+   * ships an ArchUnit rule users can copy for the cases only their own code can see; this check
+   * fires with no test at all (Dollar's ruling on QUESTIONS #9).
+   */
+  private static void refuseGeneratedRendering(Class<?> type, String entityName) {
+    if (type.isRecord()) {
+      throw config(
+          entityName
+              + " has @Shredded fields and is a record. A record generates toString, equals and"
+              + " hashCode over every component, so the decrypted value reaches the first log line"
+              + " that renders it. Use a class with a toString that prints identifiers only.");
+    }
+    for (String generator :
+        List.of("lombok.Data", "lombok.Value", "lombok.ToString", "lombok.EqualsAndHashCode")) {
+      if (hasAnnotation(type, generator)) {
+        throw config(
+            entityName
+                + " has @Shredded fields and is annotated @"
+                + generator.substring(generator.lastIndexOf('.') + 1)
+                + ", which generates a rendering over every field. Write the toString by hand and"
+                + " print identifiers only, or exclude the shredded fields explicitly.");
+      }
     }
   }
 

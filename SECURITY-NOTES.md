@@ -65,6 +65,36 @@ email address a full-width index would be an offline dictionary outright. Two co
 
 Do not put a blind index on a field you do not actually query by.
 
+### The data subject of a persisted row is only checked when this process loaded it
+Control 14 forbids a persisted row's data subject from changing: re-encrypting under another
+subject's key would move the row out of the first subject's erasure scope, so their erasure would
+leave it readable. Hibernate's `PreUpdateEvent` carries the hydrated Java state, not the stored
+blob, so the previous subject cannot be read back from the row at that moment. The listener instead
+remembers the subject each row loaded (or was inserted) under, in a per-thread map bounded to
+10 000 entries, and refuses an update whose resolved subject differs.
+
+The gap: if that entry has been evicted, or the entity is merged in a thread that never loaded it -
+a detached object arriving from another request, say - the check cannot fire and the update is
+allowed. This is a residual until Cipher chooses one of the two stricter designs in QUESTIONS #4
+(a shadow subject column, or reading the stored blob in `PreUpdate` at the cost of a round trip per
+shredded update).
+
+### Erased subjects are tombstoned, and the tombstone holds no key material
+`shredding_erased_subject` records `(tenant, subject, erased_at)` and nothing else. There is no key
+in it, wrapped or otherwise: the key rows are deleted outright, exactly as control 6 requires, and
+this table is not a copy of them.
+
+It exists for one reason. A write that was merely blocked on the erasure's `SELECT ... FOR UPDATE`
+resumes the moment the erasure commits, finds no key row, concludes the subject has no key yet, and
+mints a fresh one - undoing the erasure inside a millisecond, with nothing in the erasure log to say
+so. Found by `probe_concurrent_write_encrypts_under_a_destroying_key`. With the tombstone,
+`JdbcKeyProvider.mint` refuses for an erased subject and the racing write fails with
+`SHRED-ERASED-001`.
+
+The tombstone is therefore part of what makes control 11 enforceable at all, not a weakening of
+control 6. It does mean the set of erased subject ids is retained: an id, never a key, and the same
+id the audit and accounting rows already carry, which is the whole point of the technique.
+
 ### What a proof of erasure attests
 That a key was destroyed and when, chained and anchored so a later rewrite is detectable. It does
 **not** attest that no plaintext copy exists in an application log, a CSV export, a search index, a
@@ -95,6 +125,8 @@ support ticket or a PDF the application itself produced. Those are the applicati
 | Half-migrated plaintext column | core refuses it; the batch migrator is Pro (control 17) |
 | Crypto supply chain | JDK only, no BouncyCastle, no provider install (control 18) |
 | Erasure reported complete while work is outstanding | a failed hook makes it `PARTIAL` (control 19) |
+| A racing write minting a fresh key for an erased subject | the `shredding_erased_subject` tombstone, holding no key material (QUESTIONS #3) |
+| A decrypted value reaching a generated `toString` | a record or Lombok-rendered `@Shredded` entity fails startup (QUESTIONS #9) |
 
 ## Operating notes
 

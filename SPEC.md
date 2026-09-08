@@ -25,7 +25,7 @@ When a person asks to be forgotten, GDPR says delete; audit, accounting and AML 
 `SubjectId` · `DataKey {subjectId, version, wrappedKey, createdAt, destroyedAt}` · `ErasureRecord` · `EncryptedValue {version, nonce, ciphertext, tag}` (self-describing binary format with a version byte; document the format).
 
 ## Threats
-Key material in heap dumps/logs (zeroise byte arrays; never `String` for keys; log-scan test); nonce reuse (random per value, test for uniqueness at scale); AAD omission (entity/field binding mandatory); backups containing keys (docs: back up the keys table separately, or use KMS); erasure race with in-flight writes (erase marks key `DESTROYING` first; writes fail with typed error); master-key loss (docs + `--dry-run` check in a startup health indicator).
+Key material in heap dumps/logs (zeroise byte arrays; never `String` for keys; log-scan test); nonce reuse (random per value, test for uniqueness at scale); AAD omission (entity/field binding mandatory); backups containing keys (docs: back up the keys table separately, or use KMS); erasure race with in-flight writes (erase marks key `DESTROYING` first; writes fail with typed error); master-key loss (docs + `--dry-run` check in a startup health indicator); a write racing an erasure that finds the key row already deleted and mints a fresh key for the erased subject, undoing the erasure with nothing in the log to say so (closed by the `shredding_erased_subject` tombstone, which holds no key material; Dollar's ruling on QUESTIONS #3, 2026-09-08).
 
 ### Cipher spec review (2026-09-08)
 

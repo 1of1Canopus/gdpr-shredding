@@ -122,6 +122,84 @@ class CipherProbeStartupTest {
         .hasMessageContaining("has no @Convert");
   }
 
+  @Converter
+  public static class DateOfBirthConverter
+      extends com.housedevinci.shredding.jpa.ShreddedLocalDateConverter {
+    public DateOfBirthConverter() {
+      super("Patient", "dateOfBirth");
+    }
+  }
+
+  @Converter
+  public static class BalanceConverter
+      extends com.housedevinci.shredding.jpa.ShreddedBigDecimalConverter {
+    public BalanceConverter() {
+      super("Patient", "balance");
+    }
+  }
+
+  @Entity(name = "Patient")
+  @Table(name = "patient")
+  static class Patient {
+    @Id Long id;
+
+    @Shredded(subject = "#{id}")
+    @Convert(converter = DateOfBirthConverter.class)
+    @Column(name = "date_of_birth")
+    java.time.LocalDate dateOfBirth;
+
+    @Shredded(subject = "#{id}")
+    @Convert(converter = BalanceConverter.class)
+    @Column(name = "balance")
+    java.math.BigDecimal balance;
+
+    @Override
+    public String toString() {
+      return "Patient[" + id + "]";
+    }
+  }
+
+  @Entity(name = "RecordCustomer")
+  @Table(name = "record_customer")
+  record RecordCustomer(
+      @Id Long id,
+      @Shredded(subject = "#{id}")
+          @Convert(converter = RecordCustomerEmailConverter.class)
+          @Column(name = "email")
+          String email) {}
+
+  @Converter
+  public static class RecordCustomerEmailConverter extends ShreddedStringConverter {
+    public RecordCustomerEmailConverter() {
+      super("RecordCustomer", "email");
+    }
+  }
+
+  /**
+   * Dollar's ruling on QUESTIONS #5: no fake sentinel values, but the operator is told which fields
+   * will read as null before they find out from a null pointer.
+   */
+  @Test
+  void the_scan_names_the_fields_whose_type_cannot_carry_a_sentinel() {
+    var model = ShreddedModel.scan(List.of(Patient.class, Customer.class), false);
+
+    assertThat(model.fieldsWithoutSentinel())
+        .containsExactlyInAnyOrder("Patient.dateOfBirth", "Patient.balance");
+    assertThat(model.fieldCount()).isEqualTo(3);
+  }
+
+  /**
+   * Dollar's ruling on QUESTIONS #9: the record and Lombok cases fire at startup, with no test in
+   * the user's build. A record generates toString, equals and hashCode over every component, so a
+   * decrypted value reaches the first log line that renders the entity.
+   */
+  @Test
+  void a_record_entity_with_a_shredded_field_fails_startup() {
+    assertThatThrownBy(() -> ShreddedModel.scan(List.of(RecordCustomer.class), false))
+        .isInstanceOf(ShreddingException.class)
+        .hasMessageContaining("is a record");
+  }
+
   @Test
   void the_model_reports_fields_entities_and_blind_index_columns() {
     var model = ShreddedModel.scan(List.of(Customer.class), false);

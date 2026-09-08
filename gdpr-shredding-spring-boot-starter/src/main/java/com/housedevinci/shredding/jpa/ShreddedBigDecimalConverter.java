@@ -39,6 +39,12 @@ public abstract class ShreddedBigDecimalConverter extends ShreddedConverter<BigD
     return null;
   }
 
+  /** No number can stand for "erased"; see {@link ShreddedConverter#carriesSentinel()}. */
+  @Override
+  public boolean carriesSentinel() {
+    return false;
+  }
+
   @Override
   protected boolean isErasedSentinel(BigDecimal attribute) {
     return false;

@@ -42,6 +42,12 @@ All notable changes to this project. The format follows
   blind index's equality oracle.
 - Hand-written HKDF (RFC 5869) verified against the standard's own vectors. Zero crypto
   dependencies in `-core`.
+- A `@Shredded` entity that is a record, or is annotated `@Data`, `@Value`, `@ToString` or
+  `@EqualsAndHashCode`, fails startup: all of those generate a rendering over every field, so a
+  decrypted value reaches the first log line that prints the entity.
+- Under `shredding.erased-value.policy=sentinel`, the startup check WARNs naming every shredded
+  field whose type has no value that can stand for "erased" (`LocalDate`, `BigDecimal`), which read
+  as `null`. No fake sentinel is invented for them.
 
 ### Security
 
