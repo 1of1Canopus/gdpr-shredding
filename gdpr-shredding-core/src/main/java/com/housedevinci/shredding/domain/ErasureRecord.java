@@ -1,6 +1,7 @@
 package com.housedevinci.shredding.domain;
 
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Objects;
 
@@ -9,6 +10,14 @@ import java.util.Objects;
  *
  * <p>The subject appears only as a pseudonym ({@link Pseudonymiser}, control 9). The log survives
  * the erasure it records, so it must not itself become a copy of the personal data.
+ *
+ * <p><b>Both instants are truncated to {@link #STORAGE_PRECISION}.</b> They are part of the hashed
+ * material, and hashed material may only hold values the store gives back unchanged: PostgreSQL's
+ * {@code timestamptz} holds microseconds and <em>rounds</em> anything finer, so a nanosecond
+ * timestamp comes back as a different instant and the trail reads {@code BROKEN} although nobody
+ * touched it. Truncating here, in the value object, means the record in memory and the record in
+ * the database are the same record whatever precision the caller's {@code Clock} has. Truncation
+ * rather than rounding, so an erasure is never timestamped later than it happened.
  *
  * @param sequence position in the trail, assigned by the store
  * @param timestamp when the erasure committed
@@ -47,6 +56,12 @@ public record ErasureRecord(
     String prevHash,
     String hash) {
 
+  /**
+   * The finest resolution the erasure log can store and reproduce. PostgreSQL {@code timestamptz}
+   * is microsecond-precision; so is every other store this record is likely to reach.
+   */
+  public static final ChronoUnit STORAGE_PRECISION = ChronoUnit.MICROS;
+
   public ErasureRecord {
     Objects.requireNonNull(timestamp, "timestamp");
     Objects.requireNonNull(tenant, "tenant");
@@ -56,6 +71,8 @@ public record ErasureRecord(
     requestedBy = requestedBy == null ? "" : requestedBy;
     reason = reason == null ? "" : reason;
     hookOutcomes = List.copyOf(hookOutcomes == null ? List.of() : hookOutcomes);
+    timestamp = timestamp.truncatedTo(STORAGE_PRECISION);
+    backupRetentionUntil = backupRetentionUntil.truncatedTo(STORAGE_PRECISION);
   }
 
   /** A fresh, unlinked record: the store fills in sequence, version, key id, prevHash and hash. */

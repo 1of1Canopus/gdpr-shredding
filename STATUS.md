@@ -17,15 +17,17 @@ Full `./mvnw -B clean verify` green with Docker up.
 | 8 | Sample: customer, audit table, erasure endpoint, end-to-end proof | done |
 | 9 | Docs, `SECURITY-NOTES.md`, `CHANGELOG.md`, `QUESTIONS.md`, draft PR | done |
 | 10 | Dollar's rulings on all ten QUESTIONS applied (2026-09-08) | done |
+| 11 | Odin's regulatory corrections and the wording rule | done |
+| 12 | CI green-locally / red-on-CI bug found and fixed (see below) | done |
 
 ## Tests
 
 | Module | Tests | Notes |
 |---|---|---|
-| `gdpr-shredding-core` | 62 | includes 11 Cipher probes and the Testcontainers PostgreSQL suite |
+| `gdpr-shredding-core` | 68 | includes 11 Cipher probes and the Testcontainers PostgreSQL suite |
 | `gdpr-shredding-spring-boot-starter` | 14 | 3 Cipher probes, plus the two startup checks Dollar ruled in |
 | `gdpr-shredding-sample` | 10 | 3 Cipher probes, full Spring Boot context on Testcontainers PostgreSQL |
-| **total** | **86** | |
+| **total** | **92** | |
 
 Nothing is skipped and nothing is `@Disabled`.
 
@@ -87,6 +89,50 @@ first draft, RED was demonstrated by removing the control and re-running (eviden
   `SECURITY-NOTES.md` did not yet exist to state the residual.
 - `probe_concurrent_write_encrypts_under_a_destroying_key`: failed against the implementation as
   designed - see below.
+
+## The CI-only failure, 2026-09-08 (run 34240131889, HEAD `8f3e0fb`)
+
+**Symptom.** `CipherProbeJdbcTest.the_erasure_record_chain_verifies_end_to_end` expected `INTACT`
+and got `BROKEN` on GitHub Actions, while `./mvnw -B clean verify` was green on the developer's
+machine.
+
+**Root cause.** `ErasureRecord.timestamp` and `backupRetentionUntil` are inside the hashed material,
+and PostgreSQL's `timestamptz` holds **microseconds** and *rounds* anything finer. A nanosecond
+`Instant` therefore came back out of the column as a different instant
+(`...123456789Z` was stored and read back as `...123457Z`), so the verifier recomputed a different
+hash from a row nobody had touched. It never failed locally because **macOS's `Clock.systemUTC()`
+is microsecond-precision while Linux's is nanosecond**: the developer's clock could not produce the
+input that triggers it.
+
+**Ruled out first, with evidence, before changing anything:** the probe reads no environment
+variables (the HMAC secret and key id are hard-coded in the test); the canonical form contains no
+locale- or zone-sensitive formatting (`Instant.toString` is ISO-8601 UTC, and this machine runs
+`fr_FR`/`Europe/Paris` and was green); it has no newlines, so line endings cannot reach it; the
+Postgres image is pinned by the same digest on both sides; and `@BeforeEach` drops and recreates
+every table, so there is no shared state or ordering effect between the class's tests.
+
+**`java.lang.IllegalStateException: index unreachable` in the same CI log is a red herring.** It is
+the deliberate hook fixture in `CipherProbeErasureTest.probe_a_failed_post_erasure_hook_reports_complete`,
+logged with its stack trace by `ErasureService` at WARN because that is what a failed hook is
+supposed to do. It is expected output of a passing test.
+
+**Fix.** `ErasureRecord` truncates both instants to `STORAGE_PRECISION` (`ChronoUnit.MICROS`) in its
+compact constructor, so hashed material can only ever hold values the store gives back unchanged,
+whatever precision the caller's `Clock` has. Truncation and not rounding, so an erasure is never
+timestamped later than it happened.
+
+**Tests that would have caught it**, both RED before the fix:
+
+- `ErasureRecordPrecisionTest` (core, no database, runs everywhere): the record holds only
+  microsecond precision, two records differing below a microsecond hash identically, truncation
+  never moves a timestamp forward, and `withChain`/`withSequence` preserve it.
+- `CipherProbeJdbcTest.the_chain_survives_a_nanosecond_precision_clock`: drives the erasure with an
+  **explicit nanosecond-precision `Clock`** rather than the system clock, so the CI condition is
+  reproduced on every machine, and asserts the read-back record equals the written one field for
+  field, not just that the verifier is happy.
+
+The lesson generalises: anything inside hashed material must survive its column type exactly, and a
+test must not depend on the host clock's resolution to produce the interesting input.
 
 ## The one real bug the probes found
 

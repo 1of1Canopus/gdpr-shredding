@@ -24,6 +24,9 @@ import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -268,6 +271,60 @@ class CipherProbeJdbcTest {
     }
     cache.evictSubject(TENANT, subject);
     assertThat(cipher.decrypt("Customer", "email", blob, ErasedValuePolicy.SENTINEL)).isEmpty();
+  }
+
+  /**
+   * The chain has to survive the round trip through the column type, not only through memory.
+   *
+   * <p>PostgreSQL's {@code timestamptz} holds microseconds and rounds anything finer, so a
+   * nanosecond timestamp comes back as a different instant and the recomputed hash no longer
+   * matches. The clock is nanosecond-precision here on purpose: macOS's {@code Clock.systemUTC()}
+   * is only microsecond-precision, so with the system clock this passes on a developer's machine
+   * and fails on Linux CI, which is exactly what happened.
+   */
+  @Test
+  void the_chain_survives_a_nanosecond_precision_clock() {
+    Instant nanos = Instant.parse("2026-09-08T10:00:00.123456789Z");
+    Clock nanoClock =
+        new Clock() {
+          @Override
+          public ZoneId getZone() {
+            return ZoneOffset.UTC;
+          }
+
+          @Override
+          public Clock withZone(ZoneId zone) {
+            return this;
+          }
+
+          @Override
+          public Instant instant() {
+            return nanos;
+          }
+        };
+    var store = store(List.of());
+    var service =
+        new ErasureService(
+            store,
+            cache,
+            new Pseudonymiser(SECRET),
+            List.of(),
+            Duration.ofDays(30),
+            nanoClock,
+            1,
+            2);
+    SubjectId subject = SubjectId.of("s-nanos");
+    cipher.encrypt(TENANT, subject, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
+
+    var written =
+        service.erase(new ErasureRequest(TENANT, subject, "dpo", "art 17")).records().get(0);
+    var readBack = store.readAfter(written.sequence() - 1, 1).get(0);
+
+    assertThat(readBack)
+        .as("what comes back out of the column must be what went in, field for field")
+        .isEqualTo(written);
+    assertThat(new ErasureChainVerifier(store, store, Map.of("k1", SECRET)).verify().status())
+        .isEqualTo(ErasureChainVerifier.Status.INTACT);
   }
 
   @Test
