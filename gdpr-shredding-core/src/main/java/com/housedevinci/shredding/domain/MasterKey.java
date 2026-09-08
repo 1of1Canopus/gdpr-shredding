@@ -56,10 +56,13 @@ public final class MasterKey {
               + " supplied through the environment. There is no default and none is generated.");
     }
     String trimmed = base64.strip();
+    // Exact-token match, not a substring search: REFUSED lists whole sample values, and a
+    // substring match would refuse a genuine random key that merely happens to contain one of
+    // them somewhere in its base64 (I2's "the list must not grow shorter entries" caveat is what
+    // a substring match would otherwise depend on forever).
+    String normalised = trimmed.toLowerCase(java.util.Locale.ROOT);
     for (String refused : REFUSED) {
-      if (trimmed
-          .toLowerCase(java.util.Locale.ROOT)
-          .contains(refused.toLowerCase(java.util.Locale.ROOT))) {
+      if (normalised.equals(refused.toLowerCase(java.util.Locale.ROOT))) {
         throw new ShreddingException(
             ErrorCodes.CONFIG,
             property

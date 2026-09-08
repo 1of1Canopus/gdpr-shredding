@@ -94,6 +94,9 @@
     <central-publishing.version>0.11.0</central-publishing.version>
     <maven-gpg.version>3.2.8</maven-gpg.version>
     <jacoco.minimum.line>0.80</jacoco.minimum.line>
+    <!-- The sample's smoke gate (L2): proves the end-to-end test actually exercises the sample
+         application, not a quality bar for a reference app the way 80% is for the library. -->
+    <jacoco.minimum.sample>0.30</jacoco.minimum.sample>
   </properties>
 
   <dependencyManagement>
@@ -201,6 +204,48 @@
       <plugin>
         <groupId>com.diffplug.spotless</groupId>
         <artifactId>spotless-maven-plugin</artifactId>
+      </plugin>
+      <!--
+        L2: declared here, in <build><plugins> (not merely <pluginManagement>), so every module
+        inherits and actually runs it - core, the starter and the sample all now produce a
+        jacoco.csv and are all held to the 80% line minimum by default. gdpr-shredding-sample/pom.xml
+        overrides the "check" execution's minimum down to a smoke gate: a reference application
+        exercised end-to-end by one test class is not held to the same bar as the library that
+        implements the security controls, but it must not silently report no coverage at all either.
+      -->
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>prepare</id>
+            <goals><goal>prepare-agent</goal></goals>
+          </execution>
+          <execution>
+            <id>report</id>
+            <phase>verify</phase>
+            <goals><goal>report</goal></goals>
+          </execution>
+          <execution>
+            <id>check</id>
+            <phase>verify</phase>
+            <goals><goal>check</goal></goals>
+            <configuration>
+              <rules>
+                <rule>
+                  <element>BUNDLE</element>
+                  <limits>
+                    <limit>
+                      <counter>LINE</counter>
+                      <value>COVEREDRATIO</value>
+                      <minimum>${jacoco.minimum.line}</minimum>
+                    </limit>
+                  </limits>
+                </rule>
+              </rules>
+            </configuration>
+          </execution>
+        </executions>
       </plugin>
       <plugin>
         <groupId>org.codehaus.mojo</groupId>

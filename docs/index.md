@@ -46,6 +46,13 @@ The startup scan cross-checks every `@Shredded` field against the `@Convert` tha
 refuses to start if the names disagree. Base classes ship for `String`, `byte[]`, `LocalDate`,
 `BigDecimal` and JSON-as-`String`.
 
+> **`ShreddedBytesConverter` (the `byte[]` base class) is not production-ready.** An entity with a
+> `byte[]` `@Shredded` field and `@GeneratedValue(strategy = GenerationType.IDENTITY)` refuses its
+> own first insert with `SHRED-CONTEXT-001`: Hibernate deep-copies a mutable attribute's value to
+> build the entity's dirty-checking snapshot, which calls the converter a second time outside the
+> write-path bracket. See QUESTIONS.md #15. Use `String`, `LocalDate`, `BigDecimal` or the JSON
+> converter until this is fixed and covered by a regression test.
+
 > Two lines per field is boilerplate, and we know it. An annotation processor that generates these
 > converters from `@Shredded` alone is a later improvement, deliberately not in this release: the
 > generated code would sit in the one part of the module that has to be obviously correct, and it
@@ -104,12 +111,15 @@ There is no fail-open property anywhere in this module.
 | `SHRED-ERASED-001` | a write was attempted for a subject whose key is `DESTROYING`, `DESTROYED` or tombstoned |
 | `SHRED-CONTEXT-001` | a converter ran with no write context |
 | `SHRED-SUBJECT-IMMUTABLE` | the data subject of a persisted row changed |
-| `SHRED-KEY-EXHAUSTED` | the per-key encryption limit was reached |
+| `SHRED-SUBJECT-MISMATCH` | a stored value's header names a different subject or tenant than the row it was read from - a ciphertext moved between rows (CIPHER-01) |
 | `SHRED-TENANT-MISSING` | no tenant in context, and there is no default tenant |
 | `SHRED-CONFIG-001` | misconfiguration, naming the property |
 | `SHRED-ERASURE-002` | the erasure log has rows but no anchor row |
 | `SHRED-ERASURE-003` | this instance's keyed/unkeyed mode disagrees with the trail |
 | `SHRED-INVALID-001` | boundary validation failed |
+
+The per-key encryption limit (`shredding.crypto.max-encryptions-per-key`) has no error code: reaching
+it rotates to the next key version rather than refusing, so there is nothing a caller ever sees.
 
 ## The stored format
 

@@ -1,7 +1,6 @@
 package com.housedevinci.shredding.architecture;
 
-import static com.tngtech.archunit.base.DescribedPredicate.not;
-import static com.tngtech.archunit.core.domain.JavaClass.Predicates.resideInAnyPackage;
+import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.classes;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
 
 import com.tngtech.archunit.core.importer.ImportOption;
@@ -21,26 +20,22 @@ import com.tngtech.archunit.lang.ArchRule;
     importOptions = ImportOption.DoNotIncludeTests.class)
 class HexagonalArchitectureTest {
 
+  /**
+   * L1: an allowlist, not a denylist. The house rule and control 18 both say {@code domain} is JDK
+   * only; a denylist of framework packages holds only for as long as somebody keeps adding to it,
+   * and today one added compile dependency to {@code gdpr-shredding-core/pom.xml} would make Guava,
+   * Netty or commons-lang legal in {@code domain} without this rule ever failing. An allowlist
+   * fails the moment anything not {@code java..}, {@code javax.crypto..} or the domain package
+   * itself is imported, which is what "JDK only" actually means.
+   */
   @ArchTest
   static final ArchRule domain_has_no_framework_imports =
-      noClasses()
+      classes()
           .that()
           .resideInAPackage("..domain..")
           .should()
-          .dependOnClassesThat(
-              resideInAnyPackage("javax..")
-                  .and(not(resideInAnyPackage("javax.crypto..")))
-                  .or(
-                      resideInAnyPackage(
-                          "org.springframework..",
-                          "jakarta..",
-                          "java.sql..",
-                          "org.slf4j..",
-                          "com.fasterxml..",
-                          "tools.jackson..",
-                          "org.hibernate..",
-                          "..application..",
-                          "..adapter..")));
+          .onlyDependOnClassesThat()
+          .resideInAnyPackage("java..", "javax.crypto..", "com.housedevinci.shredding.domain..");
 
   @ArchTest
   static final ArchRule domain_imports_no_crypto_library =

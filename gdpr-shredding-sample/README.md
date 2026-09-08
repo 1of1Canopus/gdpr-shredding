@@ -24,9 +24,13 @@ curl -s localhost:8080/customers -H 'content-type: application/json' -d '{
   "tenantId":"acme","customerId":"cust-42",
   "email":"alice@example.com","phone":"+33100000000" }'
 
-curl -s localhost:8080/customers/cust-42
+curl -s localhost:8080/customers/acme/cust-42
 # [{"customerId":"cust-42","email":"alice@example.com","phone":"+33100000000","erased":false}]
 ```
+
+The read path takes the tenant explicitly, not just `customerId`: control 15 makes the tenant
+mandatory with no default, and a read that skips it would look through every tenant's rows for a
+customer id that happens to match.
 
 The column is already unreadable:
 
@@ -36,15 +40,15 @@ docker compose -f gdpr-shredding-sample/docker-compose.yml exec postgres \
 #  cust-42 | SH1\001\001...
 ```
 
-Erase:
+Erase (behind HTTP Basic - `SecurityConfig` ships one user, `dpo`/`dpo`, for this sample only):
 
 ```bash
-curl -s localhost:8080/customers/erasures -H 'content-type: application/json' -d '{
-  "tenantId":"acme","customerId":"cust-42","requestedBy":"dpo","reason":"art 17 request" }'
+curl -s -u dpo:dpo localhost:8080/customers/erasures -H 'content-type: application/json' -d '{
+  "tenantId":"acme","customerId":"cust-42","reason":"art 17 request" }'
 # {"outcome":"COMPLETE","keysDestroyed":1,"blindIndexColumnsCleared":1,
 #  "completeInBackupsAt":"2026-10-08T..."}
 
-curl -s localhost:8080/customers/cust-42
+curl -s localhost:8080/customers/acme/cust-42
 # [{"customerId":"cust-42","email":"[erased]","phone":"[erased]","erased":true}]
 
 curl -s localhost:8080/customers/erasures/verify
@@ -65,4 +69,12 @@ to your real retention.
 ```
 
 `SampleEndToEndTest` proves the whole acceptance check against a Testcontainers PostgreSQL, and
-carries three of Cipher's probes.
+carries several of Cipher's probes.
+
+## L7: this endpoint shape, not this security model
+
+`SecurityConfig`'s single hard-coded HTTP Basic user is a copyable *shape*, not a real
+authorization model: a real erasure endpoint is authenticated against your actual identity
+provider, and `requestedBy` comes from the authenticated principal - `CustomerEndpoints.erase`
+takes it from `Principal.getName()`, never from the request body, because a body field is whatever
+the caller says it is and the erasure log's `requestedBy` column is meant to be an audit fact.

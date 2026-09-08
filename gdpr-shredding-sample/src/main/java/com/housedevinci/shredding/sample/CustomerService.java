@@ -48,6 +48,12 @@ public class CustomerService {
     return customers.findByCustomerId(customerId);
   }
 
+  /** L7: the tenant is mandatory on a read, the same as everywhere else in this module. */
+  @Transactional(readOnly = true)
+  public List<Customer> byTenantAndCustomerId(String tenantId, String customerId) {
+    return customers.findByTenantIdAndCustomerId(tenantId, customerId);
+  }
+
   /**
    * Equality lookup over an encrypted column. The blind index narrows the rows; the decryption
    * decides. Returning the prefilter's hits directly would return false matches, because the index
