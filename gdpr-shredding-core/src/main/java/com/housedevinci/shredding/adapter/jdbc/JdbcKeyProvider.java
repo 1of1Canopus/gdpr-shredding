@@ -150,6 +150,23 @@ public final class JdbcKeyProvider implements KeyProvider {
 
   private Unwrapped mint(Connection c, TenantId tenant, SubjectId subject, int version)
       throws SQLException {
+    // An erased subject never gets a fresh key. Without this, a write that was racing the erasure
+    // simply blocks on the FOR UPDATE, finds the row gone, and mints a new key: the erasure is
+    // undone within milliseconds and nothing in the log says so (control 11).
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT 1 FROM shredding_erased_subject WHERE tenant = ? AND subject = ? FOR SHARE")) {
+      ps.setString(1, tenant.value());
+      ps.setString(2, subject.value());
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          throw new ShreddingException(
+              ErrorCodes.ERASED,
+              "this data subject has been erased; a new data key is never minted for an erased"
+                  + " subject, or the erasure would undo itself on the next write");
+        }
+      }
+    }
     byte[] material = random.dataKey();
     try {
       byte[] wrapped = masterKey.wrap(tenant, subject, version, material, random);

@@ -33,6 +33,7 @@ public final class InMemoryKeyProvider implements KeyProvider {
   private final Map<Id, AtomicLong> counts = new ConcurrentHashMap<>();
   private final Map<String, Integer> latest = new ConcurrentHashMap<>();
   private final RandomSource random;
+  private final java.util.Set<String> erased = java.util.concurrent.ConcurrentHashMap.newKeySet();
   private volatile boolean available = true;
 
   /**
@@ -117,6 +118,7 @@ public final class InMemoryKeyProvider implements KeyProvider {
       }
     }
     latest.remove(subjectKey(tenant, subject));
+    erased.add(subjectKey(tenant, subject));
     return destroyed;
   }
 
@@ -135,6 +137,7 @@ public final class InMemoryKeyProvider implements KeyProvider {
     keys.put(id, material.clone());
     states.put(id, KeyState.ACTIVE);
     latest.merge(subjectKey(tenant, subject), version, Math::max);
+    erased.remove(subjectKey(tenant, subject));
   }
 
   public Optional<byte[]> export(TenantId tenant, SubjectId subject, int version) {
@@ -143,6 +146,11 @@ public final class InMemoryKeyProvider implements KeyProvider {
   }
 
   private Unwrapped mint(TenantId tenant, SubjectId subject, int version) {
+    if (erased.contains(subjectKey(tenant, subject))) {
+      throw new ShreddingException(
+          ErrorCodes.ERASED,
+          "this data subject has been erased; a new data key is never minted for an erased subject");
+    }
     byte[] material = random.dataKey();
     Id id = new Id(tenant.value(), subject.value(), version);
     keys.put(id, material);

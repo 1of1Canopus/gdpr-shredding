@@ -72,13 +72,14 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
           // FOR UPDATE first: a concurrent write that is about to encrypt under this key blocks
           // here and then finds the row gone (control 6, probe on the erasure/write race).
           List<Integer> versions = lockKeyRows(c, tenant, subject);
-          if (versions.isEmpty()) {
+          if (versions.isEmpty() && alreadyErased(c, tenant, subject)) {
             // Idempotent: a repeat erasure writes no second record and claims nothing new.
             return new Outcome(true, 0, 0, null);
           }
           markDestroying(c, tenant, subject);
           int cleared = clearBlindIndexes(c, tenant, subject);
           int destroyed = deleteKeyRows(c, tenant, subject);
+          tombstone(c, tenant, subject);
           ErasureRecord record = appendInTransaction(c, factory.create(destroyed, cleared));
           return new Outcome(false, destroyed, cleared, record);
         });
@@ -171,6 +172,35 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
       }
     }
     return versions;
+  }
+
+  /**
+   * Records that this subject is erased. The key rows are gone; this row holds no key material and
+   * exists so a later write cannot mint a fresh key and quietly undo the erasure (control 11).
+   */
+  private static void tombstone(Connection c, TenantId tenant, SubjectId subject)
+      throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "INSERT INTO shredding_erased_subject (tenant, subject, erased_at)"
+                + " VALUES (?,?,now()) ON CONFLICT (tenant, subject) DO NOTHING")) {
+      ps.setString(1, tenant.value());
+      ps.setString(2, subject.value());
+      ps.executeUpdate();
+    }
+  }
+
+  private static boolean alreadyErased(Connection c, TenantId tenant, SubjectId subject)
+      throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT 1 FROM shredding_erased_subject WHERE tenant = ? AND subject = ?")) {
+      ps.setString(1, tenant.value());
+      ps.setString(2, subject.value());
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next();
+      }
+    }
   }
 
   private static void markDestroying(Connection c, TenantId tenant, SubjectId subject)

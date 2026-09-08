@@ -46,6 +46,17 @@ CREATE TABLE IF NOT EXISTS shredding_data_key (
 CREATE INDEX IF NOT EXISTS shredding_data_key_subject
   ON shredding_data_key (tenant, subject);
 
+-- Erased subjects. The key rows are deleted outright; this table is the record that the subject
+-- was erased, so no later write can mint a fresh key for it and quietly undo the erasure
+-- (control 11). It holds no key material at all, which is what separates it from the
+-- "overwrite then delete" theatre control 6 rejects.
+CREATE TABLE IF NOT EXISTS shredding_erased_subject (
+  tenant    varchar(255) NOT NULL,
+  subject   varchar(255) NOT NULL,
+  erased_at timestamptz  NOT NULL,
+  PRIMARY KEY (tenant, subject)
+);
+
 -- The erasure log: the proof that a key was destroyed, and the one table that must outlive the
 -- data it is about. The subject appears only as a keyed pseudonym (control 9).
 CREATE TABLE IF NOT EXISTS shredding_erasure (
@@ -107,13 +118,15 @@ CREATE TABLE IF NOT EXISTS shredding_erasure_anchor (
 
 CREATE OR REPLACE FUNCTION shredding_erasure_anchor_monotonic() RETURNS trigger AS $$
 BEGIN
-  IF NEW.row_count <> OLD.row_count + 1 OR NEW.head_hash = OLD.head_hash THEN
-    RAISE EXCEPTION 'shredding_erasure_anchor only advances by one row (attempted % -> %)',
-      OLD.row_count, NEW.row_count;
-  END IF;
+  -- `keyed` is checked first: a caller that also gets the row count wrong must still be told the
+  -- real problem, which is that it is trying to change the trail's mode.
   IF NEW.keyed IS DISTINCT FROM OLD.keyed THEN
     RAISE EXCEPTION 'shredding_erasure_anchor.keyed is immutable once set (attempted % -> %)',
       OLD.keyed, NEW.keyed;
+  END IF;
+  IF NEW.row_count <> OLD.row_count + 1 OR NEW.head_hash = OLD.head_hash THEN
+    RAISE EXCEPTION 'shredding_erasure_anchor only advances by one row (attempted % -> %)',
+      OLD.row_count, NEW.row_count;
   END IF;
   RETURN NEW;
 END;
