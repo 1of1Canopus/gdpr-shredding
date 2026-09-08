@@ -6,6 +6,17 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **Licensing:** the free core switches from Apache-2.0 to the Functional Source License, Version
+  1.1, ALv2 Future License (FSL-1.1-ALv2) - free to use, not as a base for a competing product,
+  converts to Apache-2.0 two years after each version's release. Decision by Souhaile,
+  2026-09-08; see `LICENSING.md` (portfolio-level) for the reasoning. `LICENSE` and `NOTICE`
+  added at the repo root, `pom.xml` `<licenses>` updated, and `LICENSE`/`NOTICE` are now embedded
+  in `gdpr-shredding-core` and `gdpr-shredding-spring-boot-starter`'s jars under `META-INF/`
+  (same fix as agent-guard's M7). The reactor's own modules are excluded from the third-party
+  licence scan by `groupId` (`excludedGroups`), not by licence name, since
+  `com.housedevinci:gdpr-shredding-core` no longer matches the third-party allowlist.
+
 ### Added
 
 - **Envelope encryption for JPA fields.** `@Shredded` on a `String`, `byte[]`, `LocalDate`,

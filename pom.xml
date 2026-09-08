@@ -28,9 +28,10 @@
 
   <licenses>
     <license>
-      <name>Apache-2.0</name>
-      <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+      <name>Functional Source License, Version 1.1, ALv2 Future License</name>
+      <url>https://fsl.software/FSL-1.1-ALv2.template.md</url>
       <distribution>repo</distribution>
+      <comments>Converts to Apache-2.0 two years after each version's release</comments>
     </license>
   </licenses>
 
@@ -260,6 +261,15 @@
               <outputDirectory>${project.build.directory}</outputDirectory>
               <!-- Runtime scope only: compile + runtime. test/provided/system are not shipped. -->
               <excludedScopes>test,provided,system</excludedScopes>
+              <!--
+                Our own reactor modules (gdpr-shredding-core etc.) are not third parties: since
+                the core switched to FSL-1.1-ALv2 they no longer match includedLicenses below and
+                would otherwise fail this build, or worse be silently written into
+                THIRD-PARTY-NOTICES.txt as if a third party dependency were FSL-licensed. Exclude
+                by groupId, not by licence name, so a real third-party dependency that happened to
+                declare the same licence string is still caught.
+              -->
+              <excludedGroups>com\.housedevinci</excludedGroups>
               <!--
                 Allowlist, not blocklist: a dependency whose declared licence is not one of the
                 five canonical names below fails the build. That is the only form that catches a

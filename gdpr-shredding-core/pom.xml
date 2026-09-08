@@ -69,4 +69,28 @@
     POM's <build><plugins>, and every module inherits them; see gdpr-shredding-sample/pom.xml for
     why the sample's gate is a smoke gate rather than the same 80% minimum.
   -->
+
+  <build>
+    <!--
+      Same fix as agent-guard's M7 (docs/SECURITY-REVIEW-feat-release-pipeline.md, B repo):
+      the project's own LICENSE and NOTICE, copied into META-INF/ of the published jar.
+      FSL-1.1-ALv2's Redistribution clause requires a copy of (or a link to) the Terms and
+      Conditions to accompany redistributed copies; NOTICE travels with it by the same
+      convention Apache-2.0 SS4(d) used. This is a separate concern from the deferred
+      THIRD-PARTY-NOTICES.txt embedding.
+    -->
+    <resources>
+      <resource>
+        <directory>src/main/resources</directory>
+      </resource>
+      <resource>
+        <directory>${maven.multiModuleProjectDirectory}</directory>
+        <targetPath>META-INF</targetPath>
+        <includes>
+          <include>LICENSE</include>
+          <include>NOTICE</include>
+        </includes>
+      </resource>
+    </resources>
+  </build>
 </project>

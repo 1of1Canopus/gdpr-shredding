@@ -1,5 +1,7 @@
 # STATUS — GDPR Shredding free core
 
+Licensing (2026-09-08): free core switched from Apache-2.0 to FSL-1.1-ALv2 (Souhaile's decision); `LICENSE`/`NOTICE` added, `pom.xml` updated, `./mvnw -B clean verify` re-confirmed green.
+
 Branch `feat/shredding-core`. `main` holds the plan commit only.
 Full `./mvnw -B clean verify` green with Docker up.
 

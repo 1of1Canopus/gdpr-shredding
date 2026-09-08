@@ -13,7 +13,9 @@ Art. 32(1)(a), and it is what lets an Art. 17(1) request be answered without dro
 law requires you to keep - but whether it satisfies a given erasure request is your DPO's call on
 your facts. The residual risks are in `SECURITY-NOTES.md` and the sources are in `docs/index.md`.
 
-Apache-2.0. Java 21, Spring Boot 4.1, PostgreSQL. **Zero crypto dependencies**: AES-256-GCM,
+Fair source (FSL-1.1-ALv2): free to use, not as a base for a competing product, becomes
+Apache-2.0 two years after each release. Pro edition under a separate commercial licence.
+Java 21, Spring Boot 4.1, PostgreSQL. **Zero crypto dependencies**: AES-256-GCM,
 HMAC-SHA-256 and a hand-written HKDF checked against the RFC 5869 vectors, all from the JDK.
 
 ```xml
