@@ -50,7 +50,8 @@ public final class ShreddingEventListener
   /** Bounded: this is a cache of "what subject did this row load under", not a session. */
   private static final int MAX_REMEMBERED = 10_000;
 
-  private final ShreddedModel model;
+  private final transient java.util.function.Supplier<ShreddedModel> modelSupplier;
+  private transient volatile ShreddedModel resolvedModel;
   private final TenantSupplier tenantSupplier;
   private final transient BlindIndex blindIndex;
 
@@ -73,15 +74,19 @@ public final class ShreddingEventListener
   }
 
   public ShreddingEventListener(
-      ShreddedModel model, TenantSupplier tenantSupplier, BlindIndex blindIndex) {
-    this.model = Objects.requireNonNull(model, "model");
+      java.util.function.Supplier<ShreddedModel> modelSupplier,
+      TenantSupplier tenantSupplier,
+      BlindIndex blindIndex) {
+    // A supplier, not the model: the model is derived from the EntityManagerFactory's metamodel,
+    // and this listener has to be handed to Hibernate while that factory is still being built.
+    this.modelSupplier = Objects.requireNonNull(modelSupplier, "modelSupplier");
     this.tenantSupplier = Objects.requireNonNull(tenantSupplier, "tenantSupplier");
     this.blindIndex = blindIndex;
   }
 
   @Override
   public boolean onPreInsert(PreInsertEvent event) {
-    var fields = model.byEntityName().get(entityName(event.getPersister()));
+    var fields = model().byEntityName().get(entityName(event.getPersister()));
     if (fields == null) {
       return false;
     }
@@ -94,14 +99,14 @@ public final class ShreddingEventListener
 
   @Override
   public void onPostInsert(PostInsertEvent event) {
-    if (model.byEntityName().containsKey(entityName(event.getPersister()))) {
+    if (model().byEntityName().containsKey(entityName(event.getPersister()))) {
       ShreddingContext.pop();
     }
   }
 
   @Override
   public boolean onPreUpdate(PreUpdateEvent event) {
-    var fields = model.byEntityName().get(entityName(event.getPersister()));
+    var fields = model().byEntityName().get(entityName(event.getPersister()));
     if (fields == null) {
       return false;
     }
@@ -125,14 +130,14 @@ public final class ShreddingEventListener
 
   @Override
   public void onPostUpdate(PostUpdateEvent event) {
-    if (model.byEntityName().containsKey(entityName(event.getPersister()))) {
+    if (model().byEntityName().containsKey(entityName(event.getPersister()))) {
       ShreddingContext.pop();
     }
   }
 
   @Override
   public void onPostLoad(PostLoadEvent event) {
-    var fields = model.byEntityName().get(entityName(event.getPersister()));
+    var fields = model().byEntityName().get(entityName(event.getPersister()));
     if (fields == null) {
       return;
     }
@@ -147,6 +152,15 @@ public final class ShreddingEventListener
   @Override
   public boolean requiresPostCommitHandling(EntityPersister persister) {
     return false;
+  }
+
+  private ShreddedModel model() {
+    ShreddedModel current = resolvedModel;
+    if (current == null) {
+      current = modelSupplier.get();
+      resolvedModel = current;
+    }
+    return current;
   }
 
   private void remember(EntityPersister persister, Object id, String subject) {
@@ -198,7 +212,7 @@ public final class ShreddingEventListener
   }
 
   private void writeBlindIndexes(EntityPersister persister, Object[] state, TenantId tenant) {
-    var indexes = model.blindIndexesByEntityName().get(entityName(persister));
+    var indexes = model().blindIndexesByEntityName().get(entityName(persister));
     if (indexes == null || indexes.isEmpty()) {
       return;
     }

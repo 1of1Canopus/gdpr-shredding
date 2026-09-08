@@ -38,7 +38,6 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.hibernate.autoconfigure.HibernatePropertiesCustomizer;
 import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Lazy;
 
 /**
  * Wires the module. Everything a security control depends on is decided here, at startup, and a
@@ -150,7 +149,7 @@ public class ShreddingAutoConfiguration {
   @Bean
   @ConditionalOnMissingBean
   public JdbcErasureStore shreddingErasureStore(
-      DataSource dataSource, ErasureChain chain, @Lazy ShreddedModel model) {
+      DataSource dataSource, ErasureChain chain, ShreddedModel model) {
     JdbcSupport.initializeSchema(dataSource);
     return new JdbcErasureStore(dataSource, chain, model.blindIndexColumns());
   }
@@ -204,23 +203,20 @@ public class ShreddingAutoConfiguration {
 
   @Bean
   public HibernatePropertiesCustomizer shreddingHibernateCustomizer(
-      @Lazy ShreddedModel model,
+      ObjectProvider<ShreddedModel> model,
       ShreddingEventListener.TenantSupplier tenantSupplier,
       ObjectProvider<BlindIndex> blindIndex) {
+    var listener =
+        new ShreddingEventListener(model::getObject, tenantSupplier, blindIndex.getIfAvailable());
     return properties ->
         properties.put(
             JpaSettings.INTEGRATOR_PROVIDER,
-            (IntegratorProvider)
-                () ->
-                    List.of(
-                        new ShreddingIntegrator(
-                            new ShreddingEventListener(
-                                model, tenantSupplier, blindIndex.getIfAvailable()))));
+            (IntegratorProvider) () -> List.of(new ShreddingIntegrator(listener)));
   }
 
   @Bean
   public ShreddingStartupCheck shreddingStartupCheck(
-      ShreddingProperties properties, FieldCipher cipher, @Lazy ShreddedModel model) {
+      ShreddingProperties properties, FieldCipher cipher, ShreddedModel model) {
     return new ShreddingStartupCheck(properties, cipher, model);
   }
 
