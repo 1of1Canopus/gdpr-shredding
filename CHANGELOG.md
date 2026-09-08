@@ -61,6 +61,95 @@ All notable changes to this project. The format follows
   which regulators classify as **pseudonymisation with key destruction**. New FAQ entry, "Is this
   legally erasure?", answers the question honestly with the three sources.
 
+### Fixed
+
+Cipher's first PR review (`docs/SECURITY-REVIEW-feat-shredding-core.md`), 2026-09-08. Two HIGH, eight
+MEDIUM, ten LOW/INFO, all closed.
+
+- **CIPHER-01 (HIGH) / QUESTIONS #4** - a ciphertext moved into another subject's or another
+  tenant's row decrypted and displayed, and survived the row owner's own erasure, because the read
+  path trusted the blob's own header as the row's identity. `ShreddedConverter` now records what
+  each field's header actually said; `ShreddingEventListener.onPostLoad` compares it against the
+  row's true, resolved subject and tenant once the entity is hydrated and refuses
+  `SHRED-SUBJECT-MISMATCH` before the entity is returned to any caller. The write path gets the
+  matching half: `onPreUpdate` fetches the row's current header with a second query and refuses
+  `SHRED-SUBJECT-IMMUTABLE` before re-encrypting. The bounded per-thread map this replaced is
+  deleted. See QUESTIONS.md #13 for why the read-path check cannot fire "before the key store is
+  touched" the way the literal fix text asked, and #14 for why the "skip when not dirty"
+  optimisation was removed as unsound.
+- **CIPHER-03 (HIGH)** - a write racing the *first* key mint for a subject could commit a live key
+  after that subject's erasure committed, with the erasure log still reporting `COMPLETE`. Every
+  path that mints or erases now takes `pg_advisory_xact_lock(tenant, subject)` first, in the same
+  transaction, so the two can never both observe "no row, no tombstone" at once.
+- **CIPHER-04 (MEDIUM)** - `shredding_erased_subject` gets the same append-only triggers as
+  `shredding_erasure`: the runtime role's INSERT grant no longer also permits DELETE.
+- **CIPHER-05 (MEDIUM)** - all four append-only trigger guards now resolve `tgrelid` against
+  `current_schema()` instead of a bare trigger name, so a second schema on the same database is no
+  longer silently left unguarded.
+- **CIPHER-02 (MEDIUM)** - a repeat erasure of a subject with an outstanding `PARTIAL` record no
+  longer reports `COMPLETE` on the strength of "no key left"; it reads the trail's actual last
+  outcome, and if it is not `COMPLETE`, re-runs every hook and reports what they do now.
+- **CIPHER-06 (MEDIUM)** - the Lombok half of the generated-rendering startup check was dead code
+  (`lombok.Data` et al. are `SOURCE`-retained and never reach the class file); the claim is removed
+  from the code and the docs, the record check stays, and the sample's ArchUnit rule is the
+  documented reference for the Lombok case.
+- **CIPHER-07 (MEDIUM)** - `shredding.erasure-log.unkeyed=true` fed the subject pseudonymiser a
+  literal constant printed in this module's own source, making the pseudonym HMAC a public
+  function. `shredding.subject-pseudonym.pepper` is now a required secret in that mode, and the
+  unkeyed WARN names the consequence.
+- **CIPHER-08 (MEDIUM)** - a write that never reached `PostInsert`/`PostUpdate` (a converter
+  refusal, a constraint, a failure inside `writeBlindIndexes`) could leave a scope on a pooled
+  thread for the next, unrelated write to inherit. The push is now bracketed in `try`/`finally`,
+  and a transaction-boundary callback clears the whole stack regardless of how the write ended.
+- **CIPHER-09 (MEDIUM)** - the cache startup check only ever looked at `@Cacheable`/`@Cache` on the
+  entity class, missing `jakarta.persistence.sharedCache.mode=ALL`/`DISABLE_SELECTIVE` (which
+  caches every entity regardless of annotation) and the query cache entirely. Both are now checked
+  against the `EntityManagerFactory`'s resolved properties, under the same escape hatch and WARN.
+- **CIPHER-10 / M8 (MEDIUM)** - `probe_tenant_b_decrypts_tenant_a_value_for_the_same_subject_id`
+  stayed green with `tenant` removed from `Aad.forValue`, because relabelling the header's tenant
+  fails the *wrap* AAD first. A new probe isolates the value AAD specifically, using a
+  `KeyProvider` that hands back identical key material for every tenant.
+- **L1** - the hexagonal-boundary ArchUnit rule for `domain` is now an allowlist
+  (`java..`, `javax.crypto..`, the domain package itself), not a denylist that only holds for as
+  long as somebody keeps adding to it.
+- **L2** - the JaCoCo `prepare-agent`/`report`/`check` executions moved from `gdpr-shredding-core`'s
+  own POM to the parent's `<build><plugins>`, so all three modules now produce a coverage report and
+  are held to a gate: 80% line for the core and the starter, a 30% smoke gate for the sample. The
+  starter's own tests previously never exercised `ShreddingEventListener`, `ShreddingContext` or
+  the auto-configuration's bean graph at all (0% on those classes); `ShreddingIntegrationTest` now
+  does, with local fixture entities and Testcontainers PostgreSQL.
+- **L3** - `JdbcSupport.runtimeRoleOwnsErasureTable`, correct and tested but never called, is now
+  called from `ShreddingStartupCheck` and WARNs when the runtime role owns the erasure tables.
+- **L4** - the sample gets a real log-scan test (`LogScanTest`, `OutputCaptureExtension`) that
+  drives create/read/erase/a failed write and greps the captured output for the plaintext fixture.
+- **L5** - `JdbcErasureStore.markDestroying`, an `UPDATE` that no other transaction could ever
+  observe before the row it marked was deleted in the same transaction, is removed along with the
+  comment that claimed otherwise.
+- **L6** - `ErrorCodes.KEY_EXHAUSTED`, declared and never thrown (`FieldCipher` rotates instead of
+  refusing), is removed from the code and from the error-code table in the docs.
+- **L7** - the sample's read endpoint now takes the tenant explicitly (`GET
+  /customers/{tenantId}/{customerId}`) instead of looking up by `customerId` alone; the erasure
+  endpoint is behind HTTP Basic (`SecurityConfig`, one user, a copyable shape not a real
+  authorization model) and takes `requestedBy` from the authenticated principal, never from the
+  request body.
+- **L8** - `probe_master_key_appears_in_actuator_env` only ever called the `SanitizingFunction`
+  bean directly; `CipherProbeActuatorEndToEndTest` now stands up the sample with `/env` and
+  `/configprops` exposed and reads them for real.
+- **L9** - `probe_second_level_cache_serves_plaintext_after_erasure` (renamed
+  `the_startup_check_refuses_a_cacheable_shredded_entity`) asserted the refusal, not a cache
+  actually serving plaintext; see CIPHER-09 above for the coverage gap it also had.
+- **L10** - `JdbcErasureStore.decodeHooks` threw a raw `NumberFormatException` on a malformed
+  `hook_outcomes` column; it now throws `SHRED-INVALID-001`, and `ErasureChainVerifier` reports
+  `BROKEN` for a row that will not decode instead of letting the error escape unhandled.
+- **I1** - recorded in `SECURITY-NOTES.md`: the subject/tenant SpEL evaluation context still
+  permits reading `getClass()`, not exploitable today because the expression is written by the
+  application author at compile time.
+- **I2** - `MasterKey.REFUSED` now matches the whole (trimmed, case-folded) value exactly, not as a
+  substring, so a genuine random key cannot be refused for merely containing a sample token.
+- **I3** - `shreddingErasureChainVerifier` refuses at startup if `shredding.erasure-log.hmac-keys`
+  repeats the active key id with a different secret, instead of silently letting the map entry
+  replace it in the keyring.
+
 ### Security
 
 - Data keys are random and never derived from the master key; a derived key would be re-derivable

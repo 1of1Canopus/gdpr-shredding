@@ -19,27 +19,33 @@ Full `./mvnw -B clean verify` green with Docker up.
 | 10 | Dollar's rulings on all ten QUESTIONS applied (2026-09-08) | done |
 | 11 | Odin's regulatory corrections and the wording rule | done |
 | 12 | CI green-locally / red-on-CI bug found and fixed (see below) | done |
+| 13 | Cipher's first PR review (2026-09-08): 2 HIGH, 8 MEDIUM, 10 LOW/INFO, all closed | done |
 
 ## Tests
 
 | Module | Tests | Notes |
 |---|---|---|
-| `gdpr-shredding-core` | 70 | includes 11 Cipher probes and the Testcontainers PostgreSQL suite |
-| `gdpr-shredding-spring-boot-starter` | 14 | 3 Cipher probes, plus the two startup checks Dollar ruled in |
-| `gdpr-shredding-sample` | 10 | 3 Cipher probes, full Spring Boot context on Testcontainers PostgreSQL |
-| **total** | **94** | |
+| `gdpr-shredding-core` | 76 | includes the CIPHER-01/02/03/04/05/10 probes and the Testcontainers PostgreSQL suite |
+| `gdpr-shredding-spring-boot-starter` | 25 | includes `ShreddingIntegrationTest` (new: real Hibernate/Testcontainers coverage of the event listener, the context stack and the auto-configuration bean graph) |
+| `gdpr-shredding-sample` | 17 | includes the CIPHER-01 (moved-blob), QUESTIONS #4 (detached-merge), CIPHER-08 (stale-scope), the live-actuator and the log-scan probes |
+| **total** | **118** | |
 
 Nothing is skipped and nothing is `@Disabled`.
 
-## Coverage (`gdpr-shredding-core`, from `target/site/jacoco/jacoco.csv`)
+## Coverage (`target/site/jacoco/jacoco.csv`, per module, LINE counter)
 
-| Counter | Covered | Total | % |
+| Module | Covered / Total | % | Gate |
 |---|---|---|---|
-| LINE | 923 | 1107 | **83.4%** (gate 80%) |
-| INSTRUCTION | 4543 | 5614 | 80.9% |
-| METHOD | 185 | 222 | 83.3% |
-| BRANCH | 229 | 402 | 57.0% |
-| COMPLEXITY | 259 | 423 | 61.2% |
+| `gdpr-shredding-core` | 965 / 1152 | 83.8% | 80% |
+| `gdpr-shredding-spring-boot-starter` | 541 / 655 | 82.6% | 80% (was unmeasured before this pass - L2) |
+| `gdpr-shredding-sample` | 63 / 95 | 66.3% | 30% smoke gate (L2) |
+
+The JaCoCo executions moved from `gdpr-shredding-core`'s own POM to the parent's
+`<build><plugins>`, so all three modules now inherit them (L2). The starter's own tests previously
+exercised none of `ShreddingEventListener`, `ShreddingContext`, `ShreddingRuntime` or the
+auto-configuration bean graph (0% on those classes); `ShreddingIntegrationTest` closes that with
+local fixture entities (`fixture.Widget`, `fixture.Gadget`) and Testcontainers PostgreSQL, so the
+starter does not depend on the sample module for its own coverage.
 
 Branch coverage is the weak number. Most of the uncovered branches are defensive validation in
 `EncryptedValue`, `Identifiers` and the JDBC mapping; the security-relevant ones are covered by the
