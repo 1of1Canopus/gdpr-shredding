@@ -3,6 +3,7 @@ package com.housedevinci.shredding.application;
 import com.housedevinci.shredding.domain.ErasureAnchor;
 import com.housedevinci.shredding.domain.ErasureChain;
 import com.housedevinci.shredding.domain.ErasureRecord;
+import com.housedevinci.shredding.domain.ShreddingException;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -107,7 +108,20 @@ public final class ErasureChainVerifier {
     long count = 0;
     var keyIdsSeen = new LinkedHashSet<String>();
     while (true) {
-      List<ErasureRecord> page = reader.readAfter(after, PAGE);
+      List<ErasureRecord> page;
+      try {
+        page = reader.readAfter(after, PAGE);
+      } catch (ShreddingException e) {
+        // L10: a row that cannot even be decoded - a malformed hook_outcomes column, most likely -
+        // is written by exactly the attacker this trail exists to detect. The read path reports
+        // BROKEN rather than letting a typed decode error escape as an unhandled exception, which
+        // would make the verifier itself fail instead of reporting the tamper it found.
+        log.warn(
+            "shredding: erasure trail did not decode while verifying after seq={}: {}",
+            after,
+            e.getMessage());
+        return new Report(Status.BROKEN, count, after, prev, true, expectKeyed, keyIdsSeen);
+      }
       if (page.isEmpty()) {
         break;
       }

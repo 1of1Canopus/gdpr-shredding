@@ -3,6 +3,7 @@ package com.housedevinci.shredding.application;
 import com.housedevinci.shredding.domain.ErasureRecord;
 import com.housedevinci.shredding.domain.SubjectId;
 import com.housedevinci.shredding.domain.TenantId;
+import java.util.Optional;
 
 /**
  * The transactional half of an erasure (control 6).
@@ -40,4 +41,13 @@ public interface ErasureStore {
    * which cannot be known inside the destruction transaction because hooks run after it commits.
    */
   ErasureRecord append(ErasureRecord record);
+
+  /**
+   * The most recent chained record for this (tenant, subject), by its pseudonym. Used on a repeat
+   * erasure request (CIPHER-02): a subject with no key row left is idempotent only when its last
+   * erasure actually completed. If it left an outstanding {@code PARTIAL} - a failed post-erasure
+   * hook, most often - a second call must re-run the hooks and report what they actually did, not
+   * repeat an unconditional {@code COMPLETE} that the trail does not support.
+   */
+  Optional<ErasureRecord> latestForSubject(TenantId tenant, String subjectPseudonym);
 }

@@ -1,8 +1,10 @@
 package com.housedevinci.shredding.autoconfigure;
 
+import com.housedevinci.shredding.adapter.jdbc.JdbcSupport;
 import com.housedevinci.shredding.application.FieldCipher;
 import com.housedevinci.shredding.domain.ErasedValuePolicy;
 import com.housedevinci.shredding.jpa.ShreddingRuntime;
+import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.InitializingBean;
@@ -19,12 +21,17 @@ public final class ShreddingStartupCheck implements InitializingBean {
   private final ShreddingProperties properties;
   private final FieldCipher cipher;
   private final ShreddedModel model;
+  private final DataSource dataSource;
 
   public ShreddingStartupCheck(
-      ShreddingProperties properties, FieldCipher cipher, ShreddedModel model) {
+      ShreddingProperties properties,
+      FieldCipher cipher,
+      ShreddedModel model,
+      DataSource dataSource) {
     this.properties = properties;
     this.cipher = cipher;
     this.model = model;
+    this.dataSource = dataSource;
   }
 
   @Override
@@ -63,6 +70,19 @@ public final class ShreddingStartupCheck implements InitializingBean {
       log.warn(
           "shredding: shredding.erasure-log.unkeyed=true. The erasure log's integrity rests only on"
               + " database privilege separation.");
+    }
+    // L3: the append-only triggers stop the runtime role; they cannot stop the table's owner,
+    // who can ALTER TABLE ... DISABLE TRIGGER and defeat control 8. SECURITY-NOTES.md prescribes
+    // running with a role that only has INSERT/SELECT; this is the check that says out loud when
+    // that prescription was not followed, instead of leaving
+    // JdbcSupport.runtimeRoleOwnsErasureTable
+    // correct, tested and uncalled.
+    if (JdbcSupport.runtimeRoleOwnsErasureTable(dataSource)) {
+      log.warn(
+          "shredding: the database role running this application owns shredding_erasure. That"
+              + " role can ALTER TABLE ... DISABLE TRIGGER and remove the append-only protection"
+              + " (control 8). Run with a role that has only INSERT and SELECT on"
+              + " shredding_erasure, shredding_erasure_anchor and shredding_erased_subject.");
     }
     log.info(
         "shredding: {} shredded field(s) across {} entity type(s), {} blind-index column(s),"

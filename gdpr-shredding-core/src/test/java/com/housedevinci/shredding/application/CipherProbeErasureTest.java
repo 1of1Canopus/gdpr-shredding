@@ -96,6 +96,85 @@ class CipherProbeErasureTest {
     assertThat(store[0].all().get(1).outcome()).isEqualTo(ErasureOutcome.PARTIAL);
   }
 
+  /**
+   * CIPHER-02. The subject's key is already gone (so {@code alreadyErased} is true) but the last
+   * record on the trail is {@code PARTIAL}, because a hook failed the first time. A second call -
+   * exactly the one a DPO makes to produce a proof of erasure - must never report {@code COMPLETE}
+   * on the strength of "no key left"; it has to look at what the trail actually says, and if that
+   * is not {@code COMPLETE}, re-run the hooks and report what they do now.
+   */
+  @Test
+  void probe_a_second_erasure_of_a_partial_subject_reports_complete() {
+    var calls = new java.util.concurrent.atomic.AtomicInteger();
+    var hook =
+        new PostErasureHook() {
+          @Override
+          public String name() {
+            return "search-index";
+          }
+
+          @Override
+          public void afterErasure(TenantId tenant, SubjectId subject) {
+            // Fails the first time, succeeds on the retry the second erasure call triggers.
+            if (calls.getAndIncrement() == 0) {
+              throw new IllegalStateException("index unreachable");
+            }
+          }
+        };
+    var store = new InMemoryErasureStore[1];
+    var service = service(ErasureChain.keyed(SECRET, "k1"), List.of(hook), store);
+    cipher.encrypt(TENANT, SUBJECT, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
+
+    var first = service.erase(new ErasureRequest(TENANT, SUBJECT, "dpo", "art 17"));
+    assertThat(first.outcome()).isEqualTo(ErasureOutcome.PARTIAL);
+    assertThat(first.alreadyErased()).isFalse();
+
+    var second = service.erase(new ErasureRequest(TENANT, SUBJECT, "dpo", "art 17"));
+
+    assertThat(second.alreadyErased()).isTrue();
+    assertThat(second.outcome())
+        .as(
+            "the key is gone, but the trail's last record is PARTIAL; a repeat call must not"
+                + " report COMPLETE without re-running the hooks and seeing them succeed")
+        .isEqualTo(ErasureOutcome.COMPLETE);
+    assertThat(calls.get())
+        .as("the hook was actually re-run, not assumed to have succeeded")
+        .isEqualTo(2);
+    assertThat(store[0].all()).hasSize(3);
+    assertThat(store[0].all().get(2).outcome()).isEqualTo(ErasureOutcome.COMPLETE);
+  }
+
+  /**
+   * The mirror case: the retry hook fails again. The second call must still report PARTIAL, never
+   * COMPLETE, and must still append a fresh record - it is not a no-op just because the subject was
+   * already erased.
+   */
+  @Test
+  void probe_a_second_erasure_of_a_still_failing_partial_subject_stays_partial() {
+    var hook =
+        new PostErasureHook() {
+          @Override
+          public String name() {
+            return "search-index";
+          }
+
+          @Override
+          public void afterErasure(TenantId tenant, SubjectId subject) {
+            throw new IllegalStateException("index unreachable");
+          }
+        };
+    var store = new InMemoryErasureStore[1];
+    var service = service(ErasureChain.keyed(SECRET, "k1"), List.of(hook), store);
+    cipher.encrypt(TENANT, SUBJECT, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
+
+    service.erase(new ErasureRequest(TENANT, SUBJECT, "dpo", "art 17"));
+    var second = service.erase(new ErasureRequest(TENANT, SUBJECT, "dpo", "art 17"));
+
+    assertThat(second.alreadyErased()).isTrue();
+    assertThat(second.outcome()).isEqualTo(ErasureOutcome.PARTIAL);
+    assertThat(store[0].all()).hasSize(3);
+  }
+
   @Test
   void a_successful_hook_makes_the_erasure_complete() {
     var ok =

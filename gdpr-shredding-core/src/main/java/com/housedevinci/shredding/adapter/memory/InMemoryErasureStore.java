@@ -68,6 +68,20 @@ public final class InMemoryErasureStore implements ErasureStore, ErasureReader, 
   }
 
   @Override
+  public synchronized Optional<ErasureRecord> latestForSubject(
+      TenantId tenant, String subjectPseudonym) {
+    ErasureRecord latest = null;
+    for (ErasureRecord r : records) {
+      if (r.tenant().equals(tenant) && r.subjectPseudonym().equals(subjectPseudonym)) {
+        if (latest == null || r.timestamp().isAfter(latest.timestamp())) {
+          latest = r;
+        }
+      }
+    }
+    return Optional.ofNullable(latest);
+  }
+
+  @Override
   public synchronized Optional<Anchor> anchor() {
     return anchorPresent && keyed != null
         ? Optional.of(new Anchor(head, records.size(), keyed))

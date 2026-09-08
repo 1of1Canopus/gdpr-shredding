@@ -83,7 +83,10 @@ public class ShreddingAutoConfiguration {
           "shredding: the erasure log is UNKEYED (shredding.erasure-log.unkeyed=true). Its"
               + " integrity then rests only on database privilege separation: anyone who can write"
               + " the table can rewrite the whole chain consistently. Set"
-              + " shredding.erasure-log.hmac-secret instead.");
+              + " shredding.erasure-log.hmac-secret instead. Separately, the log's subject"
+              + " pseudonyms are still an HMAC keyed by shredding.subject-pseudonym.pepper, which"
+              + " is required in this mode: without it they would be recomputable by anyone from"
+              + " this module's own published canonical form (CIPHER-07).");
       return ErasureChain.unkeyed();
     }
     byte[] secret = requiredSecret("shredding.erasure-log.hmac-secret", log0.getHmacSecret());
@@ -94,9 +97,14 @@ public class ShreddingAutoConfiguration {
   @ConditionalOnMissingBean
   public Pseudonymiser shreddingPseudonymiser(ShreddingProperties properties) {
     var log0 = properties.getErasureLog();
+    // CIPHER-07: unkeyed mode is about the chain, not about the pseudonym. A constant pepper
+    // shipped in the module's own source is a public function, exactly as reversible as SHA-256
+    // with no key at all, so unkeyed=true requires its own secret here rather than falling back to
+    // one anyone can read out of the jar.
     byte[] secret =
         log0.isUnkeyed()
-            ? "sh/unkeyed-pseudonym-pepper/not-a-secret".getBytes(StandardCharsets.UTF_8)
+            ? requiredSecret(
+                "shredding.subject-pseudonym.pepper", properties.getSubjectPseudonym().getPepper())
             : requiredSecret("shredding.erasure-log.hmac-secret", log0.getHmacSecret());
     return new Pseudonymiser(secret);
   }
@@ -122,7 +130,8 @@ public class ShreddingAutoConfiguration {
       EntityManagerFactory entityManagerFactory, ShreddingProperties properties) {
     var entities = new ArrayList<Class<?>>();
     entityManagerFactory.getMetamodel().getEntities().forEach(e -> entities.add(e.getJavaType()));
-    return ShreddedModel.scan(entities, properties.isAllowSecondLevelCache());
+    return ShreddedModel.scan(
+        entities, properties.isAllowSecondLevelCache(), entityManagerFactory.getProperties());
   }
 
   @Bean
@@ -182,13 +191,30 @@ public class ShreddingAutoConfiguration {
     var log0 = properties.getErasureLog();
     var keyring = new LinkedHashMap<String, byte[]>();
     if (!log0.isUnkeyed()) {
-      keyring.put(
-          log0.getHmacKeyId(),
-          requiredSecret("shredding.erasure-log.hmac-secret", log0.getHmacSecret()));
+      byte[] activeSecret =
+          requiredSecret("shredding.erasure-log.hmac-secret", log0.getHmacSecret());
+      keyring.put(log0.getHmacKeyId(), activeSecret);
       log0.getHmacKeys()
           .forEach(
-              (id, secret) ->
-                  keyring.put(id, requiredSecret("shredding.erasure-log.hmac-keys." + id, secret)));
+              (id, secret) -> {
+                byte[] resolved = requiredSecret("shredding.erasure-log.hmac-keys." + id, secret);
+                // I3: repeating the active key id here with a different secret would silently
+                // replace it in the keyring - the verifier would then accept rows actually signed
+                // under the active secret as if they were signed under this one. A repeat with the
+                // *same* secret is a harmless duplicate and is allowed.
+                if (id.equals(log0.getHmacKeyId())
+                    && !java.util.Arrays.equals(resolved, activeSecret)) {
+                  throw new ShreddingException(
+                      ErrorCodes.CONFIG,
+                      "shredding.erasure-log.hmac-keys."
+                          + id
+                          + " repeats the active key id (shredding.erasure-log.hmac-key-id="
+                          + id
+                          + ") with a different secret. The keyring cannot hold two secrets for one"
+                          + " key id.");
+                }
+                keyring.put(id, resolved);
+              });
     }
     return new ErasureChainVerifier(store, store, Map.copyOf(keyring));
   }
@@ -216,8 +242,11 @@ public class ShreddingAutoConfiguration {
 
   @Bean
   public ShreddingStartupCheck shreddingStartupCheck(
-      ShreddingProperties properties, FieldCipher cipher, ShreddedModel model) {
-    return new ShreddingStartupCheck(properties, cipher, model);
+      ShreddingProperties properties,
+      FieldCipher cipher,
+      ShreddedModel model,
+      DataSource dataSource) {
+    return new ShreddingStartupCheck(properties, cipher, model, dataSource);
   }
 
   static byte[] requiredSecret(String property, String value) {

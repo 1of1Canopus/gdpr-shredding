@@ -41,6 +41,7 @@ public class ShreddingProperties {
   private final ErasureLogProperties erasureLog = new ErasureLogProperties();
   private final BlindIndexProperties blindIndex = new BlindIndexProperties();
   private final ErasureProperties erasure = new ErasureProperties();
+  private final SubjectPseudonymProperties subjectPseudonym = new SubjectPseudonymProperties();
 
   public String getMasterKey() {
     return masterKey;
@@ -88,6 +89,10 @@ public class ShreddingProperties {
 
   public ErasureProperties getErasure() {
     return erasure;
+  }
+
+  public SubjectPseudonymProperties getSubjectPseudonym() {
+    return subjectPseudonym;
   }
 
   /** What a read returns once the key is gone. One policy per application, never per call. */
@@ -212,6 +217,31 @@ public class ShreddingProperties {
 
     public void setBits(int bits) {
       this.bits = bits;
+    }
+  }
+
+  /**
+   * CIPHER-07: the pepper for the subject pseudonym when the erasure log itself runs unkeyed. The
+   * two are independent (control 9's chain-integrity secret is not the same secret as its
+   * pseudonym-hardness secret): {@code shredding.erasure-log.unkeyed=true} says nothing signs the
+   * chain, but the pseudonym still has to be unrecoverable without a secret, or an unkeyed log's
+   * subject column is an HMAC anyone can recompute from the module's own published constant.
+   */
+  public static class SubjectPseudonymProperties {
+    /**
+     * Base64, at least 32 bytes, from the environment. Required whenever {@code
+     * shredding.erasure-log.unkeyed=true}; startup refuses to start without it. Ignored, and not
+     * required, when the erasure log is keyed - the chain's own HMAC secret is the pseudonym pepper
+     * in that mode, exactly as before.
+     */
+    private String pepper;
+
+    public String getPepper() {
+      return pepper;
+    }
+
+    public void setPepper(String pepper) {
+      this.pepper = pepper;
     }
   }
 

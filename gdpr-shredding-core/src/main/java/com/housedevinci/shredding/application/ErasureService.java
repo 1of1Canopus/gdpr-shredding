@@ -90,8 +90,21 @@ public final class ErasureService {
     cache.evictSubject(request.tenant(), request.subject());
 
     if (outcome.alreadyErased()) {
+      // CIPHER-02: idempotent only reports COMPLETE when the trail actually says COMPLETE. A
+      // subject can have no key row left and still have an outstanding PARTIAL - a hook that
+      // failed on the first call - and a DPO producing a proof of erasure is exactly the caller
+      // who makes this second call. Never claim COMPLETE the trail does not support.
+      var latest = store.latestForSubject(request.tenant(), pseudonym);
+      if (latest.isPresent() && latest.get().outcome() == ErasureOutcome.COMPLETE) {
+        return new ErasureResult(
+            ErasureOutcome.COMPLETE, true, 0, 0, List.of(), List.of(), backupsClearAt);
+      }
+      // Outstanding PARTIAL, or the trail could not say: re-run every hook now and report what
+      // they actually did. No key material is destroyed a second time (keysDestroyed stays 0),
+      // but alreadyErased stays true because the subject's key was already gone.
+      var rerun = runHooksAndAppend(request, pseudonym, 0, 0, backupsClearAt);
       return new ErasureResult(
-          ErasureOutcome.COMPLETE, true, 0, 0, List.of(), List.of(), backupsClearAt);
+          rerun.outcome(), true, 0, 0, rerun.hookOutcomes(), rerun.records(), backupsClearAt);
     }
 
     var records = new ArrayList<ErasureRecord>();
@@ -108,6 +121,35 @@ public final class ErasureService {
           backupsClearAt);
     }
 
+    var hooked =
+        runHooksAndAppend(
+            request,
+            pseudonym,
+            outcome.keysDestroyed(),
+            outcome.blindIndexColumnsCleared(),
+            backupsClearAt);
+    records.addAll(hooked.records());
+
+    return new ErasureResult(
+        hooked.outcome(),
+        false,
+        outcome.keysDestroyed(),
+        outcome.blindIndexColumnsCleared(),
+        hooked.hookOutcomes(),
+        records,
+        backupsClearAt);
+  }
+
+  /** What running every hook once, and appending the record that reports it, produced. */
+  private record HookRun(
+      ErasureOutcome outcome, List<HookOutcome> hookOutcomes, List<ErasureRecord> records) {}
+
+  private HookRun runHooksAndAppend(
+      ErasureRequest request,
+      String pseudonym,
+      int keysDestroyed,
+      int blindIndexColumnsCleared,
+      Instant backupsClearAt) {
     var hookOutcomes = new ArrayList<HookOutcome>(hooks.size());
     boolean allSucceeded = true;
     for (PostErasureHook hook : hooks) {
@@ -127,7 +169,7 @@ public final class ErasureService {
     }
 
     ErasureOutcome finalOutcome = allSucceeded ? ErasureOutcome.COMPLETE : ErasureOutcome.PARTIAL;
-    records.add(
+    ErasureRecord appended =
         store.append(
             ErasureRecord.of(
                 clock.instant(),
@@ -135,21 +177,13 @@ public final class ErasureService {
                 pseudonym,
                 request.requestedBy(),
                 request.reason(),
-                outcome.keysDestroyed(),
+                keysDestroyed,
                 entityCount,
                 fieldCount,
-                outcome.blindIndexColumnsCleared(),
+                blindIndexColumnsCleared,
                 finalOutcome,
                 hookOutcomes,
-                backupsClearAt)));
-
-    return new ErasureResult(
-        finalOutcome,
-        false,
-        outcome.keysDestroyed(),
-        outcome.blindIndexColumnsCleared(),
-        hookOutcomes,
-        records,
-        backupsClearAt);
+                backupsClearAt));
+    return new HookRun(finalOutcome, hookOutcomes, List.of(appended));
   }
 }
