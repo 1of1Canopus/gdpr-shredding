@@ -191,6 +191,49 @@ erasure page. The acceptance check asks for exact section numbers and links. I h
 section numbers, and I will not invent them.
 
 **Ruling (Dollar, 2026-09-08): Odin is verifying the EDPB / CNIL / ICO section numbers; leave the
-placeholders greppable.** **Applied:** the three citations in `docs/index.md` are prefixed
-`TODO-CITATION`, so `grep -r TODO-CITATION` finds every one and none can ship by accident. Open
-until Odin returns.
+placeholders greppable.** **Closed the same day: Odin returned, and two of the three were wrong.**
+
+- **EDPB Guidelines 5/2019 removed.** They cover search-engine delisting and say nothing about
+  encryption or key destruction. Citing them would have been the worst kind of citation: real
+  document, wrong subject.
+- **CNIL "Chiffrement, hachage, signature" removed.** Algorithm guidance, nothing on key
+  destruction. Replaced with CNIL, "Recherche scientifique (hors sante) : enjeux et avantages de
+  l'anonymisation et de la pseudonymisation", which does address deleting the key or the
+  correspondence table.
+- **A29WP Opinion 05/2014 (WP216) Section 4 added**, which is the load-bearing source: encryption
+  with key deletion is *pseudonymisation*, not anonymisation.
+- **GDPR Art. 17(1) and 32(1)(a) with Recitals 26, 28, 29 and 83 added**, and the ICO's "beyond
+  use" backups section quoted exactly.
+
+**Applied:** the references in `docs/index.md` are replaced verbatim, every `TODO-CITATION` is gone,
+and the wording rule below follows from these sources.
+
+---
+
+## #11 Wording: this is pseudonymisation with key destruction (taken; ruled)
+
+**Ruling (Dollar, 2026-09-08).** The module performs **crypto-shredding**, which regulators
+classify as pseudonymisation with key destruction. "Erases", "deletes", "anonymises" and
+"GDPR-compliant erasure" are not to be used as unqualified claims anywhere in the product. The
+sanctioned phrasing is: *renders the data permanently unreadable by destroying the subject's key;
+the row survives; regulators treat this as pseudonymisation with key destruction, and the residual
+risks are listed in SECURITY-NOTES*. The launch article title stays a question.
+
+**Applied.** `README.md` (headline and the honest-bound bullet), `docs/index.md` (opening and a new
+FAQ entry "Is this legally erasure?"), `SECURITY-NOTES.md` ("What crypto-shredding actually
+claims"), `gdpr-shredding-sample/README.md`, and `SPEC.md` lines 6, 73 and 78, which overstated the
+position and are corrected with a dated note.
+
+The API keeps the words `erase`, `ErasureService` and `ErasureRecord`: they name an operation the
+application performs and a record of it, and renaming the public API to `PseudonymisationService`
+would be worse for users than a documented qualification. Say so if you disagree; it is a rename,
+not a redesign.
+
+---
+
+## #12 ENISA pseudonymisation report: section to verify (open)
+
+An ENISA pseudonymisation report is the obvious fourth source, and I have seen it cited for exactly
+this technique. **Odin could not verify a section**, so it is deliberately not in `docs/index.md`:
+an unverified citation is worse than none. Left here so it is not lost. Someone with the report open
+needs to give a title, year and section before it goes into the docs.

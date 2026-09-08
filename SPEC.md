@@ -3,7 +3,7 @@
 Status: READY. Second module (4 weeks).
 
 ## Why (plain words)
-When a person asks to be forgotten, GDPR says delete; audit, accounting and AML rules say keep records. Crypto-shredding resolves it: encrypt each person's personal fields with that person's own key; to erase, destroy the key. The EDPB, CNIL and ICO accept this. In Java there are only blog posts and an Axon event-store extension. No Spring/JPA starter exists.
+When a person asks to be forgotten, GDPR says delete; audit, accounting and AML rules say keep records. Crypto-shredding resolves it: encrypt each person's personal fields with that person's own key; to erase, destroy the key. Regulators classify this as pseudonymisation with key destruction, not anonymisation and not deletion (corrected 2026-09-08 after Odin's verification: WP216 s.4; CNIL; ICO "beyond use". The earlier "the EDPB, CNIL and ICO accept this" overstated it, and EDPB Guidelines 5/2019 cover search-engine delisting only). In Java there are only blog posts and an Axon event-store extension. No Spring/JPA starter exists.
 
 ## Free core (`gdpr-shredding-core`)
 1. `@Shredded(subject = "#{owner.id}")` on entity fields (String, byte[], LocalDate, BigDecimal, JSON) → JPA `AttributeConverter`s generated/registered per type; the **data subject id** resolved from an SpEL expression or a `SubjectResolver` bean.
@@ -70,10 +70,10 @@ Crypto-shredding is a *key-management* product wearing an encryption costume: th
 Unit: format round-trip, converters per type, blind index determinism. Integration (Testcontainers Postgres): entity save/load, erase, read-after-erase sentinel, chain verify, concurrent erase vs write. Property test: 100k encryptions, no nonce collision.
 
 ## Docs and launch
-Article: "GDPR erasure without deleting a single row, in Spring Boot." Posts: r/java, r/SpringBoot, HN.
+Article: "GDPR erasure without deleting a row? Crypto-shredding in Spring Boot." Kept as a question, not a claim (Dollar's wording rule, 2026-09-08). Posts: r/java, r/SpringBoot, HN.
 
 ## Acceptance checks
 - [ ] Sample: create customer → encrypted at rest (verified via raw SQL in test) → erase → row remains, field reads as `ErasedValue`, audit row untouched, erasure record chained.
 - [ ] Core on Maven Central; pro in private repo.
-- [ ] Docs list the exact regulatory references (EDPB Guidelines 5/2019 §..., CNIL page) with links.
+- [x] Docs list the exact regulatory references with links. Corrected 2026-09-08 after Odin's verification: GDPR Art. 17(1) and 32(1)(a) with Recitals 26, 28, 29 and 83; A29WP Opinion 05/2014 (WP216) s.4 and 4.1-4.3; CNIL "Recherche scientifique (hors sante)"; ICO "Right to erasure", backups section. EDPB Guidelines 5/2019 and the CNIL "chiffrement, hachage, signature" page were dropped: neither says anything about key destruction.
 - [ ] Gate (90 days): 100 stars or 500 downloads AND 3 paid.

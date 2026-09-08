@@ -1,11 +1,17 @@
 # GDPR Shredding
 
-**GDPR erasure without deleting a single row, for Spring Boot and JPA.**
+**GDPR erasure without deleting a row? Crypto-shredding for Spring Boot and JPA.**
 
 When a person asks to be forgotten, GDPR says delete. Audit, accounting and AML rules say keep.
-Crypto-shredding settles it: encrypt each person's personal fields under that person's own key, and
-erase by destroying the key. The row stays, the foreign keys stay, the audit trail stays; the
-personal data in them stops being readable. The EDPB, the CNIL and the ICO accept the technique.
+Crypto-shredding is how teams square the two: encrypt each person's personal fields under that
+person's own key, and destroy the key. That **renders the data permanently unreadable; the row
+survives**, and so do the foreign keys and the audit trail.
+
+Be precise about what that is. Regulators classify it as **pseudonymisation with key destruction**,
+not anonymisation and not deletion (WP216 s.4; CNIL; ICO's "beyond use" test). It is squarely
+Art. 32(1)(a), and it is what lets an Art. 17(1) request be answered without dropping rows another
+law requires you to keep - but whether it satisfies a given erasure request is your DPO's call on
+your facts. The residual risks are in `SECURITY-NOTES.md` and the sources are in `docs/index.md`.
 
 Apache-2.0. Java 21, Spring Boot 4.1, PostgreSQL. **Zero crypto dependencies**: AES-256-GCM,
 HMAC-SHA-256 and a hand-written HKDF checked against the RFC 5869 vectors, all from the JDK.
@@ -63,7 +69,7 @@ erasureService.erase(new ErasureRequest(
 ```
 
 Afterwards the row is still there, `customer_id` still joins, the audit rows are untouched, and
-`customer.getEmail()` reads `[erased]`. The erasure log holds a hash-chained, HMAC-keyed record of
+`customer.getEmail()` reads `[erased]` because the key it needed no longer exists. The erasure log holds a hash-chained, HMAC-keyed record of
 what was destroyed, when, by whom, and the date the erasure is also complete in backups.
 
 ## What it is careful about
@@ -81,9 +87,10 @@ what was destroyed, when, by whom, and the date the erasure is also complete in 
   bean or a static type, or a sample-looking master key are all startup failures.
 - **There is no fail-open property anywhere.** Every weaker mode is explicit and WARNs at *every*
   startup.
-- **The honest bound is written down.** An insider who snapshots the key table before an erasure and
-  restores it afterwards gets the data back, and backups hold the wrapped key until their retention
-  expires. `SECURITY-NOTES.md` says so, and a test asserts it says so.
+- **The honest bound is written down.** This is pseudonymisation with key destruction, not
+  anonymisation. An insider who snapshots the key table before an erasure and restores it afterwards
+  gets the data back, and backups hold the wrapped key until their retention expires.
+  `SECURITY-NOTES.md` says so, and a test asserts it says so.
 
 ## Modules
 

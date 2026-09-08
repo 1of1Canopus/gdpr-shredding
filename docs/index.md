@@ -1,8 +1,14 @@
 # GDPR Shredding
 
-Erasure by key destruction for Spring Boot and JPA. Encrypt each data subject's personal fields
-under that subject's own key; erase by destroying the key. The rows, the foreign keys and the audit
-trail survive; the personal data in them stops being readable.
+Crypto-shredding for Spring Boot and JPA. Each data subject's personal fields are encrypted under
+that subject's own key; destroying the key **renders the data permanently unreadable. The row
+survives**, and so do the foreign keys and the audit trail.
+
+Regulators treat this as **pseudonymisation with key destruction**, not anonymisation and not
+deletion. That is a genuine and useful control - it is Art. 32(1)(a) in one line, and it is what
+lets an Art. 17(1) request be answered without dropping the rows an audit or an accounting rule
+requires - but it is not a claim that the data is gone. The residual risks are listed in
+`SECURITY-NOTES.md`, and the sources are under "Regulatory references" below.
 
 ## Quickstart
 
@@ -201,20 +207,39 @@ application that is merely returning erased values.
 
 ## Regulatory references
 
-- `TODO-CITATION` EDPB Guidelines 5/2019, section and paragraph, on the right to be forgotten, and
-  the EDPB's position that data rendered irreversibly unreadable is no longer personal data in
-  practice.
-- `TODO-CITATION` CNIL, "Chiffrement, hachage, signature", page and section, and its guidance on
-  anonymisation versus pseudonymisation.
-- `TODO-CITATION` ICO, "Right to erasure", section, and its guidance on what "putting data beyond
-  use" requires.
+Verified by Odin, 2026-09-08.
 
-The section numbers and links are being verified by Odin and are marked `TODO-CITATION` until then,
-so they are greppable and cannot ship by accident. They are pointers for your DPO, not legal advice.
-What this library can attest to is stated in `SECURITY-NOTES.md`, and it is narrower than "the data
-is gone".
+- **GDPR** Art. 17(1) (right to erasure) and Art. 32(1)(a) (security of processing:
+  "pseudonymisation and encryption of personal data"), Regulation (EU) 2016/679, EUR-Lex
+  CELEX:32016R0679. Recitals 26, 28 and 29 (pseudonymisation) and 83 (encryption as risk
+  mitigation).
+- **Article 29 Working Party, Opinion 05/2014 on Anonymisation Techniques (WP216)**, 10 April 2014,
+  Section 4 "Pseudonymisation". Encryption with key deletion is a **pseudonymisation** technique,
+  not anonymisation; deleting the key reduces linkability but does not by itself remove the
+  residual risk of singling-out (Sections 4.1 to 4.3).
+- **CNIL**, "Recherche scientifique (hors sante) : enjeux et avantages de l'anonymisation et de la
+  pseudonymisation" (cnil.fr, accessed 2026-09-08). Deleting the key or the correspondence table
+  reduces re-identification risk, but the remaining data can still allow indirect identification and
+  "demeurent alors soumises au respect du RGPD".
+- **ICO**, "Right to erasure" (ico.org.uk, accessed 2026-09-08), section "Do we have to erase
+  personal data from backup systems?": "The key issue is to put the backup data 'beyond use', even
+  if it cannot be immediately overwritten."
+
+These are pointers for your DPO, not legal advice. What this library can attest to is stated in
+`SECURITY-NOTES.md`, and it is narrower than "the data is gone".
 
 ## FAQ
+
+**Is this legally erasure?** No, and do not let anyone tell your DPO otherwise. What the module does
+is **crypto-shredding**: it renders the data permanently unreadable by destroying the subject's key;
+the row survives. Regulators classify that as **pseudonymisation with key destruction**, not
+anonymisation. WP216 Section 4 says encryption with key deletion is a pseudonymisation technique and
+that deleting the key reduces linkability without removing the residual risk of singling-out; the
+CNIL says the remaining data can still allow indirect identification and "demeurent alors soumises
+au respect du RGPD"; the ICO's test for data you cannot immediately overwrite is that it is put
+"beyond use". Whether that satisfies an Art. 17(1) request in your circumstances is your DPO's call
+on your facts, and it is a much easier call to make when Art. 32(1)(a) is satisfied too. The
+residual risks are listed in `SECURITY-NOTES.md`; read them before you answer the question.
 
 **Does an erasure delete the row?** No. That is the point. The row, its id and every foreign key
 pointing at it survive; only the key does not.

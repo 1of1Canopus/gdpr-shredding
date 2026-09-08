@@ -52,7 +52,9 @@ curl -s localhost:8080/customers/erasures/verify
 ```
 
 The row is still there, `customer_id` still joins, the audit rows are untouched, and the erasure log
-verifies. `completeInBackupsAt` is when the erasure is also complete in backups and WAL: until then
+verifies. The email and phone are permanently unreadable because the key they needed no longer
+exists - which regulators classify as pseudonymisation with key destruction, not anonymisation and
+not deletion. See `docs/index.md`, "Is this legally erasure?". `completeInBackupsAt` is when the erasure is also complete in backups and WAL: until then
 a restore brings the key back. That is `shredding.erasure.backup-retention`, and you should set it
 to your real retention.
 

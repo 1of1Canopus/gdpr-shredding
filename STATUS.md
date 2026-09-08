@@ -111,13 +111,29 @@ All ten questions ruled on. What changed in the code:
 | 5 | No fake sentinel values; WARN listing the fields that cannot carry one | `ShreddedConverter.carriesSentinel()`, `ShreddedModel.fieldsWithoutSentinel()`, WARN in `ShreddingStartupCheck`, one test |
 | 8 | Local-only invalidation accepted for core; Pro gets cluster invalidation | `docs/index.md` section and a free-vs-Pro row |
 | 9 | Add the startup check for records and generated renderings | `ShreddedModel.refuseGeneratedRendering`, one test; sample ArchUnit rule kept as the user reference |
-| 10 | Odin verifies the citations; leave them greppable | three `TODO-CITATION` markers in `docs/index.md` |
+| 10 | Odin verified the citations the same day; two were wrong | references replaced in `docs/index.md`, no `TODO-CITATION` left |
+| 11 | Wording rule: pseudonymisation with key destruction, never an unqualified "erases" | `README.md`, `docs/index.md` (opening + new FAQ), `SECURITY-NOTES.md`, sample README, `SPEC.md` lines 6, 73, 78 |
 
 ## Open questions
 
 Two are still genuinely open: **#4** (Cipher chooses between a shadow subject column and reading the
-stored blob in `PreUpdate`; my recommendation is the latter) and **#10** (`grep -r TODO-CITATION`
-until Odin returns the EDPB / CNIL / ICO section numbers). The other eight are ruled and applied.
+stored blob in `PreUpdate`; my recommendation is the latter) and **#12** (the ENISA pseudonymisation
+report, which Odin could not pin to a section, so it is deliberately not cited). #10 closed the same
+day it was raised: Odin found two of the three references wrong. Everything else is ruled and
+applied.
+
+## Regulatory position, corrected 2026-09-08
+
+Odin's verification changed what the product is allowed to say. **EDPB Guidelines 5/2019 covers
+search-engine delisting and says nothing about encryption**; the CNIL page previously cited is
+algorithm guidance with nothing on key destruction. Both are removed. The sources that do support
+the technique are GDPR Art. 17(1) and Art. 32(1)(a) with Recitals 26, 28, 29 and 83; A29WP Opinion
+05/2014 (WP216) Section 4, which classifies encryption with key deletion as **pseudonymisation, not
+anonymisation**; the CNIL's research-pseudonymisation page; and the ICO's "beyond use" test for
+backups.
+
+The wording rule follows: never "erases", "deletes", "anonymises" or "GDPR-compliant erasure" as an
+unqualified claim. The public API keeps `ErasureService` and `ErasureRecord` (QUESTIONS #11).
 
 ## Deliberately not done
 

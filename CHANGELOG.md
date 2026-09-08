@@ -49,6 +49,18 @@ All notable changes to this project. The format follows
   field whose type has no value that can stand for "erased" (`LocalDate`, `BigDecimal`), which read
   as `null`. No fake sentinel is invented for them.
 
+### Documentation
+
+- Regulatory references verified and corrected. EDPB Guidelines 5/2019 (search-engine delisting
+  only) and the CNIL's algorithm-guidance page are **removed**: neither addresses key destruction.
+  The sources are now GDPR Art. 17(1) and 32(1)(a) with Recitals 26, 28, 29 and 83; A29WP Opinion
+  05/2014 (WP216) Section 4 and 4.1 to 4.3; CNIL, "Recherche scientifique (hors sante)"; and the
+  ICO's "Right to erasure" backups section.
+- The product no longer describes itself as erasing, deleting or anonymising anything without
+  qualification. What it does is render data permanently unreadable by destroying the subject's key,
+  which regulators classify as **pseudonymisation with key destruction**. New FAQ entry, "Is this
+  legally erasure?", answers the question honestly with the three sources.
+
 ### Security
 
 - Data keys are random and never derived from the master key; a derived key would be re-derivable
