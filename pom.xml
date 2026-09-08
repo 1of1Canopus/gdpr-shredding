@@ -22,7 +22,7 @@
   <inceptionYear>2026</inceptionYear>
 
   <organization>
-    <name>House Devinci</name>
+    <name>HouseDevinci</name>
     <url>https://housedevinci.com</url>
   </organization>
 
@@ -41,7 +41,7 @@
       <name>Souhaile (Canopus)</name>
       <!-- Role address, not a personal mailbox. See QUESTIONS.md #21. -->
       <email>oss@housedevinci.com</email>
-      <organization>House Devinci</organization>
+      <organization>HouseDevinci</organization>
       <organizationUrl>https://housedevinci.com</organizationUrl>
       <roles>
         <role>maintainer</role>
