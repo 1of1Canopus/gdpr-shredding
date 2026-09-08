@@ -231,6 +231,91 @@ not a redesign.
 
 ---
 
+## #13 CIPHER-01 / #4: the read-path check cannot fire "before the key store is touched" (taken; a deviation, with evidence)
+
+Cipher's fix text asks for `FieldCipher.decrypt` to "take the expected tenant and subject ... and
+refuse ... before it touches the key store". That is achievable for the write path (`PreUpdate`
+fetches the row's current header with a second query, entirely before any key is touched) but not
+for the read path, and I want the reasoning on record rather than a fix that reads as literal
+compliance and is not.
+
+**Why not.** A JPA `AttributeConverter` is handed nothing but the column bytes: no entity, no
+session, no row. I checked this against the actual Hibernate ORM 7.4 loader bytecode this project
+builds against (`EntityInitializerImpl`, disassembled with `javap`, not assumed): every attribute
+converter on a row - every `@Shredded` field's `decrypt` included - has already run by the time the
+*first* Hibernate listener fires for that row, `PreLoadEventListener` included. There is no hook
+that fires before a converter runs on read, unlike the write path, where `PreInsertEvent` and
+`PreUpdateEvent` genuinely do fire before the SQL statement binds. Cipher's own fix text anticipates
+this ("or resolves the subject in onPostLoad before the converters' values are handed out") and I
+took that alternative.
+
+**What is implemented instead.** `ShreddedConverter` decodes the header the instant it decrypts and
+records it (`ShreddingContext.Decoded`); `ShreddingEventListener.onPostLoad` - once the whole entity
+is hydrated - resolves the row's true subject and tenant the way the write path does, compares, and
+throws `SHRED-SUBJECT-MISMATCH` on a mismatch. The load throws, so the entity is never returned to
+any caller. This delivers the property CIPHER-01 actually names ("still decrypts and is displayed"
+- it is not displayed, because the call that would have returned it throws instead), even though a
+few instructions of internal, never-externalised decryption happen first. Full detail and the one
+residual this leaves (a same-type join fetch inside one JDBC row) is in `SECURITY-NOTES.md` under
+"A moved ciphertext is refused after the load that read it has already run".
+
+Probes: `probe_a_blob_moved_into_another_subjects_row_still_decrypts` and
+`probe_a_blob_moved_into_another_tenants_row_still_decrypts` (sample, real Hibernate hydration) both
+RED before this fix, GREEN after.
+
+## #14 QUESTIONS #4 ruling (c)'s dirty-skip optimisation is unsound without @DynamicUpdate (taken; a deviation, found by a failing probe)
+
+The ruling says: "Skip the extra round trip entirely when no `@Shredded` field of the entity is
+dirty." I implemented that first, and my own new probe -
+`probe_changing_the_subject_expression_moves_a_row_out_of_erasure_scope_on_a_detached_merge` - went
+green when it should have gone red: it changes `customerId` (the subject's source property) and
+leaves `email`/`phone` untouched, so by Java-value comparison no `@Shredded` field is "dirty" and
+the check was being skipped, exactly on the update it exists to catch.
+
+**Root cause.** `Customer` is not `@DynamicUpdate`, and neither is anything else in this codebase.
+Hibernate's default `UPDATE` statement writes every basic column unconditionally, so every shredded
+field's `convertToDatabaseColumn` runs again on *every* update to the entity, whether or not its
+Java value changed. "No shredded field dirty" (comparing Java values) therefore does not imply "no
+re-encryption is about to happen" the way the ruling's optimisation assumes; that implication only
+holds under `@DynamicUpdate`, which this module does not require and cannot assume.
+
+**Fix.** The dirty check is removed; `refuseIfSubjectMoved` runs on every update to a shredded
+entity. Detecting the sound version of the optimisation (`persister.isDynamicUpdate()` combined
+with per-property dirtiness) is more moving parts in a check whose entire job is to be correct than
+the one extra query per shredded update it would save. If a later release adds `@DynamicUpdate`
+support explicitly, the skip can come back conditioned on that flag; until then it does not exist.
+
+The probe above is RED-then-GREEN evidence for this fix, not just for the fix that motivated it.
+
+## #15 ShreddedBytesConverter refuses its own entity's first insert under @GeneratedValue(IDENTITY) (found; flagged, not fixed - out of scope for this pass)
+
+Found while writing `ShreddingIntegrationTest` for the L2 coverage gate, not from Cipher's list.
+An entity with a `byte[]` `@Shredded` field (`ShreddedBytesConverter`) and
+`@GeneratedValue(strategy = GenerationType.IDENTITY)` fails its own first `save()` with
+`SHRED-CONTEXT-001`, "no shredding context while writing". No such entity exists anywhere else in
+this codebase (`Customer` in the sample and `Widget` here are both `String`-typed shredded fields),
+so this had never been exercised end to end before.
+
+**Cause, as far as I traced it.** Hibernate's `MutableMutabilityPlan` deep-copies a converted
+attribute's value - calling `convertToDatabaseColumn` a second time - to build the managed entity's
+dirty-checking snapshot, for any Java type it considers mutable. `byte[]` is mutable by default;
+`String`, `BigDecimal` and `LocalDate` are not, which is why `Widget` and `Gadget`'s other three
+shredded fields (added to raise this module's coverage, see `fixture/Gadget.java`) never hit it.
+That deep-copy call happens outside the `onPreInsert`/`onPostInsert` bracket - stack trace bottoms
+out in `AttributeConverterMutabilityPlan.deepCopyNotNull`, not in the ordinary bind-parameter path -
+so `ShreddingContext.require` correctly refuses it as an unscoped write, which is exactly right for
+what the check is doing; the bug is that a legitimate, scoped write is reaching that code path at
+all.
+
+**Why not fixed here.** It is not one of Cipher's findings, and understanding it well enough to fix
+it without breaking `ShreddedConverter`'s general contract - probably telling Hibernate the
+converted type is immutable, which for `byte[]` specifically usually means providing a
+`MutabilityPlan` alongside the converter rather than changing the converter's own methods - needs
+more investigation than a remediation pass has room for. Flagging it here so it is not lost:
+**`ShreddedBytesConverter` should be treated as not production-ready until this is fixed and
+covered by a regression test**, and the docs (`docs/index.md`'s converter list) should say so until
+then.
+
 ## #12 ENISA pseudonymisation report: section to verify (open)
 
 An ENISA pseudonymisation report is the obvious fourth source, and I have seen it cited for exactly

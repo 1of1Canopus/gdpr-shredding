@@ -1,5 +1,6 @@
 package com.housedevinci.shredding.jpa;
 
+import com.housedevinci.shredding.domain.EncryptedValue;
 import com.housedevinci.shredding.domain.ErasedValue;
 import com.housedevinci.shredding.domain.ErasedValuePolicy;
 import com.housedevinci.shredding.domain.ErrorCodes;
@@ -104,6 +105,12 @@ public abstract class ShreddedConverter<T> implements AttributeConverter<T, byte
     if (dbData == null) {
       return null;
     }
+    // CIPHER-01: record what the header actually says the instant it is decoded, so
+    // ShreddingEventListener.onPostLoad can compare it against the row's true subject once the
+    // whole entity is hydrated and refuse before the value is handed to any caller. See
+    // ShreddingContext.Decoded for why this cannot be checked earlier than that.
+    var header = EncryptedValue.decode(dbData);
+    ShreddingContext.recordDecoded(entity + "." + field, header.tenant(), header.subject());
     var runtime = ShreddingRuntime.require();
     var plaintext = runtime.cipher().decrypt(entity, field, dbData, runtime.policy());
     if (plaintext.isPresent()) {

@@ -69,14 +69,17 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
     return JdbcSupport.inTransaction(
         dataSource,
         c -> {
-          // FOR UPDATE first: a concurrent write that is about to encrypt under this key blocks
+          // CIPHER-03: the (tenant, subject) advisory lock first, ahead of the FOR UPDATE. It is
+          // what makes a write racing the *first* mint for a subject line up behind (or in front
+          // of) this erasure instead of both observing "no row, no tombstone" at once.
+          JdbcSupport.lockSubject(c, tenant, subject);
+          // FOR UPDATE next: a concurrent write that is about to encrypt under this key blocks
           // here and then finds the row gone (control 6, probe on the erasure/write race).
           List<Integer> versions = lockKeyRows(c, tenant, subject);
           if (versions.isEmpty() && alreadyErased(c, tenant, subject)) {
             // Idempotent: a repeat erasure writes no second record and claims nothing new.
             return new Outcome(true, 0, 0, null);
           }
-          markDestroying(c, tenant, subject);
           int cleared = clearBlindIndexes(c, tenant, subject);
           int destroyed = deleteKeyRows(c, tenant, subject);
           tombstone(c, tenant, subject);
@@ -203,19 +206,6 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
     }
   }
 
-  private static void markDestroying(Connection c, TenantId tenant, SubjectId subject)
-      throws SQLException {
-    // Visible to a concurrent reader that took its snapshot after this statement and before the
-    // delete commits: KeyState.DESTROYING is refused on read as well as on write (control 7).
-    try (PreparedStatement ps =
-        c.prepareStatement(
-            "UPDATE shredding_data_key SET state = 'DESTROYING' WHERE tenant = ? AND subject = ?")) {
-      ps.setString(1, tenant.value());
-      ps.setString(2, subject.value());
-      ps.executeUpdate();
-    }
-  }
-
   private static int deleteKeyRows(Connection c, TenantId tenant, SubjectId subject)
       throws SQLException {
     // A DELETE, not an overwrite followed by a delete: under MVCC an overwrite only writes a
@@ -253,6 +243,26 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
       }
     }
     return cleared;
+  }
+
+  @Override
+  public Optional<ErasureRecord> latestForSubject(TenantId tenant, String subjectPseudonym) {
+    return JdbcSupport.withConnection(
+        dataSource,
+        c -> {
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "SELECT "
+                      + COLUMNS
+                      + " FROM shredding_erasure WHERE tenant = ? AND subject_pseudonym = ?"
+                      + " ORDER BY ts DESC, seq DESC LIMIT 1")) {
+            ps.setString(1, tenant.value());
+            ps.setString(2, subjectPseudonym);
+            try (ResultSet rs = ps.executeQuery()) {
+              return rs.next() ? Optional.of(map(rs)) : Optional.<ErasureRecord>empty();
+            }
+          }
+        });
   }
 
   @Override
@@ -336,8 +346,18 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
   }
 
   private static ErasureRecord map(ResultSet rs) throws SQLException {
+    long seq = rs.getLong("seq");
+    List<HookOutcome> hooks;
+    try {
+      hooks = decodeHooks(rs.getString("hook_outcomes"));
+    } catch (ShreddingException e) {
+      // L10: the sequence is already in hand, so the verifier's caller can say exactly which row
+      // would not decode, not just that something did.
+      throw new ShreddingException(
+          ErrorCodes.INVALID, "erasure record seq=" + seq + ": " + e.getMessage(), e);
+    }
     return new ErasureRecord(
-        rs.getLong("seq"),
+        seq,
         instant(rs.getObject("ts", OffsetDateTime.class)),
         TenantId.of(rs.getString("tenant")),
         rs.getString("subject_pseudonym"),
@@ -348,7 +368,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
         rs.getInt("field_count"),
         rs.getInt("blind_index_cleared"),
         ErasureOutcome.valueOf(rs.getString("outcome")),
-        decodeHooks(rs.getString("hook_outcomes")),
+        hooks,
         instant(rs.getObject("backup_clear_at", OffsetDateTime.class)),
         rs.getString("chain_version"),
         rs.getString("key_id"),
@@ -372,7 +392,16 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
       if (colon < 0) {
         throw new ShreddingException(ErrorCodes.INVALID, "hook_outcomes is not in canonical form");
       }
-      int byteLength = Integer.parseInt(material.substring(i + 1, colon));
+      int byteLength;
+      try {
+        byteLength = Integer.parseInt(material.substring(i + 1, colon));
+      } catch (NumberFormatException e) {
+        // L10: this column is writable by exactly the attacker the chain exists to detect, so a
+        // malformed length must be a typed, catchable error - never a raw NumberFormatException
+        // the verifier's read path cannot distinguish from a real bug and has no chance to turn
+        // into BROKEN.
+        throw new ShreddingException(ErrorCodes.INVALID, "hook_outcomes is not in canonical form");
+      }
       int start = colon + 1;
       int end = start;
       int seen = 0;

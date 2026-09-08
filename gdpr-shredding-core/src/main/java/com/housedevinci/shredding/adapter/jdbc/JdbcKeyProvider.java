@@ -52,6 +52,9 @@ public final class JdbcKeyProvider implements KeyProvider {
     return JdbcSupport.inTransaction(
         dataSource,
         c -> {
+          // CIPHER-03: taken before anything else so a write racing the first mint for this
+          // subject and an erasure of it can never both observe "no row yet" at the same time.
+          JdbcSupport.lockSubject(c, tenant, subject);
           Row row = highestVersion(c, tenant, subject, true);
           if (row == null) {
             return mint(c, tenant, subject, 1);
@@ -122,6 +125,7 @@ public final class JdbcKeyProvider implements KeyProvider {
     return JdbcSupport.inTransaction(
         dataSource,
         c -> {
+          JdbcSupport.lockSubject(c, tenant, subject);
           Row row = highestVersion(c, tenant, subject, true);
           if (row != null && row.state != KeyState.ACTIVE) {
             throw new ShreddingException(

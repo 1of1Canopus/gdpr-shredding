@@ -2,10 +2,13 @@ package com.housedevinci.shredding.adapter.jdbc;
 
 import com.housedevinci.shredding.domain.ErrorCodes;
 import com.housedevinci.shredding.domain.KeyUnavailableException;
+import com.housedevinci.shredding.domain.SubjectId;
+import com.housedevinci.shredding.domain.TenantId;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Instant;
@@ -47,6 +50,37 @@ public final class JdbcSupport {
       return work.run(c);
     } catch (SQLException e) {
       throw unavailable(e);
+    }
+  }
+
+  /**
+   * The fixed salt handed to {@code hashtextextended} so this namespace of advisory locks cannot
+   * collide with the schema step's own single-key lock or with {@code JdbcErasureStore}'s chain
+   * append lock, which both use plain {@code bigint} keys.
+   */
+  private static final long SUBJECT_LOCK_SALT = 6072873668427846209L;
+
+  /**
+   * Takes a transaction-scoped advisory lock on {@code (tenant, subject)}, in the caller's current
+   * transaction. This is what makes the tombstone check in {@code JdbcKeyProvider.mint} and the
+   * {@code FOR UPDATE}/tombstone-insert pair in {@code JdbcErasureStore.erase} actually ordered
+   * against each other: under READ COMMITTED, a {@code FOR SHARE}/{@code FOR UPDATE} on a row that
+   * does not exist yet locks nothing, so a write racing the *first* key mint for a subject and an
+   * erasure of that same subject can otherwise interleave with no row for either side to block on
+   * (CIPHER-03). The lock exists whether or not any row does, because it is keyed on the pair
+   * itself, not on a row.
+   *
+   * <p>{@code currentForWrite}, {@code rotate} and {@code erase} all take this lock first, before
+   * touching {@code shredding_data_key} or {@code shredding_erased_subject}, so the two operations
+   * can never observe each other's "nothing here yet" state at the same time.
+   */
+  public static void lockSubject(Connection c, TenantId tenant, SubjectId subject)
+      throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement("SELECT pg_advisory_xact_lock(hashtextextended(?, ?))")) {
+      ps.setString(1, tenant.value() + "|" + subject.value());
+      ps.setLong(2, SUBJECT_LOCK_SALT);
+      ps.execute();
     }
   }
 

@@ -33,7 +33,9 @@ public final class ShreddedModel {
       String fieldName,
       SubjectExpression subject,
       boolean carriesSentinel,
-      SubjectExpression tenant) {}
+      SubjectExpression tenant,
+      String tableName,
+      String columnName) {}
 
   /** One blind-index column and the shredded field it indexes. */
   public record BlindIndexField(
@@ -99,8 +101,40 @@ public final class ShreddedModel {
    * @param allowSecondLevelCache the escape hatch for {@code @Cacheable} entities (control 12)
    */
   public static ShreddedModel scan(Collection<Class<?>> entities, boolean allowSecondLevelCache) {
+    return scan(entities, allowSecondLevelCache, Map.of());
+  }
+
+  /**
+   * @param entities the persistence unit's entity classes
+   * @param allowSecondLevelCache the escape hatch for {@code @Cacheable} entities (control 12)
+   * @param emfProperties the {@code EntityManagerFactory}'s resolved properties, so a global {@code
+   *     jakarta.persistence.sharedCache.mode} or {@code hibernate.cache.use_query_cache} setting is
+   *     caught even when no entity carries {@code @Cacheable} or {@code @Cache} at all (CIPHER-09):
+   *     {@code sharedCache.mode=ALL} (and {@code DISABLE_SELECTIVE}, which behaves the same way
+   *     unless a type opts out) caches <em>every</em> entity regardless of any annotation, and the
+   *     query cache is control 12's second half ("Query cache likewise"), which nothing in the
+   *     module looked at before this.
+   */
+  public static ShreddedModel scan(
+      Collection<Class<?>> entities,
+      boolean allowSecondLevelCache,
+      Map<String, Object> emfProperties) {
     var shredded = new ArrayList<ShreddedField>();
     var indexes = new ArrayList<BlindIndexField>();
+    String sharedCacheMode =
+        String.valueOf(emfProperties.get("jakarta.persistence.sharedCache.mode"));
+    boolean globalCacheAll =
+        "ALL".equals(sharedCacheMode) || "DISABLE_SELECTIVE".equals(sharedCacheMode);
+    boolean queryCacheOn =
+        "true"
+            .equalsIgnoreCase(String.valueOf(emfProperties.get("hibernate.cache.use_query_cache")));
+    if (queryCacheOn && !allowSecondLevelCache) {
+      throw config(
+          "hibernate.cache.use_query_cache=true is set. The query cache can return decrypted"
+              + " @Shredded values from a cached query result after the subject's key is"
+              + " destroyed, exactly like the second-level cache (control 12). Turn it off, or set"
+              + " shredding.allow-second-level-cache=true and accept that residual in writing.");
+    }
 
     for (Class<?> type : entities) {
       String entityName = entityName(type);
@@ -125,7 +159,9 @@ public final class ShreddedModel {
                 converter.carriesSentinel(),
                 annotation.tenant().isBlank()
                     ? null
-                    : new SubjectExpression(where, annotation.tenant())));
+                    : new SubjectExpression(where, annotation.tenant()),
+                tableName(type),
+                columnName(field)));
         shreddedHere.add(field.getName());
       }
 
@@ -163,7 +199,7 @@ public final class ShreddedModel {
       }
 
       if (!shreddedHere.isEmpty()) {
-        refuseSecondLevelCache(type, entityName, allowSecondLevelCache);
+        refuseSecondLevelCache(type, entityName, allowSecondLevelCache, globalCacheAll);
         refuseGeneratedRendering(type, entityName);
       }
     }
@@ -235,19 +271,31 @@ public final class ShreddedModel {
   /**
    * A second-level cached entity keeps serving decrypted values from the cache after the key has
    * been destroyed, so the erasure is invisible until the region is evicted (control 12).
+   *
+   * <p>CIPHER-09: {@code globalCacheAll} covers the case no per-entity annotation can express -
+   * {@code jakarta.persistence.sharedCache.mode=ALL} (or {@code DISABLE_SELECTIVE}) caches every
+   * entity in the persistence unit whether or not it carries {@code @Cacheable} at all, unless it
+   * explicitly opts out with {@code @Cacheable(false)}.
    */
   private static void refuseSecondLevelCache(
-      Class<?> type, String entityName, boolean allowSecondLevelCache) {
-    boolean cacheable =
-        type.isAnnotationPresent(Cacheable.class) && type.getAnnotation(Cacheable.class).value();
+      Class<?> type, String entityName, boolean allowSecondLevelCache, boolean globalCacheAll) {
+    Cacheable annotation = type.getAnnotation(Cacheable.class);
+    boolean explicitlyOptedOut = annotation != null && !annotation.value();
+    boolean cacheable = annotation != null && annotation.value();
     boolean hibernateCache = hasAnnotation(type, "org.hibernate.annotations.Cache");
-    if ((cacheable || hibernateCache) && !allowSecondLevelCache) {
+    boolean cachedByGlobalMode = globalCacheAll && !explicitlyOptedOut;
+    if ((cacheable || hibernateCache || cachedByGlobalMode) && !allowSecondLevelCache) {
       throw config(
           entityName
-              + " has @Shredded fields and is second-level cached. A cached entity keeps serving"
-              + " the decrypted value after the subject's key is destroyed, so the erasure is"
-              + " invisible until the cache region is evicted. Remove the cache annotation, or set"
-              + " shredding.allow-second-level-cache=true and accept that residual in writing.");
+              + " has @Shredded fields and is second-level cached"
+              + (cachedByGlobalMode && !cacheable && !hibernateCache
+                  ? " (jakarta.persistence.sharedCache.mode caches every entity; add"
+                      + " @Cacheable(false) to opt this one out, or turn the global mode off)"
+                  : "")
+              + ". A cached entity keeps serving the decrypted value after the subject's key is"
+              + " destroyed, so the erasure is invisible until the cache region is evicted. Remove"
+              + " the cache annotation, or set shredding.allow-second-level-cache=true and accept"
+              + " that residual in writing.");
     }
   }
 
@@ -256,11 +304,24 @@ public final class ShreddedModel {
    * {@code toString}, {@code equals} and {@code hashCode} over every field cannot hold a
    * {@code @Shredded} one.
    *
-   * <p>A record does exactly that, by language rule. Lombok's {@code @Data}, {@code @Value} and
-   * {@code @ToString} do the same at compile time. Either way the decrypted value ends up in the
-   * first log line that interpolates the entity, and a log line outlives the erasure. The sample
-   * ships an ArchUnit rule users can copy for the cases only their own code can see; this check
-   * fires with no test at all (Dollar's ruling on QUESTIONS #9).
+   * <p>A record does exactly that, by language rule, and is detectable from the class file: {@link
+   * Class#isRecord()} is true regardless of source retention. The decrypted value would otherwise
+   * reach the first log line that interpolates the entity, and a log line outlives the erasure.
+   *
+   * <p>CIPHER-06: this method used to also look for {@code lombok.Data}, {@code lombok.Value},
+   * {@code lombok.ToString} and {@code lombok.EqualsAndHashCode} via {@code
+   * Class.getAnnotations()}. All four are {@code @Retention(SOURCE)} - Lombok deletes them from the
+   * class file it writes - so that loop could never match; it read as a control and was not one,
+   * and both {@code SECURITY-NOTES.md} and {@code QUESTIONS.md} #9 wrongly reported it as applied.
+   * There is no annotation-based way to see a {@code SOURCE}-retention type at runtime: Lombok's
+   * one {@code CLASS}-retained marker, {@code lombok.Generated}, is put on the generated
+   * <em>methods</em> it emits, not on the type, so detecting it here would mean walking every
+   * declared method looking for an annotation this class never asks Lombok's classpath for - a
+   * different and heavier check than the rest of this method makes, and still only a heuristic (a
+   * hand-written method can carry the same annotation). The honest fix is to drop the claim instead
+   * of leaving code that cannot do what it says: the record check stays, ships with no test at all,
+   * and the sample's {@code ShreddedFieldsDoNotLeakTest} ArchUnit rule is the reference users copy
+   * for the Lombok case - see {@code docs/index.md}.
    */
   private static void refuseGeneratedRendering(Class<?> type, String entityName) {
     if (type.isRecord()) {
@@ -269,17 +330,6 @@ public final class ShreddedModel {
               + " has @Shredded fields and is a record. A record generates toString, equals and"
               + " hashCode over every component, so the decrypted value reaches the first log line"
               + " that renders it. Use a class with a toString that prints identifiers only.");
-    }
-    for (String generator :
-        List.of("lombok.Data", "lombok.Value", "lombok.ToString", "lombok.EqualsAndHashCode")) {
-      if (hasAnnotation(type, generator)) {
-        throw config(
-            entityName
-                + " has @Shredded fields and is annotated @"
-                + generator.substring(generator.lastIndexOf('.') + 1)
-                + ", which generates a rendering over every field. Write the toString by hand and"
-                + " print identifiers only, or exclude the shredded fields explicitly.");
-      }
     }
   }
 

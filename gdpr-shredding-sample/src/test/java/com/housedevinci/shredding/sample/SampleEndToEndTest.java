@@ -220,6 +220,119 @@ class SampleEndToEndTest {
         .satisfies(t -> assertThat(shreddingCode(t)).isEqualTo(ErrorCodes.ERASED));
   }
 
+  /**
+   * CIPHER-01. A blob that authenticated under one subject is copied verbatim into another
+   * subject's row. Before the fix, {@code FieldCipher.decrypt} trusted the header inside the blob
+   * as the row's own identity, so the copy decrypted and displayed alice's email under bob's row.
+   * The fix - {@code ShreddedConverter} records the decoded header, {@code onPostLoad} compares it
+   * against the row's true, resolved subject - refuses the whole load instead.
+   */
+  @Test
+  void probe_a_blob_moved_into_another_subjects_row_still_decrypts() throws Exception {
+    String aliceId = "cust-alice-" + System.nanoTime();
+    String bobId = "cust-bob-" + System.nanoTime();
+    service.create("acme", aliceId, "alice@example.com", "+33100000001");
+    service.create("acme", bobId, "bob@example.com", "+33100000002");
+
+    byte[] aliceEmail = rawEmail(aliceId);
+    try (var c = dataSource.getConnection();
+        var ps = c.prepareStatement("UPDATE customer SET email = ? WHERE customer_id = ?")) {
+      ps.setBytes(1, aliceEmail);
+      ps.setString(2, bobId);
+      ps.executeUpdate();
+    }
+
+    assertThatThrownBy(() -> customers.findByCustomerId(bobId))
+        .satisfies(t -> assertThat(shreddingCode(t)).isEqualTo(ErrorCodes.SUBJECT_MISMATCH));
+  }
+
+  /**
+   * CIPHER-01's other half: the same blob, moved to a row in a different tenant. Control 15 makes
+   * tenant isolation mandatory; before the fix a tenant-A blob sitting in a tenant-B row read back
+   * as tenant A's plaintext.
+   */
+  @Test
+  void probe_a_blob_moved_into_another_tenants_row_still_decrypts() throws Exception {
+    String subjectId = "cust-tenant-" + System.nanoTime();
+    service.create("acme", subjectId, "carla@example.com", "+33100000003");
+    // Same subject id, a different tenant - a distinct (tenant, subject) pair and a distinct key.
+    service.create("other-tenant", subjectId, "placeholder@example.com", "+33100000004");
+
+    byte[] acmeEmail = rawEmail(subjectId, "acme");
+    try (var c = dataSource.getConnection();
+        var ps =
+            c.prepareStatement(
+                "UPDATE customer SET email = ? WHERE customer_id = ? AND tenant_id = ?")) {
+      ps.setBytes(1, acmeEmail);
+      ps.setString(2, subjectId);
+      ps.setString(3, "other-tenant");
+      ps.executeUpdate();
+    }
+
+    assertThatThrownBy(() -> customers.findByCustomerId(subjectId))
+        .satisfies(t -> assertThat(shreddingCode(t)).isEqualTo(ErrorCodes.SUBJECT_MISMATCH));
+  }
+
+  /**
+   * QUESTIONS #4, ruling (c): the case the old per-thread map could not catch. The row is loaded
+   * and detached in one transaction/thread, its subject changed, then merged in a brand new session
+   * that never loaded it - so a cache of "what this process loaded" has nothing on it. The
+   * second-query check in {@code onPreUpdate} still catches it, because it reads the row's current
+   * header from the database rather than from anything this process remembered.
+   */
+  @Test
+  void probe_changing_the_subject_expression_moves_a_row_out_of_erasure_scope_on_a_detached_merge()
+      throws Exception {
+    String customerId = "cust-detached-" + System.nanoTime();
+    service.create("acme", customerId, "hana@example.com", "+33800000000");
+
+    Customer detached =
+        transactions.execute(status -> customers.findByCustomerId(customerId).get(0));
+    entityManager.clear(); // simulates a brand new session/thread that never loaded this row
+    detached.setCustomerId("someone-else-detached");
+
+    assertThatThrownBy(
+            () ->
+                transactions.executeWithoutResult(
+                    status -> {
+                      entityManager.merge(detached);
+                      entityManager.flush();
+                    }))
+        .satisfies(t -> assertThat(shreddingCode(t)).isEqualTo(ErrorCodes.SUBJECT_IMMUTABLE));
+  }
+
+  /**
+   * CIPHER-08. A write that never reaches {@code PostInsert} - here, the converter refusing with
+   * {@code SHRED-ERASED-001} <em>during flush, after {@code onPreInsert} already returned</em> -
+   * used to leave the scope on the thread. On a pooled request thread the next, unrelated write
+   * would then find a scope nobody meant to leave there and encrypt under the previous request's
+   * subject instead of failing closed with {@code SHRED-CONTEXT-001}. The fix is a transaction-
+   * boundary clear registered before the scope is ever pushed, not only the {@code Post} listeners,
+   * which by construction do not run on this failure path.
+   */
+  @Test
+  void probe_a_failed_insert_leaves_a_stale_shredding_scope() {
+    String customerId = "cust-leak-" + System.nanoTime();
+    service.create("acme", customerId, "ivy@example.com", "+33900000000");
+    service.erase("acme", customerId, "dpo", "art 17");
+
+    assertThatThrownBy(() -> service.create("acme", customerId, "ivy@example.com", "+33900000000"))
+        .satisfies(t -> assertThat(shreddingCode(t)).isEqualTo(ErrorCodes.ERASED));
+
+    assertThat(com.housedevinci.shredding.jpa.ShreddingContext.current())
+        .as("the failed insert must not leave a scope on this thread for the next write")
+        .isEmpty();
+
+    // the next write, on the same thread, must resolve its own subject rather than inherit
+    // anything: if the scope had leaked, this would either encrypt under the wrong subject or
+    // throw a different, unrelated error before ever reaching the tenant/customerId it was given.
+    String nextCustomerId = "cust-after-leak-" + System.nanoTime();
+    Customer created = service.create("acme", nextCustomerId, "jack@example.com", "+33900000001");
+    assertThat(created.getEmail()).isEqualTo("jack@example.com");
+    assertThat(service.byCustomerId(nextCustomerId).get(0).getEmail())
+        .isEqualTo("jack@example.com");
+  }
+
   /** Hibernate wraps some of these and rethrows others; the module's code is what matters. */
   private static String shreddingCode(Throwable thrown) {
     for (Throwable t = thrown; t != null; t = t.getCause()) {
@@ -234,6 +347,20 @@ class SampleEndToEndTest {
     try (var c = dataSource.getConnection();
         var ps = c.prepareStatement("SELECT email FROM customer WHERE customer_id = ?")) {
       ps.setString(1, customerId);
+      try (var rs = ps.executeQuery()) {
+        rs.next();
+        return rs.getBytes(1);
+      }
+    }
+  }
+
+  private byte[] rawEmail(String customerId, String tenantId) throws Exception {
+    try (var c = dataSource.getConnection();
+        var ps =
+            c.prepareStatement(
+                "SELECT email FROM customer WHERE customer_id = ? AND tenant_id = ?")) {
+      ps.setString(1, customerId);
+      ps.setString(2, tenantId);
       try (var rs = ps.executeQuery()) {
         rs.next();
         return rs.getBytes(1);

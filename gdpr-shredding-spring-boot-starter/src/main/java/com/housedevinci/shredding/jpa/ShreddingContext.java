@@ -6,6 +6,8 @@ import com.housedevinci.shredding.domain.SubjectId;
 import com.housedevinci.shredding.domain.TenantId;
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -41,6 +43,18 @@ public final class ShreddingContext {
 
   public static void push(Scope scope) {
     SCOPES.get().push(scope);
+  }
+
+  /**
+   * Drops the whole stack for this thread, whatever its depth. CIPHER-08's backstop: a write that
+   * never reaches its {@code Post} listener - a converter refusal, a constraint, an exception from
+   * {@code writeBlindIndexes} - would otherwise leave a scope on a pooled thread for the next,
+   * unrelated write to inherit. The bracket around each push (try/finally) is the first line of
+   * defence; this is the second, run at the transaction boundary regardless of how the write ended,
+   * because {@code Post} listeners by construction do not run on the failure path.
+   */
+  public static void clearAll() {
+    SCOPES.remove();
   }
 
   public static void pop() {
@@ -82,5 +96,50 @@ public final class ShreddingContext {
     } finally {
       pop();
     }
+  }
+
+  /**
+   * What a shredded column's stored header actually named, for the row currently being hydrated
+   * (CIPHER-01).
+   *
+   * <p>{@code AttributeConverter.convertToEntityAttribute} is handed nothing but the column bytes:
+   * no entity, no session, no row. By the time any Hibernate listener fires for a load, every
+   * converter on that row has already run - confirmed against the Hibernate ORM 7.4 loader bytecode
+   * this module builds against, not assumed - so there is no hook that fires <em>before</em> a
+   * shredded field is decrypted on read, the way {@code PreInsertEvent}/{@code PreUpdateEvent} fire
+   * before a write. The read-side check is therefore necessarily two-phase: {@code
+   * ShreddedConverter} records what the header actually said the instant it decodes it, and {@code
+   * ShreddingEventListener.onPostLoad} - which runs synchronously as part of the load, before the
+   * entity is handed to any caller - resolves the row's true subject and tenant from the
+   * now-fully-hydrated entity and compares. A mismatch throws from {@code onPostLoad}, which aborts
+   * the load: the value is decrypted internally for a few instructions, but it is never returned to
+   * a caller. See QUESTIONS.md CIPHER-01 for why this is not "checked before the key store is
+   * touched" the way the write path is.
+   */
+  public record Decoded(TenantId tenant, SubjectId subject) {}
+
+  private static final ThreadLocal<Map<String, Decoded>> DECODED_READS =
+      ThreadLocal.withInitial(HashMap::new);
+
+  /**
+   * @param key qualified as {@code entityName + "." + fieldName}, so two entity types that happen
+   *     to share a field name cannot collide
+   */
+  public static void recordDecoded(String key, TenantId tenant, SubjectId subject) {
+    DECODED_READS.get().put(key, new Decoded(tenant, subject));
+  }
+
+  /**
+   * Removes and returns what was recorded for {@code key}, if anything. Removing on read means a
+   * value from a previous row's hydration can never be mistaken for the current row's: a field that
+   * was {@code null} for this row, and so was never decoded, correctly has nothing to check.
+   */
+  public static Optional<Decoded> takeDecoded(String key) {
+    Map<String, Decoded> map = DECODED_READS.get();
+    Decoded value = map.remove(key);
+    if (map.isEmpty()) {
+      DECODED_READS.remove();
+    }
+    return Optional.ofNullable(value);
   }
 }

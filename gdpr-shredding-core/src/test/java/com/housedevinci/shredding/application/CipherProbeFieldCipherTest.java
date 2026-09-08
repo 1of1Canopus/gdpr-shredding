@@ -99,6 +99,95 @@ class CipherProbeFieldCipherTest {
   }
 
   /**
+   * CIPHER-10 / M8. The probe above is honest but does not test what its name claims: relabelling
+   * the header's tenant makes {@code MasterKey.unwrap} fail on the <em>wrap</em> AAD before {@code
+   * Aad.forValue} - the value AAD control 2 requires tenant to be in - is ever reached. With {@code
+   * tenant} removed from {@code Aad.forValue} that probe stays green, because tenant A and tenant B
+   * never share key material in the normal case, so *something* always fails regardless of which
+   * AAD carries the tenant.
+   *
+   * <p>To isolate the value AAD specifically, this test uses a {@link KeyProvider} that hands back
+   * the <em>same</em> key material for every tenant - the one variable the wrap layer can no longer
+   * explain a failure with - and then rewrites only the header's tenant on a blob whose nonce and
+   * ciphertext are untouched. If {@code Aad.forValue} did not bind tenant, GCM authentication would
+   * succeed: same key, same nonce, same ciphertext, same AAD but for the tenant component. It must
+   * fail.
+   */
+  @Test
+  void probe_value_aad_binds_tenant_independently_of_the_wrap_layer() {
+    byte[] sharedKey = new byte[32];
+    java.util.Arrays.fill(sharedKey, (byte) 0x42);
+    KeyProvider sameKeyForEveryTenant =
+        new KeyProvider() {
+          @Override
+          public Unwrapped currentForWrite(TenantId tenant, SubjectId subject) {
+            return new Unwrapped(sharedKey, 1, com.housedevinci.shredding.domain.KeyState.ACTIVE);
+          }
+
+          @Override
+          public java.util.Optional<Unwrapped> forRead(
+              TenantId tenant, SubjectId subject, int version) {
+            return java.util.Optional.of(
+                new Unwrapped(sharedKey, 1, com.housedevinci.shredding.domain.KeyState.ACTIVE));
+          }
+
+          @Override
+          public long recordEncryptions(
+              TenantId tenant, SubjectId subject, int version, int count) {
+            return 1;
+          }
+
+          @Override
+          public Unwrapped rotate(TenantId tenant, SubjectId subject) {
+            return new Unwrapped(sharedKey, 1, com.housedevinci.shredding.domain.KeyState.ACTIVE);
+          }
+
+          @Override
+          public boolean healthy() {
+            return true;
+          }
+        };
+    var isolatedCache = new DataKeyCache(Duration.ofSeconds(60), 100, Clock.systemUTC());
+    var isolatedCipher =
+        new FieldCipher(
+            sameKeyForEveryTenant,
+            isolatedCache,
+            RandomSource.secure(),
+            FieldCipher.DEFAULT_MAX_ENCRYPTIONS_PER_KEY);
+
+    byte[] storedForA = isolatedCipher.encrypt(A, SUBJECT, "Customer", "email", PLAINTEXT);
+    var a = EncryptedValue.decode(storedForA);
+    byte[] relabelledForB =
+        new EncryptedValue(
+                a.formatVersion(),
+                a.algId(),
+                a.keyVersion(),
+                B,
+                a.subject(),
+                a.nonce(),
+                a.ciphertext())
+            .encode();
+
+    // Sanity: with the same key material and the same header otherwise, tenant A's own blob
+    // still decrypts - proving the failure below is caused by the tenant change, not by anything
+    // else this rewrite might have disturbed.
+    assertThat(isolatedCipher.decrypt("Customer", "email", storedForA, ErasedValuePolicy.SENTINEL))
+        .get()
+        .isEqualTo(PLAINTEXT);
+
+    assertThatThrownBy(
+            () ->
+                isolatedCipher.decrypt(
+                    "Customer", "email", relabelledForB, ErasedValuePolicy.SENTINEL))
+        .as(
+            "same key material for both tenants: only the value AAD's tenant component can be"
+                + " what makes this fail")
+        .isInstanceOf(ShreddingException.class)
+        .extracting(e -> ((ShreddingException) e).code())
+        .isEqualTo(ErrorCodes.DECRYPT);
+  }
+
+  /**
    * A key store that is merely down must not read as an erasure. Conflating the two turns a KMS
    * outage into an apparent completed erasure, and with the re-encryption refusal in place into a
    * real one.

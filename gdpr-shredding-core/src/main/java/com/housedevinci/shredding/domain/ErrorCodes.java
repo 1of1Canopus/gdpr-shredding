@@ -25,8 +25,13 @@ public final class ErrorCodes {
   /** The data subject of a persisted row changed (control 14). */
   public static final String SUBJECT_IMMUTABLE = "SHRED-SUBJECT-IMMUTABLE";
 
-  /** The per-key encryption count reached the hard limit; rotate (control 3). */
-  public static final String KEY_EXHAUSTED = "SHRED-KEY-EXHAUSTED";
+  /**
+   * A stored value's header names a different tenant or subject than the row it was read from
+   * (CIPHER-01). Distinct from {@link #SUBJECT_IMMUTABLE}: that one is "someone changed this row's
+   * subject", this one is "this row holds someone else's ciphertext" - a DPO reading the log needs
+   * to tell the two apart.
+   */
+  public static final String SUBJECT_MISMATCH = "SHRED-SUBJECT-MISMATCH";
 
   /** A tenant was required and none was in context. Fails closed (control 15). */
   public static final String TENANT_MISSING = "SHRED-TENANT-MISSING";

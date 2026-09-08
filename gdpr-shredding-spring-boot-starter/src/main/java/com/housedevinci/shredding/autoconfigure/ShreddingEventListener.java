@@ -1,6 +1,7 @@
 package com.housedevinci.shredding.autoconfigure;
 
 import com.housedevinci.shredding.domain.BlindIndex;
+import com.housedevinci.shredding.domain.EncryptedValue;
 import com.housedevinci.shredding.domain.ErrorCodes;
 import com.housedevinci.shredding.domain.Normalisation;
 import com.housedevinci.shredding.domain.ShreddingException;
@@ -8,10 +9,10 @@ import com.housedevinci.shredding.domain.SubjectId;
 import com.housedevinci.shredding.domain.TenantId;
 import com.housedevinci.shredding.jpa.ShreddingContext;
 import java.math.BigDecimal;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.time.LocalDate;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import org.hibernate.event.spi.PostInsertEvent;
 import org.hibernate.event.spi.PostInsertEventListener;
@@ -24,6 +25,8 @@ import org.hibernate.event.spi.PreInsertEventListener;
 import org.hibernate.event.spi.PreUpdateEvent;
 import org.hibernate.event.spi.PreUpdateEventListener;
 import org.hibernate.persister.entity.EntityPersister;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * The write path.
@@ -47,25 +50,12 @@ public final class ShreddingEventListener
 
   private static final long serialVersionUID = 1L;
 
-  /** Bounded: this is a cache of "what subject did this row load under", not a session. */
-  private static final int MAX_REMEMBERED = 10_000;
+  private static final Logger log = LoggerFactory.getLogger(ShreddingEventListener.class);
 
   private final transient java.util.function.Supplier<ShreddedModel> modelSupplier;
   private transient volatile ShreddedModel resolvedModel;
   private final TenantSupplier tenantSupplier;
   private final transient BlindIndex blindIndex;
-
-  private final transient ThreadLocal<Map<String, String>> loadedSubjects =
-      ThreadLocal.withInitial(
-          () ->
-              new LinkedHashMap<>(16, 0.75f, true) {
-                private static final long serialVersionUID = 1L;
-
-                @Override
-                protected boolean removeEldestEntry(Map.Entry<String, String> eldest) {
-                  return size() > MAX_REMEMBERED;
-                }
-              });
 
   /** Where the ambient tenant comes from when {@code @Shredded(tenant=...)} is not given. */
   @FunctionalInterface
@@ -91,9 +81,18 @@ public final class ShreddingEventListener
       return false;
     }
     var scope = scopeFor(event.getEntity(), fields);
+    registerTransactionBoundaryClear(event.getSession());
     ShreddingContext.push(scope);
-    remember(event.getPersister(), event.getId(), scope.subject().value());
-    writeBlindIndexes(event.getPersister(), event.getState(), scope.tenant());
+    // CIPHER-08: nothing between the push and the return can leak the scope past this write. A
+    // converter refusal, a constraint or writeBlindIndexes itself throwing all reach PostInsert
+    // never running, which is exactly when a pooled thread would otherwise keep serving the wrong
+    // subject's scope to the next, unrelated write.
+    try {
+      writeBlindIndexes(event.getPersister(), event.getState(), scope.tenant());
+    } catch (RuntimeException e) {
+      ShreddingContext.pop();
+      throw e;
+    }
     return false;
   }
 
@@ -111,21 +110,45 @@ public final class ShreddingEventListener
       return false;
     }
     var scope = scopeFor(event.getEntity(), fields);
-    String remembered = loadedSubjects.get().get(rowKey(event.getPersister(), event.getId()));
-    if (remembered != null && !remembered.equals(scope.subject().value())) {
-      // Control 14: silently re-encrypting under another subject's key would move the row out of
-      // the first subject's erasure scope, so their erasure would leave this row readable.
-      throw new ShreddingException(
-          ErrorCodes.SUBJECT_IMMUTABLE,
-          "the data subject of a persisted "
-              + entityName(event.getPersister())
-              + " row cannot change. It was captured at first persist; changing it would"
-              + " re-encrypt the row under another subject's key and move it out of the first"
-              + " subject's erasure scope.");
-    }
+    // QUESTIONS #4, ruling (c): the previous subject is read from the stored blob's own header,
+    // not from a cache of what this process happened to load.
+    //
+    // The ruling's proposed optimisation - skip the round trip when no @Shredded field is dirty -
+    // is unsound for an entity mapped the ordinary way (no @DynamicUpdate, which Customer is not):
+    // Hibernate's default UPDATE rewrites every basic column, including every shredded one, so
+    // every converter runs again regardless of whether its Java value changed, on every update.
+    // "No shredded field dirty" therefore does not mean "no re-encryption is about to happen"; it
+    // can be true on exactly the update this check exists for, when only a non-shredded property
+    // such as the subject's own source field changed. Detecting the sound version of the
+    // optimisation would mean reading persister.isDynamicUpdate() and reasoning about it alongside
+    // dirtiness - more moving parts in a correctness-critical check than the one extra query it
+    // saves. The check runs on every update to a shredded entity instead. Recorded in QUESTIONS.md
+    // CIPHER-01/#4 as a considered deviation from the literal optimisation text.
+    refuseIfSubjectMoved(event, fields, scope);
+    registerTransactionBoundaryClear(event.getSession());
     ShreddingContext.push(scope);
-    writeBlindIndexes(event.getPersister(), event.getState(), scope.tenant());
+    try {
+      writeBlindIndexes(event.getPersister(), event.getState(), scope.tenant());
+    } catch (RuntimeException e) {
+      ShreddingContext.pop();
+      throw e;
+    }
     return false;
+  }
+
+  /**
+   * CIPHER-08's second line of defence, registered once per write: whatever state the try/finally
+   * above did not catch - the flush itself failing after {@code Pre*} returned successfully, most
+   * notably - is cleared when the transaction ends, success or not. {@code Post} listeners by
+   * construction do not run on the failure path, so they cannot be the only place this happens.
+   */
+  private static void registerTransactionBoundaryClear(
+      org.hibernate.engine.spi.SharedSessionContractImplementor session) {
+    ((org.hibernate.event.spi.EventSource) session)
+        .getTransactionCompletionCallbacks()
+        .registerCallback(
+            (org.hibernate.engine.spi.TransactionCompletionCallbacks.AfterCompletionCallback)
+                (success, s) -> ShreddingContext.clearAll());
   }
 
   @Override
@@ -141,11 +164,50 @@ public final class ShreddingEventListener
     if (fields == null) {
       return;
     }
+    // CIPHER-01: every shredded field's converter has already run by the time any load listener
+    // fires (see ShreddingContext.Decoded). This is the first point at which the row's true
+    // subject and tenant - resolved from the now fully-hydrated entity, the same way the write
+    // path resolves them - can be compared against what each field's header actually said. A
+    // mismatch throws here, before the entity is returned from the load that is in progress.
+    String trueSubject;
     try {
-      remember(event.getPersister(), event.getId(), resolveSubject(event.getEntity(), fields));
-    } catch (RuntimeException ignored) {
+      trueSubject = resolveSubject(event.getEntity(), fields);
+    } catch (RuntimeException e) {
       // A row whose subject expression cannot be evaluated on load is not a reason to fail the
-      // read; the update path will refuse it with a clear message if it is ever written.
+      // read; a write to it will refuse with a clear message if it is ever attempted.
+      return;
+    }
+    var first = fields.get(0);
+    TenantId trueTenant =
+        first.tenant() != null ? TenantId.of(first.tenant().evaluate(event.getEntity())) : null;
+    SubjectId subjectId = SubjectId.of(trueSubject);
+    String entityName = entityName(event.getPersister());
+    for (var field : fields) {
+      var decoded = ShreddingContext.takeDecoded(entityName + "." + field.fieldName());
+      if (decoded.isEmpty()) {
+        continue;
+      }
+      var header = decoded.get();
+      boolean subjectMismatch = !header.subject().equals(subjectId);
+      boolean tenantMismatch = trueTenant != null && !header.tenant().equals(trueTenant);
+      if (subjectMismatch || tenantMismatch) {
+        log.warn(
+            "shredding: refusing to load {}.{}: the stored value's header names a different"
+                + " {} than the row it was read from",
+            entityName,
+            field.fieldName(),
+            subjectMismatch ? "subject" : "tenant");
+        throw new ShreddingException(
+            ErrorCodes.SUBJECT_MISMATCH,
+            "the stored value for "
+                + entityName
+                + "."
+                + field.fieldName()
+                + " belongs to a different "
+                + (subjectMismatch ? "subject" : "tenant")
+                + " than the row it was read from. A ciphertext moved between rows, subjects or"
+                + " tenants is refused rather than decrypted and displayed.");
+      }
     }
   }
 
@@ -163,14 +225,62 @@ public final class ShreddingEventListener
     return current;
   }
 
-  private void remember(EntityPersister persister, Object id, String subject) {
-    if (id != null) {
-      loadedSubjects.get().put(rowKey(persister, id), subject);
+  /**
+   * QUESTIONS #4, ruling (c): a second fetch of the row's current shredded columns, decoded only
+   * for the header - no key material is touched. When the stored row has no shredded blob at all
+   * (every shredded column null, or the field was only just added to the entity) there is nothing
+   * that could have been moved out of an erasure scope, and the update is allowed.
+   */
+  private void refuseIfSubjectMoved(
+      PreUpdateEvent event,
+      List<ShreddedModel.ShreddedField> fields,
+      ShreddingContext.Scope scope) {
+    var first = fields.get(0);
+    String[] idColumns = event.getPersister().getIdentifierColumnNames();
+    if (idColumns.length != 1) {
+      // Composite identifiers are not supported by this check; documented as a residual rather
+      // than silently wrong.
+      return;
+    }
+    String sql =
+        "SELECT "
+            + quote(first.columnName())
+            + " FROM "
+            + quote(first.tableName())
+            + " WHERE "
+            + quote(idColumns[0])
+            + " = ?";
+    byte[] stored =
+        event
+            .getSession()
+            .doReturningWork(
+                connection -> {
+                  try (PreparedStatement ps = connection.prepareStatement(sql)) {
+                    ps.setObject(1, event.getId());
+                    try (ResultSet rs = ps.executeQuery()) {
+                      return rs.next() ? rs.getBytes(1) : null;
+                    }
+                  }
+                });
+    if (stored == null) {
+      return;
+    }
+    var header = EncryptedValue.decode(stored);
+    boolean subjectMoved = !header.subject().equals(scope.subject());
+    boolean tenantMoved = !header.tenant().equals(scope.tenant());
+    if (subjectMoved || tenantMoved) {
+      throw new ShreddingException(
+          ErrorCodes.SUBJECT_IMMUTABLE,
+          "the data subject of a persisted "
+              + first.entityName()
+              + " row cannot change. It was captured at first persist and is bound into the"
+              + " ciphertext's own header; changing it would re-encrypt the row under another"
+              + " subject's key and move it out of the first subject's erasure scope.");
     }
   }
 
-  private static String rowKey(EntityPersister persister, Object id) {
-    return persister.getEntityName() + "#" + id;
+  private static String quote(String identifier) {
+    return "\"" + identifier.replace("\"", "\"\"") + "\"";
   }
 
   private ShreddingContext.Scope scopeFor(Object entity, List<ShreddedModel.ShreddedField> fields) {

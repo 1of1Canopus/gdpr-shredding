@@ -231,6 +231,92 @@ class CipherProbeJdbcTest {
   }
 
   /**
+   * CIPHER-03. The tombstone in {@code probe_concurrent_write_encrypts_under_a_destroying_key} only
+   * defends a subject that already had a key row when the erasure started - the {@code FOR UPDATE}
+   * it takes locks nothing for a subject whose first write is still in flight. This probe is that
+   * earlier case: the subject has <em>never</em> been written, so there is no key row and no
+   * tombstone row for either side to block on until {@code JdbcSupport.lockSubject}'s advisory lock
+   * gives them one. The eraser takes it first and holds its transaction open (inside the record
+   * factory, exactly like the sibling probe above) so the writer's {@code currentForWrite} blocks
+   * on the same lock instead of racing ahead with nothing to observe.
+   */
+  @Test
+  void probe_a_write_racing_the_first_key_mint_survives_the_tombstone() throws Exception {
+    SubjectId subject = SubjectId.of("s-first-mint-race");
+    var store = store(List.of());
+    var erasureHolds = new CountDownLatch(1);
+    var writerTried = new CountDownLatch(1);
+    var writerFailure = new AtomicReference<Throwable>();
+
+    Thread writer =
+        new Thread(
+            () -> {
+              try {
+                erasureHolds.await(10, TimeUnit.SECONDS);
+                cipher.encrypt(
+                    TENANT,
+                    subject,
+                    "Customer",
+                    "email",
+                    "first@b.c".getBytes(StandardCharsets.UTF_8));
+              } catch (Throwable t) {
+                writerFailure.set(t);
+              } finally {
+                writerTried.countDown();
+              }
+            });
+
+    Thread eraser =
+        new Thread(
+            () ->
+                store.erase(
+                    TENANT,
+                    subject,
+                    (destroyed, cleared) -> {
+                      erasureHolds.countDown();
+                      // hold the advisory lock while the writer's mint tries to take it too
+                      try {
+                        Thread.sleep(300);
+                      } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                      }
+                      return com.housedevinci.shredding.domain.ErasureRecord.of(
+                          java.time.Instant.now(),
+                          TENANT,
+                          new Pseudonymiser(SECRET).pseudonym(TENANT, subject),
+                          "dpo",
+                          "art 17, subject never wrote anything",
+                          destroyed,
+                          1,
+                          1,
+                          cleared,
+                          com.housedevinci.shredding.domain.ErasureOutcome.COMPLETE,
+                          List.of(),
+                          java.time.Instant.now().plus(Duration.ofDays(30)));
+                    }));
+
+    eraser.start();
+    writer.start();
+    eraser.join(30_000);
+    writerTried.await(30, TimeUnit.SECONDS);
+    writer.join(30_000);
+
+    assertThat(writerFailure.get())
+        .as(
+            "a first write racing the erasure of a subject that never had a key must fail, not"
+                + " mint a live key for a subject the erasure log already says is erased")
+        .isInstanceOf(ShreddingException.class);
+    assertThat(((ShreddingException) writerFailure.get()).code()).isEqualTo(ErrorCodes.ERASED);
+    assertThat(keys.forRead(TENANT, subject, 1))
+        .as("no key was ever minted for this subject")
+        .isEmpty();
+    var record = store.readAfter(0, 10).get(0);
+    assertThat(record.keysDestroyed())
+        .as("nothing existed to destroy; the erasure is honestly recorded as such")
+        .isZero();
+  }
+
+  /**
    * An index that survives the erasure keeps the erased subject searchable and linkable for ever.
    * The value is unreadable and the row still answers "is this alice@example.com?" with yes.
    */
@@ -367,6 +453,93 @@ class CipherProbeJdbcTest {
                       "UPDATE shredding_erasure_anchor SET keyed = NOT keyed,"
                           + " row_count = row_count + 1, head_hash = repeat('a', 64)"))
           .hasMessageContaining("immutable");
+    }
+  }
+
+  /**
+   * CIPHER-04. The runtime role needs INSERT on {@code shredding_erased_subject} so {@code mint}
+   * and {@code erase} can write the tombstone; before this fix the same grant let it DELETE too.
+   * Deleting the tombstone is exactly as dangerous as deleting an erasure row: {@code mint} trusts
+   * its absence to mean "never erased" and mints again.
+   */
+  @Test
+  void probe_the_runtime_role_can_delete_the_tombstone_and_mint_again() throws Exception {
+    var store = store(List.of());
+    SubjectId subject = SubjectId.of("s-tombstone-delete");
+    store.erase(
+        TENANT,
+        subject,
+        (destroyed, cleared) ->
+            com.housedevinci.shredding.domain.ErasureRecord.of(
+                java.time.Instant.now(),
+                TENANT,
+                new Pseudonymiser(SECRET).pseudonym(TENANT, subject),
+                "dpo",
+                "art 17",
+                destroyed,
+                1,
+                1,
+                cleared,
+                com.housedevinci.shredding.domain.ErasureOutcome.COMPLETE,
+                List.of(),
+                java.time.Instant.now().plus(Duration.ofDays(30))));
+
+    try (Connection c = dataSource.getConnection();
+        var st = c.createStatement()) {
+      assertThatThrownBy(
+              () ->
+                  st.execute(
+                      "DELETE FROM shredding_erased_subject WHERE tenant = 'acme' AND subject ="
+                          + " 's-tombstone-delete'"))
+          .hasMessageContaining("append-only");
+      assertThatThrownBy(() -> st.execute("UPDATE shredding_erased_subject SET erased_at = now()"))
+          .hasMessageContaining("append-only");
+      assertThatThrownBy(() -> st.execute("TRUNCATE shredding_erased_subject"))
+          .hasMessageContaining("append-only");
+    }
+  }
+
+  /**
+   * CIPHER-05. {@code pg_trigger} is database-wide and trigger names are per-table, so a bare
+   * {@code tgname} guard with no {@code tgrelid} predicate is satisfied by the same-named trigger
+   * on a different schema's copy of the same table - once one schema on the database has run the
+   * schema step, every later schema silently skips every trigger it creates. This runs the schema
+   * step again in a second, freshly created schema and proves its own append-only triggers exist
+   * there too.
+   */
+  @Test
+  void probe_the_append_only_triggers_are_skipped_in_a_second_schema() throws Exception {
+    // The default schema (public, from setUp) already has the triggers; this is "a second schema
+    // on the same database", the exact condition the finding names.
+    try (Connection c = dataSource.getConnection();
+        var st = c.createStatement()) {
+      st.execute("DROP SCHEMA IF EXISTS other CASCADE");
+      st.execute("CREATE SCHEMA other");
+      st.execute("SET search_path TO other");
+      st.execute(
+          new String(
+              CipherProbeJdbcTest.class
+                  .getResourceAsStream("/com/housedevinci/shredding/schema-postgresql.sql")
+                  .readAllBytes(),
+              StandardCharsets.UTF_8));
+      st.execute(
+          "INSERT INTO other.shredding_erasure_anchor (id, head_hash, row_count,"
+              + " updated_at, keyed) VALUES (1, repeat('0', 64), 0, now(), true)");
+      assertThatThrownBy(() -> st.execute("DELETE FROM other.shredding_erasure_anchor"))
+          .as("the anchor's own guard must fire in the second schema too")
+          .hasMessageContaining("append-only");
+      st.execute(
+          "INSERT INTO other.shredding_erased_subject (tenant, subject, erased_at)"
+              + " VALUES ('acme', 's-other-schema', now())");
+      assertThatThrownBy(() -> st.execute("DELETE FROM other.shredding_erased_subject"))
+          .as("the tombstone's guard must fire in the second schema too, not only in the first")
+          .hasMessageContaining("append-only");
+    } finally {
+      try (Connection c = dataSource.getConnection();
+          var st = c.createStatement()) {
+        st.execute("SET search_path TO public");
+        st.execute("DROP SCHEMA IF EXISTS other CASCADE");
+      }
     }
   }
 
