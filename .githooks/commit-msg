@@ -1,0 +1,24 @@
+#!/bin/sh
+# commit-msg hook: enforces the portfolio commit convention (see SHARED-CONVENTIONS.md).
+msg_file="$1"
+subject=$(sed -n '1p' "$msg_file")
+case "$subject" in
+  "Merge branch"*|"Merge remote-tracking"*|"Revert \""*) exit 0 ;;
+esac
+types='feat|fix|refactor|perf|test|docs|build|ci|chore|revert|merge'
+if ! printf '%s' "$subject" | grep -Eq "^($types)\([a-z0-9-]+\): [a-z0-9].*[^.]$"; then
+  echo "commit-msg: subject must be '<type>(<scope>): <imperative lowercase subject>' with no trailing period" >&2
+  echo "  types: $types" >&2
+  echo "  got:   $subject" >&2
+  exit 1
+fi
+if [ ${#subject} -gt 72 ]; then
+  echo "commit-msg: subject is ${#subject} chars, max 72" >&2; exit 1
+fi
+if grep -Eiq '^(Co-Authored-By|Claude-Session|Generated-by|Signed-off-by: .*claude)' "$msg_file"; then
+  echo "commit-msg: attribution trailers are forbidden (Souhaile's rule)" >&2; exit 1
+fi
+if grep -q '—' "$msg_file"; then
+  echo "commit-msg: no em-dashes in commit messages" >&2; exit 1
+fi
+exit 0
