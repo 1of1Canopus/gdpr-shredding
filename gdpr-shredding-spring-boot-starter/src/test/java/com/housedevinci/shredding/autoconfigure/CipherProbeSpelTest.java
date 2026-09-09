@@ -74,4 +74,33 @@ class CipherProbeSpelTest {
     var expression = new SubjectExpression("Doc.x", "#{owner.missing}");
     assertThatThrownBy(() -> expression.evaluate(new Doc())).isInstanceOf(ShreddingException.class);
   }
+
+  /**
+   * L12: {@code #{#this}} and {@code #{#root}} are permitted by {@code
+   * SimpleEvaluationContext.forReadOnlyDataBinding()} - it only restricts property navigation, not
+   * which root object a bare reference resolves to - and both hand back the entity itself. {@code
+   * String.valueOf(entity)} is then {@code Object}'s default {@code "ClassName@identityHashCode"}:
+   * a different value for every instance and every JVM run. The row would be encrypted under a key
+   * nobody could ever ask an erasure for again, silently.
+   */
+  @Test
+  void probe_a_subject_expression_resolving_to_an_identity_hash_is_refused() {
+    var thisRef = new SubjectExpression("Doc.x", "#{#this}");
+    assertThatThrownBy(() -> thisRef.evaluate(new Doc())).isInstanceOf(ShreddingException.class);
+
+    var rootRef = new SubjectExpression("Doc.x", "#{#root}");
+    assertThatThrownBy(() -> rootRef.evaluate(new Doc())).isInstanceOf(ShreddingException.class);
+
+    // Also refused: a resolved value of a permitted scalar type whose own toString() happens to
+    // have the exact "ClassName@identityHashCode" shape.
+    var identityShaped = new SubjectExpression("Doc.x", "#{identityShaped}");
+    assertThatThrownBy(() -> identityShaped.evaluate(new IdentityShaped()))
+        .isInstanceOf(ShreddingException.class);
+  }
+
+  public static class IdentityShaped {
+    public CharSequence getIdentityShaped() {
+      return "com.example.Widget@1a2b3c4d";
+    }
+  }
 }
