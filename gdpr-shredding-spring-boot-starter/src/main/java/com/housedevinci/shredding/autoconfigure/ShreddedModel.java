@@ -286,10 +286,13 @@ public final class ShreddedModel {
 
     if (entityManagerFactory != null) {
       var known = new HashSet<String>();
+      var shreddedEntityNames = new HashSet<String>();
       for (var field : shredded) {
         known.add(field.entityName() + "." + field.fieldName());
+        shreddedEntityNames.add(field.entityName());
       }
       refuseUnmodelledShreddedConverters(entityManagerFactory, known);
+      refuseCompositeIdShreddedEntities(entityManagerFactory, shreddedEntityNames);
     }
 
     return new ShreddedModel(shredded, indexes);
@@ -316,6 +319,46 @@ public final class ShreddedModel {
           // write path - matched here so the two never disagree about which entity a key names.
           String entityName = simpleEntityName(persister.getEntityName());
           scanAttributeMappings(entityName, entityName, persister.getAttributeMappings(), known);
+        });
+  }
+
+  /**
+   * C-38. {@code refuseIfSubjectMoved} and {@code onPostLoad} both return early when the entity's
+   * identifier maps to more than one column - the update-time subject-immutability check and the
+   * load-time per-row re-read are both built around reading a single-column id. That leaves a
+   * composite-id {@code @Shredded} entity fail-closed but unusable: every read of a row carrying a
+   * stored shredded value is refused with {@code SHRED-READ-UNVERIFIED}, including rows the
+   * application wrote itself and nobody touched, because {@code onPostLoad} never drains the frame.
+   * A mapping this module cannot support belongs in the same startup refusal as the
+   * {@code @SecondaryTable} split above, not discovered on the first read in production.
+   */
+  private static void refuseCompositeIdShreddedEntities(
+      EntityManagerFactory entityManagerFactory, Set<String> shreddedEntityNames) {
+    if (shreddedEntityNames.isEmpty()) {
+      return;
+    }
+    var sessionFactory =
+        entityManagerFactory.unwrap(org.hibernate.engine.spi.SessionFactoryImplementor.class);
+    var mappingMetamodel = sessionFactory.getMappingMetamodel();
+    mappingMetamodel.forEachEntityDescriptor(
+        persister -> {
+          String entityName = simpleEntityName(persister.getEntityName());
+          if (!shreddedEntityNames.contains(entityName)) {
+            return;
+          }
+          String[] idColumns = persister.getIdentifierColumnNames();
+          if (idColumns.length != 1) {
+            throw config(
+                entityName
+                    + " has @Shredded fields and a composite identifier ("
+                    + idColumns.length
+                    + " id columns). The update-time subject-immutability check and the load-time"
+                    + " per-row re-read both read the entity's identifier as a single column; a"
+                    + " composite id cannot be checked that way. Every read of a row carrying a"
+                    + " stored shredded value would be refused, including rows this application"
+                    + " wrote itself, so the mapping is refused here instead of discovered on the"
+                    + " first read in production.");
+          }
         });
   }
 
