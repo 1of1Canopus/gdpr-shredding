@@ -50,4 +50,10 @@ public abstract class ShreddedLocalDateConverter extends ShreddedConverter<Local
   protected boolean isErasedSentinel(LocalDate attribute) {
     return false;
   }
+
+  /** Design §1.1: the marker this type reads as until onPostLoad installs the value. */
+  @Override
+  protected LocalDate placeholder() {
+    return Placeholders.LOCAL_DATE;
+  }
 }

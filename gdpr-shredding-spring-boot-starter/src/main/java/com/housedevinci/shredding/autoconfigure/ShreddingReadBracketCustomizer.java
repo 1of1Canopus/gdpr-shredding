@@ -137,24 +137,26 @@ public final class ShreddingReadBracketCustomizer
         // reasonably expect to behave like the target's own.
         return method.invoke(target, args);
       }
-      ShreddingContext.pushReadBracket();
+      long token = ShreddingContext.openRegion();
       Object result;
       try {
         result = method.invoke(target, args);
       } catch (InvocationTargetException e) {
-        // The frame still closes - a pooled thread must never carry a stale frame into the next,
+        // The region still unwinds - a pooled thread must never carry a stale one into the next,
         // unrelated call - but an unverified decode is not the failure worth reporting here; the
         // exception the repository method itself threw is.
-        ShreddingContext.discardReadBracket();
+        ShreddingContext.discardRegion(token);
         throw e.getCause() != null ? e.getCause() : e;
       } catch (Throwable t) {
-        ShreddingContext.discardReadBracket();
+        ShreddingContext.discardRegion(token);
         throw t;
       }
       // C-17/C-18/C-20/C-22: verified before the value is handed back, not merely before this
-      // method returns. popReadBracket() throws SHRED-READ-UNVERIFIED here, replacing the normal
-      // return below, whenever the call decrypted something no verifier ever drained.
-      ShreddingContext.popReadBracket();
+      // method returns. closeRegion() throws SHRED-READ-UNVERIFIED here, replacing the normal
+      // return below, whenever the call decrypted something no verifier ever installed. The token
+      // is the region this invocation opened, so an inner region left behind by an Error cannot be
+      // mistaken for it.
+      ShreddingContext.closeRegion(token);
       return result;
     }
   }

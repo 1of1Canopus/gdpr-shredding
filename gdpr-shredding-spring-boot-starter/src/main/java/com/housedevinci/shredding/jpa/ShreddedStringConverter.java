@@ -29,4 +29,10 @@ public abstract class ShreddedStringConverter extends ShreddedConverter<String> 
   protected boolean isErasedSentinel(String attribute) {
     return isStringMarker(attribute);
   }
+
+  /** Design §1.1: the marker this type reads as until onPostLoad installs the value. */
+  @Override
+  protected String placeholder() {
+    return Placeholders.STRING;
+  }
 }

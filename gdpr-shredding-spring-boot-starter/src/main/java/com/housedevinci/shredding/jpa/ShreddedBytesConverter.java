@@ -31,4 +31,10 @@ public abstract class ShreddedBytesConverter extends ShreddedConverter<byte[]> {
   protected boolean isErasedSentinel(byte[] attribute) {
     return attribute == ErasedValue.BYTES_MARKER;
   }
+
+  /** Design §1.1: the marker this type reads as until onPostLoad installs the value. */
+  @Override
+  protected byte[] placeholder() {
+    return Placeholders.BYTES;
+  }
 }

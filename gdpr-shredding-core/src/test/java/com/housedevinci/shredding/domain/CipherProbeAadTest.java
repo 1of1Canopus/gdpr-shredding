@@ -42,10 +42,13 @@ class CipherProbeAadTest {
         .isNotEqualTo(base);
     assertThat(Aad.forValue(TENANT, SubjectId.of("s-2"), ROW, "Customer", "email", 1, (byte) 1))
         .isNotEqualTo(base);
-    assertThat(Aad.forValue(TENANT, SUBJECT, ROW, "Customer", "email", 2, (byte) 1)).isNotEqualTo(base);
-    assertThat(Aad.forValue(TENANT, SUBJECT, ROW, "Customer", "email", 1, (byte) 2)).isNotEqualTo(base);
+    assertThat(Aad.forValue(TENANT, SUBJECT, ROW, "Customer", "email", 2, (byte) 1))
+        .isNotEqualTo(base);
+    assertThat(Aad.forValue(TENANT, SUBJECT, ROW, "Customer", "email", 1, (byte) 2))
+        .isNotEqualTo(base);
     // Design §3 / C-34: two rows of the SAME subject must not share authenticated material.
-    assertThat(Aad.forValue(TENANT, SUBJECT, RowId.ofIdentifier(2L), "Customer", "email", 1, (byte) 1))
+    assertThat(
+            Aad.forValue(TENANT, SUBJECT, RowId.ofIdentifier(2L), "Customer", "email", 1, (byte) 1))
         .isNotEqualTo(base);
     assertThat(new String(base, StandardCharsets.UTF_8)).startsWith("sh1|");
   }

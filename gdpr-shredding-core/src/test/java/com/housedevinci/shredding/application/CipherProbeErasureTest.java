@@ -4,12 +4,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.housedevinci.shredding.adapter.memory.InMemoryErasureStore;
 import com.housedevinci.shredding.adapter.memory.InMemoryKeyProvider;
-import com.housedevinci.shredding.domain.RowId;
 import com.housedevinci.shredding.domain.ErasedValuePolicy;
 import com.housedevinci.shredding.domain.ErasureChain;
 import com.housedevinci.shredding.domain.ErasureOutcome;
 import com.housedevinci.shredding.domain.Pseudonymiser;
 import com.housedevinci.shredding.domain.RandomSource;
+import com.housedevinci.shredding.domain.RowId;
 import com.housedevinci.shredding.domain.SubjectId;
 import com.housedevinci.shredding.domain.TenantId;
 import java.nio.charset.StandardCharsets;
@@ -79,7 +79,8 @@ class CipherProbeErasureTest {
         };
     var store = new InMemoryErasureStore[1];
     var service = service(ErasureChain.keyed(SECRET, "k1"), List.of(failing), store);
-    cipher.encrypt(TENANT, SUBJECT, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
+    cipher.encrypt(
+        TENANT, SUBJECT, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
 
     var result = service.erase(new ErasureRequest(TENANT, SUBJECT, "dpo", "art 17"));
 
@@ -127,7 +128,8 @@ class CipherProbeErasureTest {
         };
     var store = new InMemoryErasureStore[1];
     var service = service(ErasureChain.keyed(SECRET, "k1"), List.of(hook), store);
-    cipher.encrypt(TENANT, SUBJECT, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
+    cipher.encrypt(
+        TENANT, SUBJECT, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
 
     var first = service.erase(new ErasureRequest(TENANT, SUBJECT, "dpo", "art 17"));
     assertThat(first.outcome()).isEqualTo(ErasureOutcome.PARTIAL);
@@ -169,7 +171,8 @@ class CipherProbeErasureTest {
         };
     var store = new InMemoryErasureStore[1];
     var service = service(ErasureChain.keyed(SECRET, "k1"), List.of(hook), store);
-    cipher.encrypt(TENANT, SUBJECT, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
+    cipher.encrypt(
+        TENANT, SUBJECT, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
 
     service.erase(new ErasureRequest(TENANT, SUBJECT, "dpo", "art 17"));
     var second = service.erase(new ErasureRequest(TENANT, SUBJECT, "dpo", "art 17"));
@@ -193,7 +196,8 @@ class CipherProbeErasureTest {
         };
     var store = new InMemoryErasureStore[1];
     var service = service(ErasureChain.keyed(SECRET, "k1"), List.of(ok), store);
-    cipher.encrypt(TENANT, SUBJECT, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
+    cipher.encrypt(
+        TENANT, SUBJECT, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
 
     var result = service.erase(new ErasureRequest(TENANT, SUBJECT, "dpo", "art 17"));
 
@@ -206,7 +210,8 @@ class CipherProbeErasureTest {
   void erasing_twice_writes_one_record() {
     var store = new InMemoryErasureStore[1];
     var service = service(ErasureChain.keyed(SECRET, "k1"), List.of(), store);
-    cipher.encrypt(TENANT, SUBJECT, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
+    cipher.encrypt(
+        TENANT, SUBJECT, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
 
     var first = service.erase(new ErasureRequest(TENANT, SUBJECT, "dpo", "art 17"));
     var second = service.erase(new ErasureRequest(TENANT, SUBJECT, "dpo", "art 17"));
@@ -220,7 +225,8 @@ class CipherProbeErasureTest {
   void the_record_holds_a_pseudonym_and_the_backup_clearance_date() {
     var store = new InMemoryErasureStore[1];
     var service = service(ErasureChain.keyed(SECRET, "k1"), List.of(), store);
-    cipher.encrypt(TENANT, SUBJECT, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
+    cipher.encrypt(
+        TENANT, SUBJECT, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
 
     var result = service.erase(new ErasureRequest(TENANT, SUBJECT, "dpo", "art 17"));
     var record = result.records().get(0);
@@ -275,7 +281,8 @@ class CipherProbeErasureTest {
             nanoClock,
             1,
             2);
-    cipher.encrypt(TENANT, SUBJECT, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
+    cipher.encrypt(
+        TENANT, SUBJECT, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
 
     var result = service.erase(new ErasureRequest(TENANT, SUBJECT, "dpo", "art 17"));
     var record = result.records().get(0);
@@ -297,7 +304,8 @@ class CipherProbeErasureTest {
   void probe_an_unkeyed_or_unanchored_erasure_chain_reports_intact() {
     var unkeyedStore = new InMemoryErasureStore[1];
     var unkeyed = service(ErasureChain.unkeyed(), List.of(), unkeyedStore);
-    cipher.encrypt(TENANT, SUBJECT, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
+    cipher.encrypt(
+        TENANT, SUBJECT, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
     unkeyed.erase(new ErasureRequest(TENANT, SUBJECT, "dpo", "art 17"));
 
     var report =
@@ -360,7 +368,8 @@ class CipherProbeErasureTest {
   void a_verifier_without_the_row_key_id_reports_broken_not_intact() {
     var store = new InMemoryErasureStore[1];
     var service = service(ErasureChain.keyed(SECRET, "k1"), List.of(), store);
-    cipher.encrypt(TENANT, SUBJECT, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
+    cipher.encrypt(
+        TENANT, SUBJECT, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
     service.erase(new ErasureRequest(TENANT, SUBJECT, "dpo", "art 17"));
 
     assertThat(

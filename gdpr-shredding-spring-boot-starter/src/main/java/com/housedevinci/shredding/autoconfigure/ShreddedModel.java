@@ -38,7 +38,20 @@ public final class ShreddedModel {
       boolean carriesSentinel,
       SubjectExpression tenant,
       String tableName,
-      String columnName) {}
+      String columnName,
+      Field javaField,
+      ShreddedConverter<?> converter) {
+
+    /**
+     * Design §1: {@code onPostLoad} installs the verified plaintext directly into the entity, so it
+     * needs the reflective field as well as the persister's property index - the field is what the
+     * placeholder is read back from to decide whether a converter ran on this row at all.
+     */
+    public ShreddedField {
+      java.util.Objects.requireNonNull(javaField, "javaField");
+      java.util.Objects.requireNonNull(converter, "converter");
+    }
+  }
 
   /** One blind-index column and the shredded field it indexes. */
   public record BlindIndexField(
@@ -220,7 +233,9 @@ public final class ShreddedModel {
                     ? null
                     : new SubjectExpression(where, annotation.tenant()),
                 tableName(type),
-                columnName(field));
+                columnName(field),
+                accessible(field),
+                converter);
         shredded.add(shreddedField);
         shreddedFieldsHere.add(shreddedField);
         shreddedHere.add(field.getName());
@@ -286,13 +301,15 @@ public final class ShreddedModel {
 
     if (entityManagerFactory != null) {
       var known = new HashSet<String>();
-      var shreddedEntityNames = new HashSet<String>();
+      var shreddedFieldNamesByEntity = new LinkedHashMap<String, Set<String>>();
       for (var field : shredded) {
         known.add(field.entityName() + "." + field.fieldName());
-        shreddedEntityNames.add(field.entityName());
+        shreddedFieldNamesByEntity
+            .computeIfAbsent(field.entityName(), k -> new HashSet<>())
+            .add(field.fieldName());
       }
       refuseUnmodelledShreddedConverters(entityManagerFactory, known);
-      refuseCompositeIdShreddedEntities(entityManagerFactory, shreddedEntityNames);
+      refuseCompositeIdShreddedEntities(entityManagerFactory, shreddedFieldNamesByEntity);
     }
 
     return new ShreddedModel(shredded, indexes);
@@ -306,6 +323,11 @@ public final class ShreddedModel {
    * encrypted and completely unverified: refused here, at startup, naming the entity and attribute,
    * rather than left for CIPHER's own {@code Ledger.secret} repro to find on a live row.
    */
+  private static Field accessible(Field field) {
+    field.setAccessible(true);
+    return field;
+  }
+
   private static void refuseUnmodelledShreddedConverters(
       EntityManagerFactory entityManagerFactory, Set<String> known) {
     var sessionFactory =
@@ -333,7 +355,8 @@ public final class ShreddedModel {
    * {@code @SecondaryTable} split above, not discovered on the first read in production.
    */
   private static void refuseCompositeIdShreddedEntities(
-      EntityManagerFactory entityManagerFactory, Set<String> shreddedEntityNames) {
+      EntityManagerFactory entityManagerFactory, Map<String, Set<String>> shreddedByEntity) {
+    Set<String> shreddedEntityNames = shreddedByEntity.keySet();
     if (shreddedEntityNames.isEmpty()) {
       return;
     }
@@ -346,6 +369,22 @@ public final class ShreddedModel {
           if (!shreddedEntityNames.contains(entityName)) {
             return;
           }
+          var idMapping = persister.getIdentifierMapping();
+          if (!(idMapping instanceof org.hibernate.metamodel.mapping.BasicValuedModelPart)) {
+            // Cipher item 7: a single-column @EmbeddedId passes the column count below but is not
+            // basic, so its value is a component object with no canonical byte form. RowId would
+            // have to guess, and a guessed row binding is no binding.
+            throw config(
+                entityName
+                    + " has @Shredded fields and a composite identifier that is not a basic value ("
+                    + idMapping.getClass().getSimpleName()
+                    + "). Every shredded value is bound to its row's identifier, and a composite or"
+                    + " embedded identifier - even a single-column @EmbeddedId, which passes the"
+                    + " column count check below - has no canonical byte form this module could"
+                    + " bind to without guessing, and a guessed row binding is no binding. Use a"
+                    + " basic identifier: a numeric id, a UUID, a String or a byte[].");
+          }
+          refuseLoadedStateHostileMappings(persister, entityName, shreddedByEntity.get(entityName));
           String[] idColumns = persister.getIdentifierColumnNames();
           if (idColumns.length != 1) {
             throw config(
@@ -574,6 +613,72 @@ public final class ShreddedModel {
    * and the sample's {@code ShreddedFieldsDoNotLeakTest} ArchUnit rule is the reference users copy
    * for the Lombok case - see {@code docs/index.md}.
    */
+  /**
+   * Cipher item 10 / ruling D4. {@code onPostLoad} installs the verified plaintext into the entity
+   * <em>and</em> into the persistence context's loaded state, and three Hibernate mappings make
+   * that unsound. Each is refused at startup, naming what to change, rather than discovered as a
+   * row that cannot be updated.
+   *
+   * <p>Read off the runtime persister rather than off the annotations (the module's
+   * framework-integration rule): {@code @SelectBeforeUpdate} does not even exist as an annotation
+   * in Hibernate 7, optimistic locking and natural ids can both be declared in {@code orm.xml} or
+   * in a mapped superclass, and the persister is where every route ends up.
+   *
+   * <ul>
+   *   <li>{@code OptimisticLockStyle.ALL} and {@code DIRTY}: the UPDATE's {@code WHERE} clause is
+   *       built from the loaded state, so it would carry the installed <em>plaintext</em> against a
+   *       column that holds ciphertext. No update would ever match its row, and the failure would
+   *       look like a concurrency problem rather than a mapping one.
+   *   <li>select-before-update: Hibernate re-reads the row with {@code getDatabaseSnapshot}, which
+   *       runs the converters again but fires no {@code PostLoad}, so the snapshot is made of read
+   *       placeholders and compared against installed plaintext.
+   *   <li>a {@code @Shredded} column that is also part of the natural id: natural-id resolution and
+   *       its cache read the column through the converter outside any load event, for the same
+   *       reason - and a natural id that is personal data cannot be an index key in the first
+   *       place.
+   * </ul>
+   */
+  private static void refuseLoadedStateHostileMappings(
+      org.hibernate.persister.entity.EntityPersister persister,
+      String entityName,
+      Set<String> shreddedFieldNames) {
+    var style = persister.optimisticLockStyle();
+    if (style == org.hibernate.engine.OptimisticLockStyle.ALL
+        || style == org.hibernate.engine.OptimisticLockStyle.DIRTY) {
+      throw config(
+          entityName
+              + " has @Shredded fields and optimistic locking of style "
+              + style
+              + ". The UPDATE's WHERE clause is built from the persistence context's loaded state,"
+              + " into which this module installs the verified plaintext, so it would be compared"
+              + " against a column that holds ciphertext and no update would ever match its row."
+              + " Use OptimisticLockType.VERSION or NONE.");
+    }
+    if (persister.isSelectBeforeUpdateRequired()) {
+      throw config(
+          entityName
+              + " has @Shredded fields and requires a select-before-update. Hibernate re-reads the"
+              + " row with getDatabaseSnapshot, which runs the @Shredded converters again but fires"
+              + " no PostLoad event, so the snapshot is made of read placeholders and is compared"
+              + " against installed plaintext. Remove select-before-update from this mapping.");
+    }
+    if (persister.hasNaturalIdentifier() && shreddedFieldNames != null) {
+      String[] names = persister.getPropertyNames();
+      for (int index : persister.getNaturalIdentifierProperties()) {
+        if (index >= 0 && index < names.length && shreddedFieldNames.contains(names[index])) {
+          throw config(
+              entityName
+                  + "."
+                  + names[index]
+                  + " is both @Shredded and part of the natural id. Natural-id resolution reads the"
+                  + " column through the converter outside any load event, so it sees the read"
+                  + " placeholder rather than the value - and a natural id that is personal data"
+                  + " cannot be an index key in the first place. Use a @BlindIndex column instead.");
+        }
+      }
+    }
+  }
+
   private static void refuseGeneratedRendering(Class<?> type, String entityName) {
     if (type.isRecord()) {
       throw config(

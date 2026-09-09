@@ -320,51 +320,62 @@ class ShreddingIntegrationTest {
         .satisfies(t -> assertThat(shreddingCode(t)).isEqualTo(ErrorCodes.READ_UNSCOPED));
   }
 
-  /** The documented escape hatch: an explicit read scope makes the same projection succeed. */
+  /**
+   * Design §1, Cipher item 1: {@code withRead} is gone. It vouched for a projection with a
+   * caller-supplied subject, which is exactly the "ambient state authorises" shape five review
+   * passes kept breaking. A projection inside an open read region now decrypts nothing a caller can
+   * see - the converter returns a placeholder - and the region refuses when it closes.
+   */
   @Test
-  void an_explicit_read_scope_allows_a_projection_of_the_row_it_names() {
+  void a_projection_inside_a_read_region_is_refused_when_the_region_closes() {
     String ownerId = "owner-scoped-" + System.nanoTime();
-    docs.save(new Doc(ownerId, "scoped title", "scoped body"));
-
-    String title =
-        transactions.execute(
-            status ->
-                ShreddingContext.withRead(
-                    new ShreddingContext.Scope(
-                        TenantId.of("default"), SubjectId.of(ownerId), "Doc"),
-                    () ->
-                        entityManager
-                            .createQuery(
-                                "select d.title from Doc d where d.ownerId = :id", String.class)
-                            .setParameter("id", ownerId)
-                            .getSingleResult()));
-    assertThat(title).isEqualTo("scoped title");
-  }
-
-  /** An explicit read scope still refuses a moved blob - it is verified, not just permitted. */
-  @Test
-  void an_explicit_read_scope_still_refuses_a_moved_blob() throws Exception {
-    String aliceId = "owner-alice-scoped-" + System.nanoTime();
-    String bobId = "owner-bob-scoped-" + System.nanoTime();
-    docs.save(new Doc(aliceId, "ALICE-SECRET-TITLE-4", "alice body 4"));
-    docs.save(new Doc(bobId, "bob title 4", "bob body 4"));
-    moveColumn("doc", "title", aliceId, bobId);
+    docs.save(new Doc(ownerId, "SCOPED-TITLE-SECRET", "scoped body"));
 
     assertThatThrownBy(
             () ->
                 transactions.executeWithoutResult(
                     status ->
-                        ShreddingContext.withRead(
-                            new ShreddingContext.Scope(
-                                TenantId.of("default"), SubjectId.of(bobId), "Doc"),
+                        ShreddingContext.withReadBracket(
                             () ->
                                 entityManager
                                     .createQuery(
                                         "select d.title from Doc d where d.ownerId = :id",
                                         String.class)
-                                    .setParameter("id", bobId)
+                                    .setParameter("id", ownerId)
                                     .getSingleResult())))
-        .satisfies(t -> assertThat(shreddingCode(t)).isEqualTo(ErrorCodes.SUBJECT_MISMATCH));
+        .satisfies(t -> assertThat(shreddingCode(t)).isEqualTo(ErrorCodes.READ_UNVERIFIED))
+        .satisfies(t -> assertThat(messagesOf(t)).doesNotContain("SCOPED-TITLE-SECRET"));
+  }
+
+  /**
+   * And the same projection with no region at all: refused at the decrypt, before anything is
+   * returned. Cipher item 1 - a placeholder handed out with nothing that will ever close a region
+   * is a value crossing the boundary with no signal.
+   */
+  @Test
+  void a_projection_with_no_read_region_is_refused_at_the_decrypt() {
+    String ownerId = "owner-unscoped-" + System.nanoTime();
+    docs.save(new Doc(ownerId, "UNSCOPED-TITLE-SECRET", "body"));
+
+    assertThatThrownBy(
+            () ->
+                transactions.executeWithoutResult(
+                    status ->
+                        entityManager
+                            .createQuery(
+                                "select d.title from Doc d where d.ownerId = :id", String.class)
+                            .setParameter("id", ownerId)
+                            .getSingleResult()))
+        .satisfies(t -> assertThat(shreddingCode(t)).isEqualTo(ErrorCodes.READ_UNSCOPED))
+        .satisfies(t -> assertThat(messagesOf(t)).doesNotContain("UNSCOPED-TITLE-SECRET"));
+  }
+
+  private static String messagesOf(Throwable thrown) {
+    var sb = new StringBuilder();
+    for (Throwable t = thrown; t != null; t = t.getCause()) {
+      sb.append(String.valueOf(t.getMessage())).append('\n');
+    }
+    return sb.toString();
   }
 
   /** A repository call keeps decrypting transparently: the read bracket, not an explicit scope. */

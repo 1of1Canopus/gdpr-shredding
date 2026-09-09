@@ -8,7 +8,6 @@ import com.housedevinci.shredding.application.ErasureChainVerifier;
 import com.housedevinci.shredding.application.ErasureRequest;
 import com.housedevinci.shredding.application.ErasureService;
 import com.housedevinci.shredding.application.FieldCipher;
-import com.housedevinci.shredding.domain.RowId;
 import com.housedevinci.shredding.domain.BlindIndexColumn;
 import com.housedevinci.shredding.domain.ErasedValuePolicy;
 import com.housedevinci.shredding.domain.ErasureChain;
@@ -16,6 +15,7 @@ import com.housedevinci.shredding.domain.ErrorCodes;
 import com.housedevinci.shredding.domain.MasterKey;
 import com.housedevinci.shredding.domain.Pseudonymiser;
 import com.housedevinci.shredding.domain.RandomSource;
+import com.housedevinci.shredding.domain.RowId;
 import com.housedevinci.shredding.domain.ShreddingException;
 import com.housedevinci.shredding.domain.SubjectId;
 import com.housedevinci.shredding.domain.TenantId;
@@ -199,7 +199,8 @@ class CipherProbeJdbcTest {
   @Test
   void probe_crash_between_key_destruction_and_the_erasure_record() {
     SubjectId subject = SubjectId.of("s-crash");
-    cipher.encrypt(TENANT, subject, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
+    cipher.encrypt(
+        TENANT, subject, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
     var store = store(List.of());
 
     assertThatThrownBy(
@@ -225,7 +226,8 @@ class CipherProbeJdbcTest {
   @Test
   void probe_concurrent_write_encrypts_under_a_destroying_key() throws Exception {
     SubjectId subject = SubjectId.of("s-race");
-    cipher.encrypt(TENANT, subject, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
+    cipher.encrypt(
+        TENANT, subject, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
     var store = store(List.of());
     var erasureHolds = new CountDownLatch(1);
     var writerTried = new CountDownLatch(1);
@@ -463,7 +465,8 @@ class CipherProbeJdbcTest {
             1,
             2);
     SubjectId subject = SubjectId.of("s-nanos");
-    cipher.encrypt(TENANT, subject, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
+    cipher.encrypt(
+        TENANT, subject, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
 
     var written =
         service.erase(new ErasureRequest(TENANT, subject, "dpo", "art 17")).records().get(0);

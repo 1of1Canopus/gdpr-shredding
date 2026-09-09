@@ -33,6 +33,23 @@ public final class ErrorCodes {
    */
   public static final String SUBJECT_MISMATCH = "SHRED-SUBJECT-MISMATCH";
 
+  /**
+   * C-34: a stored value's header names the right subject and tenant but a different row. Two rows
+   * of one subject used to hold interchangeable ciphertexts, so an attacker holding {@code UPDATE}
+   * copied one row's column into another and the second row displayed the first's value as its own.
+   * Distinct from {@link #SUBJECT_MISMATCH} on purpose: a DPO reading the log needs to tell "this
+   * row holds another person's data" from "this row holds another of this person's rows".
+   */
+  public static final String ROW_MISMATCH = "SHRED-ROW-MISMATCH";
+
+  /**
+   * Design §1.1, Cipher item 2: an attempt to persist the marker a {@code @Shredded} read returns
+   * before {@code onPostLoad} installs the verified value. Writing it would destroy a live
+   * ciphertext, which is what a {@code null} placeholder did silently for the types that have no
+   * sentinel.
+   */
+  public static final String PLACEHOLDER = "SHRED-PLACEHOLDER-001";
+
   /** A tenant was required and none was in context. Fails closed (control 15). */
   public static final String TENANT_MISSING = "SHRED-TENANT-MISSING";
 

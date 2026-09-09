@@ -91,7 +91,8 @@ class EncryptedValueV2Test {
   private static byte[] blobWithRowIdBytes(byte[] rowIdBytes) {
     byte[] t = "acme".getBytes(StandardCharsets.UTF_8);
     byte[] s = "s-1".getBytes(StandardCharsets.UTF_8);
-    return ByteBuffer.allocate(9 + 1 + t.length + 1 + s.length + 1 + rowIdBytes.length + 12 + 4 + 20)
+    return ByteBuffer.allocate(
+            9 + 1 + t.length + 1 + s.length + 1 + rowIdBytes.length + 12 + 4 + 20)
         .put(EncryptedValue.MAGIC)
         .put(EncryptedValue.FORMAT_VERSION)
         .put(EncryptedValue.ALG_AES_256_GCM)

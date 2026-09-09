@@ -4,13 +4,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.housedevinci.shredding.adapter.memory.InMemoryKeyProvider;
-import com.housedevinci.shredding.domain.RowId;
 import com.housedevinci.shredding.domain.EncryptedValue;
 import com.housedevinci.shredding.domain.ErasedValuePolicy;
 import com.housedevinci.shredding.domain.ErrorCodes;
 import com.housedevinci.shredding.domain.KeyDestroyedException;
 import com.housedevinci.shredding.domain.KeyUnavailableException;
 import com.housedevinci.shredding.domain.RandomSource;
+import com.housedevinci.shredding.domain.RowId;
 import com.housedevinci.shredding.domain.ShreddingException;
 import com.housedevinci.shredding.domain.SubjectId;
 import com.housedevinci.shredding.domain.TenantId;

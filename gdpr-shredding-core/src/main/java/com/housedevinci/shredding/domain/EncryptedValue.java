@@ -31,8 +31,7 @@ import java.util.Objects;
  * stops a ciphertext being moved between two rows of the <em>same</em> subject, which v1 decrypted
  * and displayed: tenant and subject alone made two rows of one person interchangeable. A v1 header
  * is <em>refused</em>, not read - there is no downgrade path and no dual-format reader, because
- * either would let an attacker holding {@code UPDATE} strip the row binding by writing a v1
- * blob.
+ * either would let an attacker holding {@code UPDATE} strip the row binding by writing a v1 blob.
  *
  * <p>Fixed offsets, no optional sections. The explicit ciphertext length is what makes truncation
  * and trailing bytes structural errors rather than something only GCM authentication would notice.
@@ -63,6 +62,7 @@ public record EncryptedValue(
 
   /** Row-blind, and therefore refused rather than read (Cipher item 12). */
   public static final byte FORMAT_VERSION_V1_UNBOUND = 0x01;
+
   public static final byte ALG_AES_256_GCM = 0x01;
   public static final int NONCE_BYTES = 12;
   public static final int TAG_BYTES = 16;

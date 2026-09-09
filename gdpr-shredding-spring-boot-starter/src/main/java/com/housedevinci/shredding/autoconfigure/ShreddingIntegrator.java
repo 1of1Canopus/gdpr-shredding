@@ -32,9 +32,16 @@ public final class ShreddingIntegrator implements Integrator {
     // prependListeners: the scope must be pushed before anything else can trigger a bind.
     registry.prependListeners(EventType.PRE_INSERT, listener);
     registry.prependListeners(EventType.PRE_UPDATE, listener);
+    // Cipher item 8. POST_LOAD is prepended, not appended: Hibernate's own
+    // PostLoadEventListenerStandardImpl is what invokes a user's @PostLoad methods and
+    // @EntityListeners beans, and while this listener ran after it every one of those callbacks saw
+    // the read placeholder instead of the value. The verifier has to install first. This is also
+    // why the framework matrix has a test for the ordering rather than a comment claiming it.
+    registry.prependListeners(EventType.POST_LOAD, listener);
+    // POST_INSERT and POST_UPDATE stay appended: the post-hoc header check (design §1.3) must see
+    // what actually reached the database, after every other listener has had its turn.
     registry.appendListeners(EventType.POST_INSERT, listener);
     registry.appendListeners(EventType.POST_UPDATE, listener);
-    registry.appendListeners(EventType.POST_LOAD, listener);
   }
 
   @Override
