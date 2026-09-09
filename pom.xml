@@ -277,7 +277,9 @@
                 folded onto the canonical name by licenseMerges below.
 
                 Allowed, and why:
-                  Apache-2.0    the licence of this project; permissive, patent grant.
+                  Apache-2.0    permissive, patent grant - this project itself is FSL-1.1-ALv2,
+                                not Apache-2.0 (see LICENSE and NOTICE); this is what a
+                                *dependency* may declare.
                   MIT / MIT-0   permissive.
                   BSD           2-clause and 3-clause; permissive.
                   EPL-2.0       Jakarta APIs and Logback. Weak copyleft, file-level, and it does
