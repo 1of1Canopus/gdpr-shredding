@@ -112,12 +112,12 @@ public final class ShreddingEventListener
     // a blind index and the refusal names the entity rather than only the column.
     refusePlaceholdersInState(event.getPersister(), event.getState(), fields);
     registerTransactionBoundaryClear(event.getSession());
-    long token = ShreddingContext.pushWrite(scope, event.getSession());
+    long token = ShreddingContext.pushBind(scope, event.getSession());
     writeScopeToken.set(token);
     // CIPHER-08: nothing between the push and the return can leak the scope past this write. A
     // converter refusal, a constraint or writeBlindIndexes itself throwing all reach PostInsert
     // never running, which is exactly when a pooled thread would otherwise keep serving the wrong
-    // subject's scope to the next, unrelated write - and pushWrite now drops residue anyway.
+    // subject's scope to the next, unrelated write - and pushBind drops residue first anyway.
     try {
       writeBlindIndexes(event.getPersister(), event.getState(), scope.tenant());
     } catch (RuntimeException e) {
@@ -178,7 +178,7 @@ public final class ShreddingEventListener
     refuseIfSubjectMoved(event.getSession(), event.getPersister(), event.getId(), fields, scope);
     refusePlaceholdersInState(event.getPersister(), event.getState(), fields);
     registerTransactionBoundaryClear(event.getSession());
-    long token = ShreddingContext.pushWrite(scope, event.getSession());
+    long token = ShreddingContext.pushBind(scope, event.getSession());
     writeScopeToken.set(token);
     try {
       writeBlindIndexes(event.getPersister(), event.getState(), scope.tenant());

@@ -84,19 +84,36 @@ public final class ShreddingContext {
 
   /**
    * Pushes the scope a single bind will be performed under and returns the token that pops it
-   * again.
-   *
-   * <p>C-41 / Cipher item 14: a write scope may not nest. Hibernate executes the action queue
-   * serially and a shredded converter never triggers another entity's bind, so a scope still live
-   * when a {@code Pre*} listener pushes is by construction residue from a bind whose {@code Post*}
-   * listener never ran - a converter refusal, a constraint violation, a throw out of {@code
-   * writeBlindIndexes}. Residue is dropped here, loudly, so it can never be consumed by the bind
-   * that follows it.
+   * again. Nesting is allowed: this is the plain push, reached from {@link #with} and from the
+   * erasure path, where a caller may legitimately hold one scope while opening another.
    *
    * @param session the Hibernate session that owns this write, so a transaction completing on this
    *     thread clears only its own scopes
    */
   public static long pushWrite(Scope scope, Object session) {
+    Objects.requireNonNull(scope, "scope");
+    long token = TOKENS.incrementAndGet();
+    WRITE_SCOPES.get().push(new WriteEntry(scope, session, token));
+    return token;
+  }
+
+  /**
+   * What {@code onPreInsert}/{@code onPreUpdate} use: the same push, preceded by dropping anything
+   * still live.
+   *
+   * <p>C-41 / Cipher item 14. Hibernate executes the action queue serially and a shredded converter
+   * never triggers another entity's bind, so a scope still live when a {@code Pre*} listener pushes
+   * is by construction residue from a bind whose {@code Post*} listener never ran - a converter
+   * refusal, a constraint violation, a throw out of {@code writeBlindIndexes}. Dropping it here is
+   * what makes "a write scope is consumable only by the bind it was pushed for" true on the path
+   * where residue was consumable; the entity-name check in {@link #require} and the post-hoc header
+   * check in the {@code Post*} listeners are the other two.
+   *
+   * <p>Kept apart from {@link #pushWrite} because that one is also reached from {@link #with},
+   * which is public API a caller may legitimately nest. A nested {@code with} is not residue, and
+   * treating it as such would both discard a live scope and log once per level.
+   */
+  public static long pushBind(Scope scope, Object session) {
     Objects.requireNonNull(scope, "scope");
     Deque<WriteEntry> stack = WRITE_SCOPES.get();
     if (!stack.isEmpty()) {
@@ -112,10 +129,27 @@ public final class ShreddingContext {
     return token;
   }
 
-  /** Pops the scope {@code token} named, and nothing else. A token already gone is not an error. */
+  /**
+   * Pops the scope {@code token} named, and nothing else. A token already gone is not an error.
+   *
+   * <p>The top-of-stack case is handled with a bare {@code pop()} rather than by the {@code
+   * removeIf} below, and that is not a micro-optimisation. This method runs from a {@code finally},
+   * including the {@code finally} of a {@link #with} nested to the point of stack exhaustion, and
+   * at that depth every additional frame is another chance for the cleanup itself to throw a second
+   * {@link StackOverflowError} and leave the scope behind - which is a leaked write scope, the one
+   * piece of ambient state in this class that is real authority. {@code removeIf} on an {@link
+   * ArrayDeque} allocates an iterator and calls through a lambda; {@code pop()} does neither.
+   * Measured by {@code CipherProbeBracketUnwindTest}, which caught this exact regression at 154/200
+   * leaks before the fast path was restored.
+   */
   public static void popWrite(long token) {
     Deque<WriteEntry> stack = WRITE_SCOPES.get();
-    stack.removeIf(entry -> entry.token() == token);
+    WriteEntry top = stack.peek();
+    if (top != null && top.token() == token) {
+      stack.pop();
+    } else if (top != null) {
+      stack.removeIf(entry -> entry.token() == token);
+    }
     if (stack.isEmpty()) {
       WRITE_SCOPES.remove();
     }
@@ -179,13 +213,33 @@ public final class ShreddingContext {
     return scope;
   }
 
-  /** Runs {@code body} with a scope pushed; for tests and for the erasure endpoint. */
+  /**
+   * Runs {@code body} with a scope pushed; for tests and for the erasure endpoint.
+   *
+   * <p>The stack is resolved <em>before</em> the body runs and the {@code finally} unwinds it
+   * in-line rather than calling {@link #popWrite}. A {@code finally} cannot survive stack
+   * exhaustion - it has to *call* something, and at that depth the call is what throws the second
+   * {@link StackOverflowError} (C-32) - so the only lever left is to need as few frames as possible
+   * on the way out. Resolving the {@link ThreadLocal} up front and popping the deque directly is
+   * measurably better than a helper call: {@code CipherProbeBracketUnwindTest} reports the number.
+   *
+   * <p>It is a lever, not a guarantee. The guarantee is elsewhere and does not depend on unwinding
+   * at all: a scope that does survive is dropped by {@link #pushBind} before the next bind, refused
+   * by {@link #require}'s entity-name check if anything else reaches for it, and caught after the
+   * fact by the post-hoc header check in the {@code Post*} listeners. See QUESTIONS.md #24.
+   */
   public static <T> T with(Scope scope, java.util.function.Supplier<T> body) {
+    Deque<WriteEntry> stack = WRITE_SCOPES.get();
     long token = pushWrite(scope, Thread.currentThread());
     try {
       return body.get();
     } finally {
-      popWrite(token);
+      WriteEntry top = stack.peek();
+      if (top != null && top.token() == token) {
+        stack.pop();
+      } else {
+        popWrite(token);
+      }
     }
   }
 

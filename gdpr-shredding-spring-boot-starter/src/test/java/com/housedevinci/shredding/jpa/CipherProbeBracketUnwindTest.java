@@ -72,7 +72,10 @@ class CipherProbeBracketUnwindTest {
             TenantId.of("t"), SubjectId.of("attacker"), "Widget", RowId.ofIdentifier(9L));
     ShreddingContext.pushWrite(stale, new Object());
 
-    long token = ShreddingContext.pushWrite(SCOPE, new Object());
+    // pushBind, not pushWrite: what onPreInsert/onPreUpdate use. The plain push allows nesting,
+    // because ShreddingContext.with(...) is public API a caller may legitimately nest, and a nested
+    // with is not residue.
+    long token = ShreddingContext.pushBind(SCOPE, new Object());
     try {
       assertThat(ShreddingContext.require("Widget", "name")).isEqualTo(SCOPE);
     } finally {
