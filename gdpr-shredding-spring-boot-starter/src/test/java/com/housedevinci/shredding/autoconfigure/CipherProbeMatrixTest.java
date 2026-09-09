@@ -250,7 +250,16 @@ class CipherProbeMatrixTest {
    * assert the opposite would mean deep-copying the array again, which reopens CIPHER-16.
    */
   @Test
-  void probe_an_in_place_mutation_of_an_immutable_byte_array_is_persisted() {
+  /**
+   * C-31 (fourth pass): renamed from {@code
+   * probe_an_in_place_mutation_of_an_immutable_byte_array_is_persisted}. The old name promised the
+   * opposite of what the body asserts: the assertion ({@code reloaded[0] == 1}, i.e. the mutation
+   * is lost) is correct and was correct before this rename too - it is what C-21's corrected
+   * documentation says happens, and Cipher's own third-pass fix text for C-21 rules out making the
+   * mutation actually persist (that would reintroduce CIPHER-16's IDENTITY-insert failure). Only
+   * the name was wrong; QUESTIONS.md #18 records the ruling.
+   */
+  void probe_an_in_place_mutation_of_an_immutable_byte_array_is_silently_discarded() {
     String owner = "blob-mut-" + System.nanoTime();
     byte[] payload = {1, 2, 3, 4};
     tx.executeWithoutResult(s -> blobs.save(new Blob(owner, payload)));

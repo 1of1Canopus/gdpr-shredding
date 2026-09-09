@@ -13,7 +13,6 @@ import com.housedevinci.shredding.domain.ShreddingException;
 import jakarta.persistence.EntityManager;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
-import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.SpringBootConfiguration;
@@ -72,6 +71,7 @@ class CipherProbeReadScopeTest {
 
   @Autowired DocRepository docs;
   @Autowired DocProjectionRepository projections;
+  @Autowired WidgetRepository widgets;
   @Autowired EntityManager entityManager;
   @Autowired org.springframework.transaction.support.TransactionTemplate transactions;
   @Autowired javax.sql.DataSource dataSource;
@@ -120,28 +120,42 @@ class CipherProbeReadScopeTest {
         .satisfies(t -> assertThat(shreddingCode(t)).isEqualTo(ErrorCodes.READ_UNVERIFIED));
   }
 
-  // -- A2: two rows in one result set, one of them carrying a moved ciphertext ----------------
+  // -- A2 / C-30: two rows in one result set, one of them carrying a moved ciphertext ----------
 
+  /**
+   * C-30 (fourth pass): the handed-over version of this probe ran on {@code Doc} (two shredded
+   * fields) and asserted only {@code isNotBlank()} - which passed for the wrong reason: {@code
+   * Doc.body}'s collision (an artefact of the pre-C-26 flat {@code entity.field} key) threw first,
+   * so the moved {@code Doc.title} value was never actually checked at all, and a probe asserting
+   * "some error code, whichever it is" cannot tell the difference. Rewritten on {@link Widget}
+   * (exactly one shredded field, so nothing else can throw first) and asserting the specific code:
+   * with the C-26 fix, bob's own row is independently re-read and compared against its own true
+   * subject, and the header it actually holds names alice - a genuine {@code
+   * SHRED-SUBJECT-MISMATCH}, not an artefact of which row happened to drain a shared map entry.
+   */
   @Test
   void probe_a_second_row_in_the_same_result_set_is_never_verified() throws Exception {
     String alice = "a-multirow-alice-" + System.nanoTime();
     String bob = "b-multirow-bob-" + System.nanoTime();
     transactions.executeWithoutResult(
         s -> {
-          docs.save(new Doc(alice, "ALICE-MULTIROW-SECRET", "alice body"));
-          docs.save(new Doc(bob, "bob title", "bob body"));
+          widgets.save(new Widget(alice, "ALICE-MULTIROW-SECRET"));
+          widgets.save(new Widget(bob, "bob name"));
         });
-    moveColumn("doc", "title", alice, bob);
+    moveColumn("widget", "name", alice, bob);
 
-    // alice sorts first; her own row verifies and drains the recorded header, bob's does not.
     assertThatThrownBy(
             () ->
                 transactions.execute(
                     s -> {
-                      var rows = projections.byOwnersOrdered(List.of(alice, bob));
-                      return rows.stream().map(Doc::getTitle).toList();
+                      entityManager.clear();
+                      return widgets
+                          .findAll(org.springframework.data.domain.Sort.by("ownerId"))
+                          .stream()
+                          .map(Widget::getName)
+                          .toList();
                     }))
-        .satisfies(t -> assertThat(shreddingCode(t)).isNotBlank());
+        .satisfies(t -> assertThat(shreddingCode(t)).isEqualTo(ErrorCodes.SUBJECT_MISMATCH));
   }
 
   // -- A4: a Stream-returning repository method ------------------------------------------------
