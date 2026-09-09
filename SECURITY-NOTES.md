@@ -95,14 +95,48 @@ ciphertext is never displayed - holds: nothing is ever handed to application cod
 the check. What does not hold literally is "before it touches the key store", which this SPI makes
 unreachable for a converter-based design. See QUESTIONS.md CIPHER-01 for the full reasoning.
 
-**The residual this leaves.** The recording map in `ShreddingContext` is keyed per thread and
-cleared as each entry is consumed, which is correct for the ordinary case (rows are hydrated and
-`onPostLoad`ed one at a time, in sequence, on one thread). A query that join-fetches two rows of the
-*same* entity type into one JDBC row before either one's `onPostLoad` fires could have the second
-row's header overwrite the first's recorded value before it is checked, which would silently skip
-the first row's verification. This is a narrower gap than the one it replaces (it requires a
-same-type join fetch, not merely "any thread that never loaded the row"), and it is listed here
-rather than engineered away, in keeping with this file's rule.
+**Third pass (C-17/C-18/C-20/C-22, `docs/SECURITY-REVIEW-feat-shredding-core.md` "Third pass
+(8095d2c)"): the recording is now per-bracket-frame, not a flat, thread-wide map.** Cipher's
+re-verification found that the flat map above let a decrypt reached inside the read bracket - a
+repository `@Query` scalar/`Tuple`/interface projection, or a repository bound to a second,
+uninstrumented `EntityManagerFactory` - record its decoded header with nothing that would ever
+drain it (a projection triggers no `onPostLoad` at all), and either return the value unverified or
+have the stale entry mistaken for a later, unrelated row's header once *something* did drain it.
+`ShreddingContext.pushReadBracket()` now opens a frame; `recordDecoded`/`takeDecoded` operate on the
+frame currently on top of the stack, not a flat map; `popReadBracket()` closes the frame and throws
+`SHRED-READ-UNVERIFIED` if anything in it was never drained - after the value was computed, but
+before `ShreddingReadBracketCustomizer`'s proxy hands the repository method's result back to its
+caller. The bracket now owes a debt rather than granting a permission: every scenario above is
+refused rather than returned. The `join-fetch` scenario this note used to list as a residual is
+narrower than the frame accounting closes on its own (two rows of the same entity type, still
+inside one bracket, are each drained by their own `onPostLoad` call before the next one's decode is
+recorded - Hibernate fires `PostLoadEvent` per row, not once per query) and is no longer a known
+gap.
+
+**What is still a residual.** `ShreddingReadBracketCustomizer` additionally refuses startup outright
+when more than one `EntityManagerFactory` bean exists in the application context, on the reasoning
+that a bracket cannot vouch for a Hibernate session it does not know is instrumented. This is
+defence in depth, not the primary control - the primary control is the frame accounting above, which
+does not depend on knowing anything about the factory - and it could not be exercised by its own
+integration test: registering a second `EntityManagerFactory`-typed bean the ordinary Spring way
+trips Spring Boot's own `@ConditionalOnMissingBean` on its auto-configured (and therefore
+instrumented) factory, suppressing it entirely rather than letting both coexist. See QUESTIONS.md
+C-20.
+
+### `@Immutable` on a `@Shredded byte[]` field silently discards an in-place mutation (C-21)
+Every `@Shredded byte[]` field must carry `@org.hibernate.annotations.Immutable` (CIPHER-16): without
+it, Hibernate deep-copies the *converted* value to build its dirty-checking snapshot, calling the
+converter a second time outside the write bracket and failing an `IDENTITY`-strategy insert.
+
+That annotation is what stops the deep copy - and the deep copy it stops is also what Hibernate's
+dirty checking compares the live array against. With no snapshot copy, `b.getPayload()[0] = x` (an
+in-place mutation of the array the field already holds) is compared against itself on the next
+flush and is never seen as dirty: no exception, no log line, no `UPDATE`. This is not a bug to
+engineer away - doing so means deep-copying the array again, which reopens CIPHER-16 - it is the
+permanent, documented cost of the annotation the module requires. The only way to change a
+`@Shredded byte[]` field once `@Immutable` is present is to assign it a whole new array
+(`setPayload(newArray)`), never to mutate the one already there. `probe_an_in_place_mutation_of_an_immutable_byte_array_is_persisted`
+(`CipherProbeMatrixTest`) asserts the trap is real, not that it has been fixed.
 
 ### Erased subjects are tombstoned, and the tombstone holds no key material
 `shredding_erased_subject` records `(tenant, subject, erased_at)` and nothing else. There is no key
@@ -178,6 +212,9 @@ support ticket or a PDF the application itself produced. Those are the applicati
 | An outstanding `PARTIAL` erasure hidden behind an earlier `COMPLETE` by a backwards application-clock step | `latestForSubject` orders by the log's own monotonic `seq`, never by `ts` (CIPHER-15) |
 | `ShreddedBytesConverter` refusing its own entity's first insert under `@GeneratedValue(IDENTITY)` | the field is declared `@org.hibernate.annotations.Immutable`, which stops Hibernate deep-copying the converted value outside the write bracket; enforced at startup (CIPHER-16) |
 | A mistyped subject expression (`#{#this}`, `#{#root}`) resolving to an identity hash and encrypting under a key nobody can ever ask an erasure for | `SubjectExpression` refuses a resolved value that is not a scalar type, and refuses an `Object.toString()`-shaped string (L12) |
+| A repository `@Query`/interface projection, or a repository bound to a second, uninstrumented `EntityManagerFactory`, decrypting inside the read bracket with nothing that would ever verify it | `popReadBracket()` throws `SHRED-READ-UNVERIFIED` if the bracket's frame still holds an undrained decode when it closes, before the repository method's result reaches its caller (C-17, C-18, C-20) |
+| A stale decoded-header entry recorded by one repository call surviving to be mistaken for a later, unrelated call's row | recording and draining now happen against the frame the *current* bracket opened, not a bracket-wide map; the frame is checked and discarded when that bracket closes (C-22) |
+| A column mapped by a `ShreddedConverter` through a class-level `@Convert(attributeName=...)` or an `orm.xml` mapping, invisible to the field-level `@Shredded` scan and so fully encrypted but never verified on read | `ShreddedModel.scan` walks the Hibernate runtime metamodel for every attribute whose converter is a `ShreddedConverter`, by whatever route, and refuses startup on any with no matching field-level `@Shredded` entry (C-19) |
 
 ## Operating notes
 

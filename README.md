@@ -87,6 +87,17 @@ what was destroyed, when, by whom, and the date the erasure is also complete in 
 - **The plaintext leak paths fail at startup**, not by convention: a second-level cached
   `@Shredded` entity, a converter that names the wrong field, a subject expression that reaches a
   bean or a static type, or a sample-looking master key are all startup failures.
+- **A read that decrypts a `@Shredded` field is either verified or refused, never returned on
+  trust.** A Spring Data repository call is verified automatically. A raw `EntityManager` entity
+  operation (`find`, `merge`, `refresh`, an entity-returning query) needs
+  `ShreddingContext.withReadBracket(...)`:
+  ```java
+  Doc doc = ShreddingContext.withReadBracket(() -> entityManager.find(Doc.class, id));
+  ```
+  Anything that decrypts inside the bracket but is never handed to a verifier - a `@Query`
+  scalar/`Tuple`/interface projection, a `Stream<T>` consumed after the repository call already
+  returned, a hand-written DAO's own `EntityManager` use - is refused (`SHRED-READ-UNVERIFIED` or
+  `SHRED-READ-UNSCOPED`) rather than returned unverified. See `docs/index.md` for the full contract.
 - **There is no fail-open property anywhere.** Every weaker mode is explicit and WARNs at *every*
   startup.
 - **The honest bound is written down.** This is pseudonymisation with key destruction, not

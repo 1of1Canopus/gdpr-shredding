@@ -158,10 +158,16 @@ public abstract class ShreddedConverter<T> implements AttributeConverter<T, byte
               + ". A @Shredded field can only be decrypted through a managed entity load (a Spring"
               + " Data repository call, or a raw EntityManager entity operation - find, merge,"
               + " refresh, an entity-returning query - wrapped in"
-              + " ShreddingContext.withReadBracket(...)) or an explicit read scope"
-              + " (ShreddingContext.withRead(...)). A scalar, Tuple or constructor-expression"
-              + " projection has neither by default and is refused rather than decrypted with"
-              + " nothing to verify its header against.");
+              + " ShreddingContext.withReadBracket(...), documented in README.md and"
+              + " docs/index.md) or an explicit read scope (ShreddingContext.withRead(...))."
+              + " This is refused, with nothing decrypted, for any of several causes: a scalar,"
+              + " Tuple or constructor-expression projection with neither by default; a"
+              + " Stream-returning repository method consumed after the repository call already"
+              + " returned - the bracket closes with the method call, not with the stream, so"
+              + " draining the stream happens outside it; a hand-written DAO holding its own"
+              + " EntityManager rather than a Spring Data Repository, which this module never"
+              + " brackets automatically; or any other EntityManager use, inside or outside a"
+              + " repository call, that was not itself wrapped in withReadBracket(...).");
     }
     ShreddingContext.recordDecoded(entity + "." + field, header.tenant(), header.subject());
     var runtime = ShreddingRuntime.require();

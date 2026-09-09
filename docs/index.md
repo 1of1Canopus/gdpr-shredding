@@ -61,9 +61,15 @@ refuses to start if the names disagree. Base classes ship for `String`, `byte[]`
 > byte[] payload;
 > ```
 >
-> `ShreddedConverter`'s `toBytes`/`fromBytes` already return a fresh array, so nothing shares state
-> and the claim is honest. Covered end to end (insert, read, erase, re-read) under both `IDENTITY`
-> and `SEQUENCE` id strategies. See QUESTIONS.md #15.
+> **`@Immutable` is what stops the deep copy - and the deep copy it stops is also what Hibernate's
+> dirty checking compares the live array against (C-21).** With no snapshot copy, an in-place
+> mutation of the array a `@Shredded byte[]` field already holds -
+> `document.getPayload()[0] = x` - is compared against itself on the next flush and is never seen
+> as dirty: no exception, no log line, no `UPDATE`. This is the permanent cost of the annotation,
+> not a bug to fix later. **Assign a whole new array to change the value**
+> (`document.setPayload(newArray)`); never mutate the one already there. Covered end to end (insert,
+> read, erase, re-read) under both `IDENTITY` and `SEQUENCE` id strategies, and the in-place-mutation
+> trap itself has its own probe (`CipherProbeMatrixTest`). See QUESTIONS.md #15 and C-21.
 
 > Two lines per field is boilerplate, and we know it. An annotation processor that generates these
 > converters from `@Shredded` alone is a later improvement, deliberately not in this release: the
@@ -90,6 +96,47 @@ fails with `SHRED-CONTEXT-001` rather than guessing a subject.
 
 The SpEL runs in a `SimpleEvaluationContext` (property reads only: no beans, no `T()` type
 references, no constructors, no method calls), parsed once at bootstrap.
+
+## How the read path verifies (C-23)
+
+A decrypted `@Shredded` value is either verified against the row it came from or refused - never
+handed back on the strength of "something upstream probably checked this."
+
+- **A Spring Data JPA repository call** (`repository.findByX(...)`, `Page`/`Slice`/`Streamable`
+  returns, `findById`, derived finders, `Specification`) is verified automatically:
+  `ShreddingReadBracketCustomizer` opens a read bracket around the whole call, and
+  `ShreddingEventListener.onPostLoad` verifies each loaded row's shredded columns against its true
+  subject once the row is fully hydrated, before the call returns.
+- **A raw `EntityManager` entity operation** - `find`, `getReference`, `merge`, `refresh`, an
+  entity-returning JPQL or Criteria query - is not proxied by Spring Data and gets no bracket
+  automatically. Wrap it in `ShreddingContext.withReadBracket(...)`:
+  ```java
+  Doc doc = ShreddingContext.withReadBracket(() -> entityManager.find(Doc.class, id));
+  ```
+- **A projection that cannot go through a managed entity load at all** - a scalar, `Tuple` or
+  constructor-expression JPQL/Criteria query, run directly off an `EntityManager` - has nothing an
+  `onPostLoad` could ever verify. Use `ShreddingContext.withRead(...)` with the subject/tenant the
+  caller already knows and vouches for:
+  ```java
+  String title = ShreddingContext.withRead(
+      new ShreddingContext.Scope(tenant, subject, "Doc"),
+      () -> entityManager.createQuery("select d.title from Doc d where d.id = :id", String.class)
+          .setParameter("id", id)
+          .getSingleResult());
+  ```
+
+**What is refused, and why.** Any decrypt that happens while the read bracket is open but is never
+reached by a verifier - `onPostLoad` for a managed load, or an explicit `withRead` scope - throws
+`SHRED-READ-UNVERIFIED` when the bracket closes, before the value reaches the caller. This covers a
+repository `@Query` scalar/`Tuple`/interface projection (no entity is loaded, so `onPostLoad` never
+fires), and a repository bound to an uninstrumented `EntityManagerFactory` (no `onPostLoad` listener
+exists on that session at all). A decrypt reached with the bracket closed and no explicit scope -
+most notably a `Stream<T>`-returning repository method, whose rows are actually decoded as the
+caller drains the stream *after* the repository call itself has already returned and closed its
+bracket - throws `SHRED-READ-UNSCOPED` instead: there was never anything open to verify against, not
+merely something that failed to verify. A hand-written `@Repository` DAO holding its own
+`EntityManager` is never bracketed automatically either, for the same reason a raw `EntityManager`
+use is not: it is not a Spring Data `Repository`.
 
 ## Configuration
 
@@ -129,6 +176,10 @@ There is no fail-open property anywhere in this module.
 | `SHRED-ERASURE-002` | the erasure log has rows but no anchor row |
 | `SHRED-ERASURE-003` | this instance's keyed/unkeyed mode disagrees with the trail |
 | `SHRED-INVALID-001` | boundary validation failed |
+| `SHRED-READ-UNSCOPED` | a `@Shredded` converter ran with the read bracket closed and no explicit `withRead` scope - a scalar/`Tuple`/constructor-expression projection, a `Stream<T>` drained after its repository call returned, or an unwrapped `EntityManager`/hand-written-DAO read |
+| `SHRED-READ-UNVERIFIED` | a decrypt happened inside an open read bracket but no verifier (`onPostLoad` or an explicit `withRead` scope) ever drained it before the bracket closed - see "How the read path verifies" above |
+| `SHRED-SUBJECT-UNRESOLVED` | a row carries at least one shredded value and its data subject could not be resolved |
+| `SHRED-EMF-UNINSTRUMENTED` | more than one `EntityManagerFactory` bean exists in the application context; the read bracket cannot tell which repository is bound to which, so every repository is refused rather than bracketed on the chance it is the wrong one |
 
 The per-key encryption limit (`shredding.crypto.max-encryptions-per-key`) has no error code: reaching
 it rotates to the next key version rather than refusing, so there is nothing a caller ever sees.
@@ -194,6 +245,11 @@ Cluster-wide invalidation ships in Pro alongside the KMS adapters.
 ## What fails at startup
 
 - a `@Shredded` field with no `@Convert`, or one whose converter names another entity or field;
+- a column mapped by a `ShreddedConverter` with no matching field-level `@Shredded` - a class-level
+  `@Convert(attributeName = ...)` or an `orm.xml` mapping, which put the column in the write path but
+  not in the read verification, the `@Immutable` check or the second-level-cache refusal (C-19);
+- more than one `EntityManagerFactory` bean in the application context, once Spring Data JPA is on
+  the classpath (C-20);
 - a `@Shredded` entity that is `@Cacheable`/`@Cache`, unless `shredding.allow-second-level-cache=true`;
 - a `@Shredded` entity that is a **record**, or is annotated `@Data`, `@Value`, `@ToString` or
   `@EqualsAndHashCode`: all of those generate a rendering over every field, so the decrypted value
