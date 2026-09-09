@@ -105,41 +105,55 @@ references, no constructors, no method calls), parsed once at bootstrap.
 A decrypted `@Shredded` value is either verified against the row it came from or refused - never
 handed back on the strength of "something upstream probably checked this."
 
+**The converter never returns the value.** `ShreddedConverter.convertToEntityAttribute` decrypts,
+files what it decrypted in the open *read region*, and returns a placeholder.
+`ShreddingEventListener.onPostLoad` - the one hook that knows the row - checks each field against the
+row's own tenant, subject and identifier, and only then installs the real value over the placeholder,
+into the entity and into Hibernate's loaded state. Nothing that is not a managed entity load ever
+receives a decrypted `@Shredded` value.
+
 - **A Spring Data JPA repository call** (`repository.findByX(...)`, `Page`/`Slice`/`Streamable`
-  returns, `findById`, derived finders, `Specification`) is verified automatically:
-  `ShreddingReadBracketCustomizer` opens a read bracket around the whole call, and
-  `ShreddingEventListener.onPostLoad` verifies each loaded row's shredded columns against its true
-  subject once the row is fully hydrated, before the call returns.
+  returns, `findById`, derived finders, `Specification`) works transparently:
+  `ShreddingReadBracketCustomizer` opens a read region around the whole call, and `onPostLoad`
+  verifies and installs each loaded row before the call returns.
 - **A raw `EntityManager` entity operation** - `find`, `getReference`, `merge`, `refresh`, an
-  entity-returning JPQL or Criteria query - is not proxied by Spring Data and gets no bracket
-  automatically. Wrap it in `ShreddingContext.withReadBracket(...)`:
+  entity-returning JPQL or Criteria query - is not proxied by Spring Data and gets no region
+  automatically. Wrap it:
   ```java
   Doc doc = ShreddingContext.withReadBracket(() -> entityManager.find(Doc.class, id));
   ```
-- **A projection that cannot go through a managed entity load at all** - a scalar, `Tuple` or
-  constructor-expression JPQL/Criteria query, run directly off an `EntityManager` - has nothing an
-  `onPostLoad` could ever verify. Use `ShreddingContext.withRead(...)` with the subject/tenant the
-  caller already knows and vouches for:
-  ```java
-  String title = ShreddingContext.withRead(
-      new ShreddingContext.Scope(tenant, subject, "Doc"),
-      () -> entityManager.createQuery("select d.title from Doc d where d.id = :id", String.class)
-          .setParameter("id", id)
-          .getSingleResult());
-  ```
+- **A projection cannot be made to work, and there is no escape hatch.** A scalar, `Tuple`,
+  constructor-expression or interface projection loads no entity, so nothing can ever verify which
+  row its bytes belong to. `ShreddingContext.withRead(...)` used to let a caller vouch for one; it is
+  removed, because a caller-supplied identity is exactly the ambient authority five review passes
+  kept breaking. Select the entity and read the field off it.
 
-**What is refused, and why.** Any decrypt that happens while the read bracket is open but is never
-reached by a verifier - `onPostLoad` for a managed load, or an explicit `withRead` scope - throws
-`SHRED-READ-UNVERIFIED` when the bracket closes, before the value reaches the caller. This covers a
-repository `@Query` scalar/`Tuple`/interface projection (no entity is loaded, so `onPostLoad` never
-fires), and a repository bound to an uninstrumented `EntityManagerFactory` (no `onPostLoad` listener
-exists on that session at all). A decrypt reached with the bracket closed and no explicit scope -
-most notably a `Stream<T>`-returning repository method, whose rows are actually decoded as the
-caller drains the stream *after* the repository call itself has already returned and closed its
-bracket - throws `SHRED-READ-UNSCOPED` instead: there was never anything open to verify against, not
-merely something that failed to verify. A hand-written `@Repository` DAO holding its own
-`EntityManager` is never bracketed automatically either, for the same reason a raw `EntityManager`
-use is not: it is not a Spring Data `Repository`.
+**What is refused, and why.**
+
+| Situation | Code |
+|---|---|
+| a decrypt with no open read region: a hand-written `@Repository` DAO holding its own `EntityManager`, an unwrapped `EntityManager` read, a `Stream<T>` drained after its repository call already returned, an `@Async` continuation on another thread, a `StatelessSession` (which fires no `PostLoad` at all) | `SHRED-READ-UNSCOPED`, at the decrypt |
+| a decrypt inside a region that no entity load ever installs: a repository `@Query` scalar/`Tuple`/interface projection, a repository bound to an uninstrumented `EntityManagerFactory` | `SHRED-READ-UNVERIFIED`, when the region closes, before the value reaches the caller |
+| a row holding another subject's or tenant's ciphertext | `SHRED-SUBJECT-MISMATCH` |
+| a row holding another of the *same* subject's rows' ciphertext | `SHRED-ROW-MISMATCH` |
+| an entity flushed while a `@Shredded` field still holds the read placeholder | `SHRED-PLACEHOLDER-001` |
+
+In every case nothing decrypted is returned: the converter hands out a placeholder, not the value.
+
+**Two rules for entity classes.**
+
+1. **A `@Shredded` field must never participate in `equals` or `hashCode`.** Between the converter
+   and the install the field holds the placeholder, so an instance put into a `HashSet` or used as a
+   `HashMap` key *before* the install is unreachable afterwards. Dirty checking is unaffected: the
+   install writes the entity field and the loaded state together.
+2. **A `@Shredded` entity must have a basic, single-column identifier** - a numeric id, a `UUID`, a
+   `String` or a `byte[]`. The identifier is bound into every stored value; a composite or embedded
+   id, including a single-column `@EmbeddedId`, has no canonical byte form to bind to and is refused
+   at startup.
+
+Also refused at startup, because installing into the loaded state cannot be made sound with them:
+optimistic locking `ALL` or `DIRTY`, select-before-update, and a `@Shredded` column that is part of
+the natural id.
 
 ## Configuration
 
@@ -173,14 +187,16 @@ There is no fail-open property anywhere in this module.
 | `SHRED-ERASED-001` | a write was attempted for a subject whose key is `DESTROYING`, `DESTROYED` or tombstoned |
 | `SHRED-CONTEXT-001` | a converter ran with no write context |
 | `SHRED-SUBJECT-IMMUTABLE` | the data subject of a persisted row changed |
-| `SHRED-SUBJECT-MISMATCH` | a stored value's header names a different subject or tenant than the row it was read from - a ciphertext moved between rows (CIPHER-01) |
+| `SHRED-SUBJECT-MISMATCH` | a stored value's header names a different subject or tenant than the row it was read from (CIPHER-01) |
+| `SHRED-ROW-MISMATCH` | a stored value's header names the right subject but a different row of it - a ciphertext copied between two of one person's rows (C-34) |
+| `SHRED-PLACEHOLDER-001` | an attempt to persist the marker a `@Shredded` read returns before the verified value is installed; writing it would destroy the stored ciphertext |
 | `SHRED-TENANT-MISSING` | no tenant in context, and there is no default tenant |
 | `SHRED-CONFIG-001` | misconfiguration, naming the property |
 | `SHRED-ERASURE-002` | the erasure log has rows but no anchor row |
 | `SHRED-ERASURE-003` | this instance's keyed/unkeyed mode disagrees with the trail |
 | `SHRED-INVALID-001` | boundary validation failed |
-| `SHRED-READ-UNSCOPED` | a `@Shredded` converter ran with the read bracket closed and no explicit `withRead` scope - a scalar/`Tuple`/constructor-expression projection, a `Stream<T>` drained after its repository call returned, or an unwrapped `EntityManager`/hand-written-DAO read |
-| `SHRED-READ-UNVERIFIED` | a decrypt happened inside an open read bracket but no verifier (`onPostLoad` or an explicit `withRead` scope) ever drained it before the bracket closed - see "How the read path verifies" above |
+| `SHRED-READ-UNSCOPED` | a `@Shredded` converter ran with no read region open - an unwrapped `EntityManager` or hand-written-DAO read, a `Stream<T>` drained after its repository call returned, an `@Async` continuation, or a `StatelessSession` |
+| `SHRED-READ-UNVERIFIED` | a decrypt happened inside an open read region but no entity load ever installed it before the region closed - a projection, or residue from a region an error unwound past - see "How the read path verifies" above |
 | `SHRED-SUBJECT-UNRESOLVED` | a row carries at least one shredded value and its data subject could not be resolved |
 | `SHRED-EMF-UNINSTRUMENTED` | more than one `EntityManagerFactory` bean exists in the application context; the read bracket cannot tell which repository is bound to which, so every repository is refused rather than bracketed on the chance it is the wrong one |
 
@@ -190,24 +206,38 @@ it rotates to the next key version rather than refusing, so there is nothing a c
 ## The stored format
 
 ```
-offset  len  field
-0       3    magic "SH1"
-3       1    format version 0x01
-4       1    algorithm id   0x01 = AES-256-GCM / 96-bit nonce / 128-bit tag
-5       4    key version    int32 big-endian
-9       1    tenant id length
-10      t    tenant id (UTF-8)
-10+t    1    subject id length
-11+t    s    subject id (UTF-8)
-11+t+s  12   nonce
-23+t+s  4    ciphertext length
-27+t+s  n    ciphertext || 16-byte tag
+offset    len  field
+0         3    magic "SH1"
+3         1    format version 0x02
+4         1    algorithm id   0x01 = AES-256-GCM / 96-bit nonce / 128-bit tag
+5         4    key version    int32 big-endian
+9         1    tenant id length
+10        t    tenant id (UTF-8)
+          1    subject id length
+          s    subject id (UTF-8)
+          1    row id length
+          r    row id, canonical and type-tagged
+          12   nonce
+          4    ciphertext length
+          n    ciphertext || 16-byte tag
 ```
 
 Fixed offsets, no optional sections, a strict parse. Unknown magic, unknown version, truncation and
 trailing bytes are all `SHRED-FORMAT-001`.
 
-AAD, on every value: `sh1|<len>:layout|<len>:alg|<len>:tenant|<len>:subject|<len>:entity|<len>:field|<len>:keyVersion`.
+**Format v1 is refused, not read.** It bound tenant and subject but no row, so two rows of one
+subject held interchangeable ciphertexts. There is no dual-format reader and no downgrade: either
+would let anyone holding `UPDATE` strip the row binding by writing a v1 blob over a v2 one.
+
+The row id is the identifier's column value under a one-byte type tag - `0x01` numeric (int64
+big-endian), `0x02` `UUID`, `0x03` `String` (UTF-8), `0x04` `byte[]` - never `Object.toString()`,
+which cannot tell a `Long 1` from a `String "1"`. Tag `0x7f` is the random 128-bit *unbound
+intermediate* an `@GeneratedValue(IDENTITY)` insert binds before the database has generated the key;
+`onPostInsert` rebinds it in one `UPDATE` in the same transaction, and it matches no real
+identifier's encoding, so an intermediate captured by change data capture, a trigger or a replica is
+bound to no row.
+
+AAD, on every value: `sh1|<len>:layout|<len>:alg|<len>:tenant|<len>:subject|<len>:rowId|<len>:entity|<len>:field|<len>:keyVersion`.
 Every field is length-prefixed, so no rewrite can move a boundary. Wrapped keys use
 `sh1|<len>:layout|<len>:wrap|<len>:tenant|<len>:subject|<len>:keyVersion`.
 

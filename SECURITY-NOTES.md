@@ -65,103 +65,154 @@ email address a full-width index would be an offline dictionary outright. Two co
 
 Do not put a blind index on a field you do not actually query by.
 
-### A moved ciphertext is refused after the load that read it has already run
-CIPHER-01 and QUESTIONS #4 (ruling (c)) are one fix. Control 14 forbids a persisted row's data
-subject from changing, and control 2 requires that a ciphertext moved to another row, subject or
-tenant does not decrypt. Both are enforced from the row's stored blob header, not from a cache of
-what this process happened to load:
+### The read path: the converter accuses, it never authorises (fifth pass, `docs/plans/read-path-design.md`)
 
-- **On write**, `ShreddingEventListener.onPreUpdate` fetches the row's *current* shredded column
-  with a second query - one round trip, and only when a `@Shredded` field is actually dirty - and
-  compares the header's subject and tenant against the value about to be written. A disagreement is
-  `SHRED-SUBJECT-IMMUTABLE`, refused before anything is re-encrypted.
-- **On read**, `onPostLoad` - once the whole entity is hydrated - independently re-reads the row's
-  own stored shredded columns by id (fourth pass, C-26; see below for why this replaced the earlier
-  "trust what the converter recorded" design), resolves the row's true subject and tenant the same
-  way the write path does, and compares. A disagreement is `SHRED-SUBJECT-MISMATCH`, thrown from
-  `onPostLoad`, which aborts the load: the entity is never returned to the caller that asked for it,
-  and the refused instance is evicted from the persistence context so a second read in the same
-  transaction cannot serve it from the first-level cache instead (C-27, below).
+Five review passes found the same shape of defect in five different places — C-17, C-18, C-20, C-26,
+C-33, C-39, C-40. Every one of them was the read path treating *the presence of thread-local state*
+as *permission to return plaintext*, and every one of them broke the moment that state outlived its
+owner: an `Error` unwinding past a `finally`, a transaction-completion callback clearing a bracket
+that was still open, a pooled thread carrying a frame into an unrelated call. Re-accounting for the
+ownership four times did not close the class. The sixth design removes the authority instead.
+
+> **Ambient state may accuse. It may never authorise.**
+
+`ShreddedConverter.convertToEntityAttribute` no longer returns plaintext. It decodes the header,
+decrypts, files `(entity, field, tenant, subject, rowId, plaintext)` in the open read region, and
+returns a **placeholder**. `ShreddingEventListener.onPostLoad` — the one hook that knows the row
+(`event.getId()`, the persister, the session) — verifies and installs the real value over the
+marker.
+
+What that buys, structurally rather than by accounting:
+
+- **No state ⇒ a refusal, not a value.** A decrypt with no open read region is
+  `SHRED-READ-UNSCOPED`, thrown before anything is returned: a hand-written DAO, a bare
+  `EntityManager`, a `Stream` drained after the repository call returned, an `@Async` continuation
+  on another thread, a `StatelessSession` (which fires no `PostLoad` at all).
+- **Stale state ⇒ at worst a refusal.** A frame entry carries the token of the region that recorded
+  it, and a drain happens only under the region currently in force. Residue an `Error` unwound past,
+  or a decode from before an erasure, is discarded rather than installed, and the load that asked
+  for it is refused. That is what turns "a stale value of the same row" and post-erasure residue —
+  a false proof that a value is still readable — into `SHRED-READ-UNVERIFIED`.
+- **Nothing leaks even when everything leaks.** A region left behind by a `StackOverflowError` holds
+  bytes that only a verified, row-matched install could ever have used. `try`/`finally` cannot
+  survive stack exhaustion — the `finally` has to *call* the pop, and that call throws again (C-32
+  proved it) — so the argument no longer rests on unwind cleanup at all.
+
+**The row is now part of the identity (C-34, format `SH1` v2).** Tenant and subject were the finest
+grain the header and the AAD had, so two rows of the *same* subject held interchangeable
+ciphertexts: an attacker holding `UPDATE` copied row A's column into row B and row B displayed A's
+value as its own, with no error anywhere. The row's identifier — its canonical, type-tagged column
+encoding, never `Object.toString()`, which cannot tell a `Long 1` from a `String "1"` — is bound
+into both. A copy between two rows of one person is `SHRED-ROW-MISMATCH`; relabelling the header to
+claim the other row breaks GCM authentication instead. **A v1 header is refused, not read**: a
+dual-format reader would let the same attacker strip the row binding by writing a v1 blob.
+
+**No unbound header exists.** `RowId` refuses an empty and an all-zero value. Under
+`@GeneratedValue(IDENTITY)` the identifier does not exist when the converter binds, so the insert is
+bound to a random 128-bit *unbound intermediate* carrying a tag no real identifier's encoding can
+equal, and `onPostInsert` rebinds it to the generated key in one `UPDATE`, in the same transaction,
+over raw JDBC (`session.doWork` — neither the session query API nor `flush()` is supported inside
+the action queue). An intermediate captured by change data capture, an `AFTER INSERT` trigger or a
+physical replica between the two statements is therefore bound to no row and verifies nowhere. A
+rebind failure throws out of the flush and aborts the transaction: a row left bound to an
+intermediate would be permanently unreadable while looking, to every application-level check, like a
+successful write. The cost is two `encrypt` calls per shredded column on an `IDENTITY` insert, so
+two ticks of control 3's per-key encryption counter.
+
+**The placeholder is never `null`, and never persistable.** A `null` placeholder is silent
+destruction on the types that have no erased sentinel — `LocalDate`, `BigDecimal`, a JSON column: an
+entity whose install never ran would hold `null` in the field *and* in the persistence context's
+loaded state, and the next ordinary (non-`@DynamicUpdate`) UPDATE would write `NULL` over a live
+ciphertext with nothing to notice it. Each type gets a non-null constant, **compared by reference
+identity**, carrying 128 bits drawn once per JVM run and rendered as ASCII with no control character
+and no `%`, `{` or `}`, so it is log-safe and an attacker holding `UPDATE` cannot store a value that
+reads back as one — and an equal-but-distinct instance is not accepted either. Writing one back is
+`SHRED-PLACEHOLDER-001`, checked in the converter and again on the state array in the `Pre*`
+listeners, before the blind indexes are written.
+
+**The listener is prepended.** Hibernate's own `PostLoadEventListenerStandardImpl` is what invokes a
+user's `@PostLoad` methods and `@EntityListeners` beans. While this module's listener was appended,
+every one of those callbacks was handed the placeholder — silently, and in exactly the place an
+application computes a derived field or fires an event. `POST_INSERT` and `POST_UPDATE` stay
+appended, because the post-hoc header check must see what actually reached the database.
+
+**Verification runs before either install.** Every awaiting field is checked first; only then is
+anything written into the entity and the `EntityEntry` loaded state, together. So a refused row is
+left holding placeholders, and a first-level-cache retry that dodges the eviction yields the marker
+rather than the value. The eviction (C-27) stays as the second line: `refuseLoad` evicts the
+instance before the exception leaves the method, so a second read of the same id in the same
+transaction is a real load through this same check. Cipher's C-27 fix text also asked for the
+transaction to be marked rollback-only; that half was tried and reverted, with the evidence in
+`QUESTIONS.md` #19.
+
+**Mappings that loaded-state mutation cannot survive are refused at startup**, read off the runtime
+persister rather than the annotations — `@SelectBeforeUpdate` does not exist as an annotation in
+Hibernate 7 at all, and optimistic locking and natural ids can both arrive through `orm.xml` or a
+mapped superclass:
+
+| Mapping | Why it cannot hold |
+|---|---|
+| optimistic locking `ALL` or `DIRTY` | the UPDATE's `WHERE` is built from the loaded state, so it would carry the installed plaintext against a column holding ciphertext, and no update would ever match its row |
+| select-before-update | `getDatabaseSnapshot` runs the converters again but fires no `PostLoad`, so the snapshot is placeholders compared against plaintext |
+| a `@Shredded` column in the natural id | natural-id resolution and its cache read the column outside any load event — and a natural id that is personal data cannot be an index key in the first place |
+| a non-basic identifier, including a **single-column** `@EmbeddedId` | it passes C-38's column count check but has no canonical byte form to bind to, and a guessed row binding is no binding |
+
+**A `@Shredded` field must never participate in `equals`/`hashCode`.** Between the converter and the
+install the field holds the placeholder, so an instance put into a `HashSet` or used as a `HashMap`
+key before the install is unreachable afterwards. Dirty checking is unaffected — the install writes
+the entity field and the loaded state together. The rule is in `README.md` and `docs/index.md`, and
+`FrameworkMatrixTest` makes it checkable.
+
+**Cost.** `onPostLoad` issues no SQL at all: which fields owe a decode is decided by reading the
+placeholder off the entity, not by a query. A 200-row page costs **one statement against the
+entity's table**, down from 201 (200 per-row re-reads plus the list query), measured by counting
+`prepareStatement` on the real `DataSource`. The remaining 200 statements in that measurement are
+`FieldCipher.decrypt`'s per-decrypt key-state check against `shredding_data_key` — control 7's, and
+older than this design: the data-key cache holds key *material*, never *authority*, so every decrypt
+re-reads the row that says whether the key may still be used. Memoising it per transaction would
+remove it, but caching authority is a security decision and it is recorded in `QUESTIONS.md` for
+Cipher rather than taken here.
+
+The write path pays more, not less, and deliberately: `refuseIfSubjectMoved` runs on **every**
+update rather than only when a fresh scope was pushed, and a post-hoc header check runs after every
+insert and every update, re-reading what was actually written and comparing every header against the
+`(tenant, subject, rowId)` the row was written under. A row written under a residual scope — the
+shape C-41 demonstrated — is refused inside the same flush and before the commit, rather than left
+sitting in another subject's erasure scope. A write scope is also tagged with its session and a
+per-push token, `ShreddingContext.require` compares the entity name (ignoring it *was* C-41), and a
+scope still live when the next bind starts is by construction residue and is dropped rather than
+consumed.
 
 **Why the read side is not "checked before the key store is touched" the way CIPHER-01's fix text
 asks for.** A JPA `AttributeConverter` is handed nothing but the column bytes: no entity, no
 session, no row. Checked against the actual Hibernate loader bytecode this module builds against
-(`EntityInitializerImpl`, Hibernate ORM 7.4, not assumed): every attribute converter on a row -
-including every `@Shredded` field's `decrypt` -
-has already run by the time the *first* Hibernate listener fires for that row, `PreLoadEventListener`
+(`EntityInitializerImpl`, Hibernate ORM 7.4, not assumed): every attribute converter on a row has
+already run by the time the *first* Hibernate listener fires for that row, `PreLoadEventListener`
 included. There is no hook that fires before a converter runs on read, unlike the write path, where
 `PreInsertEvent`/`PreUpdateEvent` genuinely do fire before the SQL binds. The read-side check is
-therefore necessarily two-phase: decrypt happens, then the check happens, then (only if it passes)
-the value reaches the caller. The security property CIPHER-01 actually asks for - a moved
-ciphertext is never displayed - holds: nothing is ever handed to application code without passing
-the check. What does not hold literally is "before it touches the key store", which this SPI makes
-unreachable for a converter-based design. See QUESTIONS.md CIPHER-01 for the full reasoning.
+therefore necessarily two-phase: decrypt happens, then the check happens, then the value reaches the
+caller. Under this design the second phase is also the *only* phase that produces a value at all, so
+the property CIPHER-01 asks for — a moved ciphertext is never displayed — holds by construction.
+What does not hold literally is "before it touches the key store", which this SPI makes unreachable
+for a converter-based design. See `QUESTIONS.md` CIPHER-01.
 
-**Third pass (C-17/C-18/C-20/C-22, `docs/SECURITY-REVIEW-feat-shredding-core.md` "Third pass
-(8095d2c)"): the recording is now per-bracket-frame, not a flat, thread-wide map.** Cipher's
-re-verification found that the flat map above let a decrypt reached inside the read bracket - a
-repository `@Query` scalar/`Tuple`/interface projection, or a repository bound to a second,
-uninstrumented `EntityManagerFactory` - record its decoded header with nothing that would ever
-drain it (a projection triggers no `onPostLoad` at all), and either return the value unverified or
-have the stale entry mistaken for a later, unrelated row's header once *something* did drain it.
-`ShreddingContext.pushReadBracket()` now opens a frame; `recordDecoded`/`takeDecoded` operate on the
-frame currently on top of the stack, not a flat map; `popReadBracket()` closes the frame and throws
-`SHRED-READ-UNVERIFIED` if anything in it was never drained - after the value was computed, but
-before `ShreddingReadBracketCustomizer`'s proxy hands the repository method's result back to its
-caller. The bracket now owes a debt rather than granting a permission: every scenario above is
-refused rather than returned.
+**What is still a residual.** `ShreddingReadBracketCustomizer` refuses startup outright when more
+than one `EntityManagerFactory` bean exists, on the reasoning that a region cannot vouch for a
+Hibernate session it does not know is instrumented. That is defence in depth, not the primary
+control — the primary control is that a converter with no region refuses — and it could not be
+exercised by its own integration test: registering a second `EntityManagerFactory`-typed bean the
+ordinary Spring way trips Spring Boot's own `@ConditionalOnMissingBean` on its auto-configured (and
+therefore instrumented) factory. See `QUESTIONS.md` C-20. Separately, a read region left behind by a
+`StackOverflowError` is still *open* as far as `inReadBracket()` can tell, so a later call on that
+pooled thread that opens no region of its own loses the `SHRED-READ-UNSCOPED` signal it should have
+had. It cannot lose a value — the drain is token-checked and the converter returns no plaintext —
+but the loudness is missing, and it is recorded in `QUESTIONS.md` for Cipher rather than claimed
+closed.
 
-**This note used to claim the multi-row case above was closed. It was not - that was C-26, the
-fourth pass's own finding, one level down from the third pass's fix.** Hibernate ORM 7.4 defers
-every row's `PostLoadEvent` until the *whole* `JdbcValues` result set has been hydrated: for a
-two-row query, both rows' converters run (and record) before either row's `onPostLoad` fires. The
-third-pass frame recorded a decode keyed only by `entityName + "." + fieldName`, with no row
-identity - so the second row's converter silently overwrote the first row's entry, and whichever
-row's `onPostLoad` happened to drain first was verified on behalf of both. This was simultaneously a
-leak (a ciphertext moved into a second row was returned, because the surviving entry happened to be
-the honest first row's) and a false refusal (two genuine subjects in one `findAll()` could throw,
-because the surviving entry belonged to the *other* row). `repository.findAll(Sort)` reaches it
-directly; no join or nesting is required.
-
-**The fix does not try to give the frame a row identity it cannot have** - `ShreddedConverter` is
-still handed nothing but the column bytes, no session, no row. Instead `onPostLoad` independently
-re-reads the row's own currently stored shredded columns by id - the same `SELECT ... WHERE id = ?`,
-public header only, no key material, that `refuseIfSubjectMoved` already runs on the write path -
-and compares those headers against the row's true subject and tenant. That comparison needs nothing
-from the frame to be correct, so it cannot be fooled by which row's converter happened to run last.
-The frame itself is reduced to what it can honestly do: `ShreddingContext.recordDecoded` keys a
-*multiset* by `(entity, field, tenant, subject)` - the tenant and subject the header itself named at
-decode time, since a row id is unavailable - and increments a count rather than overwriting a map
-entry, so N legitimate rows sharing one subject can each record and later drain their own count.
-`onPostLoad` drains the exact key its own fresh, per-row re-read names; `popReadBracket()` still
-refuses when anything is left over, which is what keeps C-17/C-18/C-20 closed.
-
-Probes: `CipherProbeFrameTest.probe_a_moved_ciphertext_in_a_second_row_of_one_result_set` (the leak),
-`probe_two_rows_of_two_subjects_read_in_one_query` (the false-refusal mirror, strengthened per
-Dollar's instruction to assert each row decrypts to its own value, not merely "no exception"), and
-every third-pass C-17/C-18/C-20/C-22 probe, still green.
-
-**A row refused by `onPostLoad` used to stay in the persistence context (C-27).** The exception
-aborts the load in progress, but Hibernate had already registered the fully hydrated - decrypted -
-entity in the session's first-level cache before `onPostLoad` ran. A second read of the same row's
-id in the same transaction was a cache hit: no SQL, no converter, no `PostLoad`, nothing to refuse.
-`refuseLoad` now evicts the instance before the exception leaves the method, so a retry is forced
-back through a real reload and this same check every time. Cipher's fix text also asked for the
-transaction to be marked rollback-only; that half was tried and reverted, with the reasoning and the
-evidence in QUESTIONS.md #19 - `SimpleJpaRepository.findById`'s own `@Transactional` already does
-the equivalent the moment its own call is the one that refuses, entirely independent of anything
-this module does, and marking it explicitly here made every probe that catches the refusal and
-keeps going fail on `UnexpectedRollbackException` instead of exercising the property being tested.
-
-**What is still a residual.** `ShreddingReadBracketCustomizer` additionally refuses startup outright
-when more than one `EntityManagerFactory` bean exists in the application context, on the reasoning
-that a bracket cannot vouch for a Hibernate session it does not know is instrumented. This is
-defence in depth, not the primary control - the primary control is the frame accounting above, which
-does not depend on knowing anything about the factory - and it could not be exercised by its own
-integration test: registering a second `EntityManagerFactory`-typed bean the ordinary Spring way
-trips Spring Boot's own `@ConditionalOnMissingBean` on its auto-configured (and therefore
-instrumented) factory, suppressing it entirely rather than letting both coexist. See QUESTIONS.md
-C-20.
+Probes: `CipherProbeFifthPassTest` (C-33 P1, C-34 P2, C-35 P3), `CipherProbeBracketUnwindTest`,
+`CipherProbeEvictionTest` (C-36), `CipherProbeFrameTest`, `CipherProbeReadScopeTest`,
+`CipherProbeMatrixTest`, `CipherProbeMatrix2Test`, `FrameworkMatrixTest`,
+`LoadedStateHostileMappingsTest`, `FieldCipherRowBindingTest`, `EncryptedValueV2Test`, `RowIdTest`.
 
 ### A `@Shredded` field inside an `@Embeddable` or an `@ElementCollection` is not supported (C-29)
 
@@ -213,8 +264,14 @@ same class of unsupported mapping as the `@SecondaryTable` split just above, whi
 startup for the analogous reason. Fixed: `ShreddedModel.scan` now refuses at startup for any entity
 with at least one `@Shredded` field whose identifier maps to more than one column, naming the entity.
 
-Probes: `CipherProbeCompositeIdTest.probe_a_composite_id_shredded_entity_is_refused_at_startup` and
-`probe_a_moved_ciphertext_in_a_composite_id_entity_is_never_displayed`.
+Fifth pass, Cipher item 7: the refusal is now on the identifier *mapping*, not only its column
+count. A single-column `@EmbeddedId` has exactly one identifier column and so passed the check above,
+but it is not a basic value: its Java value is a component object with no canonical byte form
+`RowId` could bind a stored value to, and a guessed row binding is no binding.
+
+Probes: `CipherProbeCompositeIdTest.probe_a_composite_id_shredded_entity_is_refused_at_startup`,
+`probe_a_moved_ciphertext_in_a_composite_id_entity_is_never_displayed`, and
+`LoadedStateHostileMappingsTest.a_single_column_embedded_id_is_refused_at_startup`.
 
 ### A `@Shredded` field must not be mapped `@Basic(fetch = LAZY)` (documented, not reproduced)
 
@@ -222,8 +279,8 @@ Lazy fetching of a basic attribute is inert in Hibernate without bytecode enhanc
 this module's three POMs configure an enhancement plugin, so there is no path here to attack it
 today. In an application that does enable enhancement, the column would be fetched on first getter
 access - for an entity handed back from a repository call, that is *after* the read bracket has
-already closed, so the converter would see `ShreddingContext.inReadBracket() == false` and refuse
-with `SHRED-READ-UNSCOPED`: reasoned to be fail-closed, not reproduced under a real enhanced build.
+already closed, so the converter would find no open read region and refuse with
+`SHRED-READ-UNSCOPED`: reasoned to be fail-closed, not reproduced under a real enhanced build.
 Documented as a residual rather than left silent: a `@Shredded` field must not be mapped lazily.
 
 ### `@Immutable` on a `@Shredded byte[]` field silently discards an in-place mutation (C-21)
@@ -284,7 +341,7 @@ support ticket or a PDF the application itself produced. Those are the applicati
 |---|---|
 | Data key re-derivable from the master, making erasure a no-op | keys are 256 random bits, never derived (control 1) |
 | Entity/field name collision in the AAD | length-prefixed canonical AAD (control 2) |
-| Nonce reuse under one key | random 96-bit nonce, per-key counter, hard refusal at 2^32 and rotation (control 3) |
+| Nonce reuse under one key | random 96-bit nonce, per-key counter, hard refusal at 2^32 and rotation (control 3). An `@GeneratedValue(IDENTITY)` insert encrypts each shredded column twice - once bound to the unbound intermediate, once to the generated identifier - so the counter advances twice per column on that path and rotations come twice as often for an `IDENTITY`-heavy workload (QUESTIONS #23) |
 | Plaintext fallback on an unrecognised column | strict format, typed error, no lenient parse (controls 4 and 17) |
 | Master key in `/env`, `/configprops`, logs or `toString` | explicit exclusion, `byte[]` not `String`, never in a message (control 5) |
 | Unprovable erasure or false proof | key deletion and the record in one transaction (control 6) |
@@ -304,21 +361,31 @@ support ticket or a PDF the application itself produced. Those are the applicati
 | A racing write minting a fresh key for an erased subject | the `shredding_erased_subject` tombstone, holding no key material, protected by the same append-only triggers as the erasure log (QUESTIONS #3, CIPHER-04) |
 | A write racing the *first* key mint for a subject surviving the tombstone | `pg_advisory_xact_lock(tenant, subject)` taken first, in the same transaction, by every path that mints or erases (CIPHER-03) |
 | A decrypted value reaching a generated `toString` | a record entity fails startup; Lombok's generators are `SOURCE`-retained and cannot be detected at runtime, so the sample ships an ArchUnit rule for that case instead (CIPHER-06) |
+| A ciphertext moved between two rows of the *same* subject displayed as the second row's own | the row's identifier is bound into the header and the AAD, format `SH1` v2; a copy is `SHRED-ROW-MISMATCH` and a relabelled header fails GCM authentication (C-34) |
+| A v1 blob written over a v2 one to strip the row binding | v1 is refused, not read; the AAD layout version differs too, so the refusal is structural as well as checked (Cipher item 12) |
+| An `IDENTITY` insert's pre-rebind bytes captured by change data capture, a trigger or a physical replica | the intermediate is a random 128-bit value under a tag no real identifier's encoding can equal, so it verifies against no row; a failed rebind aborts the transaction (Cipher items 5, 6) |
+| An entity whose install never ran writing `NULL` over a live `BigDecimal`/`LocalDate`/JSON ciphertext on the next flush | the read placeholder is a non-null per-type constant compared by reference identity, and writing it back is `SHRED-PLACEHOLDER-001` (Cipher item 2) |
+| A forged placeholder stored in the column so a read hands it back as an installed value | the marker carries 128 bits drawn per JVM run and is compared by identity, and the stored bytes are not `SH1` so the decode refuses first (Cipher item 3) |
+| A user `@PostLoad` callback or `@EntityListeners` bean handed the read placeholder instead of the value | the module's `POST_LOAD` listener is prepended, ahead of Hibernate's own, which is what invokes those callbacks (Cipher item 8) |
+| A refused row served intact from the first-level cache on the retry | verification runs before either install, so a refused instance holds placeholders, and `refuseLoad` evicts it as well (C-27, Cipher item 9) |
+| A residual write scope pushed for one entity consumed by a bind of another | `ShreddingContext.require` compares the entity name, and a post-hoc header check after every insert and update refuses a row not bound to the scope it was written under, inside the same flush (C-41, Cipher items 13, 14) |
+| An optimistic-lock, select-before-update or natural-id mapping making loaded-state install unsound | refused at startup, read off the runtime persister rather than the annotations (Cipher item 10) |
+| A single-column `@EmbeddedId` slipping past the composite-id check and being bound to a guessed row identity | a non-basic identifier is refused at startup (Cipher item 7) |
 | A ciphertext moved between rows, subjects or tenants displayed on read, or surviving its own subject's erasure | the row's stored header is checked against the row, on write and on read (CIPHER-01, QUESTIONS #4) |
 | A repeat erasure of a subject with an outstanding `PARTIAL` reporting `COMPLETE` | the trail's actual last outcome is read back, and the hooks are re-run rather than assumed to have succeeded (CIPHER-02) |
 | The unkeyed erasure log's pseudonyms computable from the module's own published constant | `shredding.subject-pseudonym.pepper` is a required secret whenever `unkeyed=true` (CIPHER-07) |
-| A failed write leaving a stale tenant/subject on a pooled thread | the push is bracketed in `try`/`finally`, and the stack is cleared at the transaction boundary regardless of which listener ran last (CIPHER-08) |
+| A failed write leaving a stale tenant/subject on a pooled thread | the push is bracketed in `try`/`finally`, the stack is cleared at the transaction boundary by that session's own callback, and a scope still live when the next bind starts is dropped rather than consumed (CIPHER-08, C-41) |
 | `sharedCache.mode=ALL` or the query cache serving plaintext after an erasure | the startup check reads the resolved JPA/Hibernate cache properties, not only the entity's own annotations (CIPHER-09) |
 | An append-only trigger silently missing in a second schema on the same database | every guard resolves `tgrelid` against `current_schema()`, not a bare trigger name (CIPHER-05) |
 | A scalar/`Tuple`/constructor-expression projection returning another subject's plaintext | the header-versus-row check moved into the converter, at the one place every decrypt goes through; a decrypt with neither a managed-entity read bracket nor an explicit read scope is refused (`SHRED-READ-UNSCOPED`, CIPHER-11) |
 | A nulled subject-source column silencing the read-path check and letting a moved ciphertext through | an unresolvable subject on a row carrying any decoded shredded value is a refusal (`SHRED-SUBJECT-UNRESOLVED`), never a silent `return` (CIPHER-12) |
-| A stale decoded-header entry from one read corrupting the next, unrelated load on the same thread | `DECODED_READS` is drained in full by `onPostLoad` regardless of outcome and cleared at the transaction boundary alongside the write scope (CIPHER-13) |
+| A stale decoded-header entry from one read corrupting the next, unrelated load on the same thread | a frame entry carries the token of the region that recorded it, and a drain happens only under the region in force; a foreign-token entry is discarded and the load refuses (CIPHER-13, Cipher item 4) |
 | The update-time subject-immutability check skipped because only the entity's *first* shredded column happened to be null | every shredded column of the entity is read and checked in one query; early return only when all of them are null (CIPHER-14) |
 | An outstanding `PARTIAL` erasure hidden behind an earlier `COMPLETE` by a backwards application-clock step | `latestForSubject` orders by the log's own monotonic `seq`, never by `ts` (CIPHER-15) |
 | `ShreddedBytesConverter` refusing its own entity's first insert under `@GeneratedValue(IDENTITY)` | the field is declared `@org.hibernate.annotations.Immutable`, which stops Hibernate deep-copying the converted value outside the write bracket; enforced at startup (CIPHER-16) |
 | A mistyped subject expression (`#{#this}`, `#{#root}`) resolving to an identity hash and encrypting under a key nobody can ever ask an erasure for | `SubjectExpression` refuses a resolved value that is not a scalar type, and refuses an `Object.toString()`-shaped string (L12) |
-| A repository `@Query`/interface projection, or a repository bound to a second, uninstrumented `EntityManagerFactory`, decrypting inside the read bracket with nothing that would ever verify it | `popReadBracket()` throws `SHRED-READ-UNVERIFIED` if the bracket's frame still holds an undrained decode when it closes, before the repository method's result reaches its caller (C-17, C-18, C-20) |
-| A stale decoded-header entry recorded by one repository call surviving to be mistaken for a later, unrelated call's row | recording and draining now happen against the frame the *current* bracket opened, not a bracket-wide map; the frame is checked and discarded when that bracket closes (C-22) |
+| A repository `@Query`/interface projection, or a repository bound to a second, uninstrumented `EntityManagerFactory`, decrypting inside the read region with nothing that would ever verify it | the converter returns a placeholder, never the value, and `closeRegion()` throws `SHRED-READ-UNVERIFIED` if the region still holds an uninstalled decode, before the repository method's result reaches its caller (C-17, C-18, C-20) |
+| A stale decoded-header entry recorded by one repository call surviving to be mistaken for a later, unrelated call's row | recording and draining happen against the region the *current* call opened, keyed by row as well as subject, and the region is checked and discarded when that call closes (C-22, C-26) |
 | A column mapped by a `ShreddedConverter` through a class-level `@Convert(attributeName=...)` or an `orm.xml` mapping, invisible to the field-level `@Shredded` scan and so fully encrypted but never verified on read | `ShreddedModel.scan` walks the Hibernate runtime metamodel for every attribute whose converter is a `ShreddedConverter`, by whatever route, and refuses startup on any with no matching field-level `@Shredded` entry (C-19) |
 
 ## Operating notes

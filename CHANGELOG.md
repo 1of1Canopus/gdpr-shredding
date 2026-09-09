@@ -6,6 +6,113 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Changed (read-path redesign, sixth pass at `faaafff`)
+
+Cipher's design review of `docs/plans/read-path-design.md` (`## Cipher design review (2026-09-09)`)
+returned APPROVED WITH CHANGES: fourteen mandatory items and rulings D1-D6. All fourteen are applied
+and indexed in the design file; none is disputed. This closes the fifth-pass design stop - C-33,
+C-34, C-35, C-39, C-40, C-41 - as one change rather than six patches.
+
+**The converter no longer returns plaintext.** Five review passes found the same shape of defect in
+five different places: the read path treated *the presence of thread-local state* as *permission to
+return plaintext*, and every one of them broke the moment that state outlived its owner.
+`ShreddedConverter.convertToEntityAttribute` now decrypts, files what it decrypted in the open read
+region, and returns a placeholder; `ShreddingEventListener.onPostLoad` - the one hook that knows the
+row - verifies and installs. *Ambient state may accuse. It may never authorise.*
+
+#### Breaking
+
+- **Stored format is `SH1` v2** and a v1 header is **refused**, not read (`SHRED-FORMAT-001`). v1
+  bound tenant and subject but no row, so two rows of the same subject held interchangeable
+  ciphertexts (C-34); a dual-format reader would let anyone holding `UPDATE` strip the row binding by
+  writing a v1 blob. No migration path is offered: the branch is unreleased.
+- `FieldCipher.encrypt` and `Aad.forValue` take a `RowId`. `Aad.LAYOUT` is `2`, so a v1 AAD and a v2
+  AAD differ even when every other component is identical.
+- `ShreddingContext.Scope` carries the `RowId`. `ShreddingContext.withRead(...)`,
+  `pushReadScope`/`popReadScope`/`currentReadScope` and `clearAll()` are **removed**: a
+  caller-supplied read scope vouched for a projection with an ambient identity, which is exactly the
+  authority this design removes, and `clearAll()` dropped read regions belonging to still-open
+  brackets (C-33). `pushReadBracket`/`popReadBracket` become `openRegion`/`closeRegion`, which take
+  and check an owner token; `withReadBracket(...)` keeps its name and its contract.
+- A projection now yields `SHRED-READ-UNVERIFIED` when it runs inside a region and
+  `SHRED-READ-UNSCOPED` when it does not, in both cases with nothing decrypted returned. There is no
+  supported way to read a `@Shredded` column outside a managed entity load.
+- New startup refusals (`SHRED-CONFIG-001`): optimistic locking `ALL`/`DIRTY`, select-before-update,
+  a `@Shredded` column in the natural id, and a **non-basic identifier** including a single-column
+  `@EmbeddedId`. Each is read off the runtime persister, not the annotation.
+- New error codes: `SHRED-ROW-MISMATCH`, `SHRED-PLACEHOLDER-001`.
+- A `@Shredded` field must never participate in `equals`/`hashCode`.
+
+#### Fixed
+
+- **C-34 (HIGH)** - a ciphertext copied between two rows of the *same* subject decrypted and was
+  displayed as the second row's own value, with no error anywhere: the header and the AAD bound
+  tenant and subject and no row identity. Fixed: `RowId` - the identifier's canonical, type-tagged
+  column encoding, never `Object.toString()`, which cannot tell a `Long 1` from a `String "1"` -
+  goes into both. A copy is `SHRED-ROW-MISMATCH`; relabelling the header to claim the other row
+  fails GCM authentication instead. Probe `CipherProbeFifthPassTest.probe_a_ciphertext_swapped_
+  between_two_rows_of_one_subject_is_detected` now reports `REFUSED SHRED-ROW-MISMATCH` where it
+  reported `RETURNED [ROW-A-VALUE, ROW-A-VALUE]`. Under `@GeneratedValue(IDENTITY)` the identifier
+  does not exist at bind time, so the insert binds a random 128-bit *unbound intermediate* under a
+  tag no real identifier can equal and `onPostInsert` rebinds it in one `UPDATE`, same transaction,
+  over raw JDBC; a rebind failure aborts the transaction (Cipher items 5, 6).
+- **C-33 (HIGH)** - any transaction that wrote a shredded entity and committed inside an open read
+  bracket erased that bracket's debt, because `registerTransactionBoundaryClear` registered
+  `clearAll()`, which dropped the whole read-frame stack. Fixed: the callback is
+  `clearWriteScopesOwnedBy(session)` and may not touch a region. P1 reports `REFUSED
+  SHRED-READ-UNVERIFIED` where it reported `RETURNED [P1-CLEARALL-SECRET]`.
+- **C-39, C-40 (HIGH)** - a read frame or a read scope leaked onto a pooled thread by a
+  `StackOverflowError` turned a decrypt that should have been refused into one that returned the
+  row. Fixed structurally: the converter returns no plaintext, so a leaked region cannot produce a
+  value; and a frame entry carries the token of the region that recorded it, so a drain happens only
+  under the region in force and foreign-token residue is discarded with the load refused (Cipher
+  item 4, which also answers D6). The read-scope stack that C-40 attacked no longer exists.
+- **C-41 (HIGH)** - `ShreddingContext.require` ignored the entity name, so a residual write scope
+  pushed for `A` was handed to a bind of `B`; and `refuseIfSubjectMoved` ran on `onPreUpdate` only,
+  never on insert, and on update only when the `Pre` hook pushed a fresh scope - vacuous on every
+  path where residue was consumable. Fixed on four fronts (Cipher items 13, 14): `require` compares
+  the entity name; a write scope may not nest, so residue from a bind whose `Post` hook never ran is
+  dropped rather than consumed; `refuseIfSubjectMoved` runs on every update; and a post-hoc header
+  check after every insert and every update re-reads what was written and refuses a row not bound to
+  the `(tenant, subject, rowId)` it was written under, inside the same flush and before the commit.
+- **C-35 (LOW)** - `onPostLoad` issued one `SELECT ... WHERE id = ?` per loaded row of every shredded
+  entity, an unbounded amplification a caller controlling the page size controlled the multiplier of.
+  Fixed: `onPostLoad` issues no SQL at all - which fields owe a decode is decided by reading the
+  placeholder off the entity. P3 reports `200 rows, 0 per-row re-reads` where it reported
+  `200 rows, 401 statements`.
+- **The `null` placeholder data-loss hole** (Cipher item 2, found in review of this design before any
+  code): for `LocalDate`, `BigDecimal` and JSON columns the placeholder would have been `null`, so an
+  entity whose install never ran held `null` in the field *and* the loaded state and the next
+  ordinary UPDATE wrote `NULL` over a live ciphertext, unseen. Fixed: a non-null per-type constant
+  compared by reference identity, carrying 128 bits drawn once per JVM run, ASCII and log-safe;
+  writing one back is `SHRED-PLACEHOLDER-001`, checked in the converter and on the state array in the
+  `Pre*` listeners before the blind indexes are written.
+- **`POST_LOAD` was appended, not prepended** (Cipher item 8): Hibernate's own
+  `PostLoadEventListenerStandardImpl` is what invokes a user's `@PostLoad` methods and
+  `@EntityListeners` beans, so every one of those callbacks was handed the placeholder. Fixed:
+  prepended. `POST_INSERT`/`POST_UPDATE` stay appended so the post-hoc check sees what reached the
+  database. Verified RED against the appended listener before the fix was kept.
+- **A refused row could be retried out of the first-level cache** with the value intact. Fixed:
+  verification runs before either install (Cipher item 9), so a refused instance holds placeholders;
+  the C-27 eviction stays as the second line.
+
+#### Tests
+
+- `FrameworkMatrixTest` (13) - one test per path Hibernate offers to reach a `@Shredded` column:
+  entity load, `@PostLoad` ordering, the placeholder write-back on the types with no sentinel, a
+  forged placeholder in the column, `merge`, `refresh`, `StatelessSession`, a `Stream` drained after
+  the call, `equals`/`hashCode`, and the `IDENTITY` rebind window including a batched `saveAll` and a
+  rollback.
+- `LoadedStateHostileMappingsTest` (3), `RowIdTest` (7), `EncryptedValueV2Test` (4),
+  `FieldCipherRowBindingTest` (4).
+- All six pending fifth-pass probes moved from `src/test-pending/java` into `src/test/java`, green.
+  `CipherProbeBracketUnwindTest` is rewritten rather than deleted: its read-scope probe exercised
+  `withRead`, which is removed, and its "no frame survives a `StackOverflowError`" assertion is a
+  property no arrangement of `finally` can hold (C-32 proved it). It now asserts the two properties
+  this design does hold - a decode filed in a region an `Error` unwound past is never drained by a
+  later region (0/200), and a leaked region yields no plaintext to anybody - and keeps the original,
+  stronger assertion for the write scope, which is real authority and stays at 0/200.
+
 ### Fixed (fifth pass at `2f72449`)
 
 Cipher's fifth-pass review (`docs/SECURITY-REVIEW-feat-shredding-core.md`, `## Fifth pass

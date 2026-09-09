@@ -87,17 +87,31 @@ what was destroyed, when, by whom, and the date the erasure is also complete in 
 - **The plaintext leak paths fail at startup**, not by convention: a second-level cached
   `@Shredded` entity, a converter that names the wrong field, a subject expression that reaches a
   bean or a static type, or a sample-looking master key are all startup failures.
-- **A read that decrypts a `@Shredded` field is either verified or refused, never returned on
-  trust.** A Spring Data repository call is verified automatically. A raw `EntityManager` entity
-  operation (`find`, `merge`, `refresh`, an entity-returning query) needs
+- **The converter never hands out plaintext.** It decrypts and files what it decrypted; the entity
+  load event, which is the only thing that knows the row, verifies it against that row's tenant,
+  subject and identifier and installs it. A Spring Data repository call works transparently. A raw
+  `EntityManager` entity operation (`find`, `merge`, `refresh`, an entity-returning query) needs
   `ShreddingContext.withReadBracket(...)`:
   ```java
   Doc doc = ShreddingContext.withReadBracket(() -> entityManager.find(Doc.class, id));
   ```
-  Anything that decrypts inside the bracket but is never handed to a verifier - a `@Query`
-  scalar/`Tuple`/interface projection, a `Stream<T>` consumed after the repository call already
-  returned, a hand-written DAO's own `EntityManager` use - is refused (`SHRED-READ-UNVERIFIED` or
-  `SHRED-READ-UNSCOPED`) rather than returned unverified. See `docs/index.md` for the full contract.
+  Anything that is not a managed entity load - a `@Query` scalar/`Tuple`/interface projection, a
+  `Stream<T>` consumed after the repository call already returned, a hand-written DAO's own
+  `EntityManager` use, a `StatelessSession` - is refused (`SHRED-READ-UNVERIFIED` or
+  `SHRED-READ-UNSCOPED`) with nothing decrypted returned. See `docs/index.md` for the full contract.
+- **Every stored value is bound to its row.** Tenant, subject *and* the row's own identifier go into
+  the header and the AAD, so a ciphertext copied between two rows of the same person is
+  `SHRED-ROW-MISMATCH` rather than displayed as the second row's own value.
+
+### Two rules for a `@Shredded` entity
+
+1. **A `@Shredded` field must never participate in `equals` or `hashCode`.** Between the decrypt and
+   the install the field holds a placeholder, so an instance put into a `HashSet` or used as a
+   `HashMap` key before the install is unreachable afterwards.
+2. **The identifier must be basic and single-column** - a numeric id, a `UUID`, a `String` or a
+   `byte[]`. It is bound into every stored value; a composite or embedded id, including a
+   single-column `@EmbeddedId`, is refused at startup, as are optimistic locking `ALL`/`DIRTY`,
+   select-before-update, and a `@Shredded` column inside the natural id.
 - **There is no fail-open property anywhere.** Every weaker mode is explicit and WARNs at *every*
   startup.
 - **The honest bound is written down.** This is pseudonymisation with key destruction, not

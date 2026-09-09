@@ -2,7 +2,9 @@
 
 Numbered, with the answer I took and why. **Dollar ruled on all ten on 2026-09-08**; each entry
 carries the ruling and what it changed in the code. #4 stays open for Cipher to pick between two
-options, and #10 stays open until Odin returns the citations.
+options, and #10 stays open until Odin returns the citations. **#21, #22, #23 and #24 are open for
+Cipher** — the three residuals the read-path redesign leaves behind, each with the boundary stated
+and a recommendation.
 
 ---
 
@@ -523,3 +525,110 @@ refuseIfSubjectMoved`'s own composite-id skip) stops being a residual too, becau
 exist. See CHANGELOG's "Fixed (fifth pass at `2f72449`)" entry, C-38, and
 `SECURITY-NOTES.md`'s "A `@Shredded` entity with a composite identifier is refused at startup, not on
 the first read (C-38)".
+
+## #21 A read region left behind by a `StackOverflowError` still reads as "open" (open — for Cipher)
+
+**The residual.** Cipher's item 4 is implemented: a frame entry carries the token of the region that
+recorded it, a drain happens only under the region currently in force, and a foreign-token entry is
+discarded with the load refused. `CipherProbeBracketUnwindTest` measures 0/200 on both the write
+scope and a later region draining residue, and 0 plaintext recovered from a leaked region.
+
+What item 4 does *not* reach: a region that an `Error` unwound past is still *on the stack*, so
+`ShreddingContext.inReadBracket()` is `true` for the next call on that pooled thread. If that next
+call opens no region of its own — a bare `EntityManager` read, a hand-written DAO — its decrypt is
+recorded into the leaked region rather than refused with `SHRED-READ-UNSCOPED`, and `onPostLoad`
+then drains it under a matching token and installs.
+
+**Why I did not close it.** The value that install produces is *this row's own value, verified
+against this row's tenant, subject and identifier*. It is not another subject's data, not a stale
+value, and not a post-erasure value (the key-state check runs on every decrypt). What is lost is the
+**loudness** — a read that should have been refused for having no region succeeds instead. Closing
+it needs a liveness signal for "is the frame that opened this region still on the call stack", which
+the JVM does not offer: a `finally` cannot run at stack exhaustion (C-32), a transaction-completion
+callback may not clear a region (C-33), and a `StackWalker` probe on every repository call is a cost
+I would not pay without being asked to.
+
+**Recommendation.** Accept as a documented residual, with the boundary stated exactly: *a leaked
+region can cost a refusal, never a value*. If Cipher wants it closed, the cheapest sound option I
+see is a `StackWalker`-derived depth recorded at `openRegion()` and compared at `recordDecoded()`;
+say so and I will measure the cost and build it.
+
+## #22 The per-decrypt key-state check is 200 statements on a 200-row page (open — for Cipher)
+
+**The measurement.** C-35 is closed: `onPostLoad` issues no SQL, and a 200-row page costs one
+statement against the entity's table where it cost 201. Cipher's own P3 counts `prepareStatement` on
+the real `DataSource` and reports 0 per-row re-reads.
+
+The same measurement shows the remaining 200 statements are `FieldCipher.decrypt`'s per-decrypt
+`SELECT ... FROM shredding_data_key`. That is control 7 and it predates this design: the data-key
+cache holds key *material*, never *authority*, so every decrypt re-reads the row that says whether
+the key may still be used at all. It is what makes the cross-node erasure window bounded by the
+cache TTL rather than unbounded.
+
+**Recommendation.** Leave it. Memoising the key state per transaction would make a 200-row page one
+statement instead of 200, but it caches *authority*, which is a security decision and not mine to
+take in a performance commit — and it would widen the window in which an erasure that lands
+mid-transaction is invisible to that transaction. Recorded so the number is not mistaken for a
+regression introduced by the read-path redesign.
+
+## #23 The `IDENTITY` rebind costs a second `encrypt` per shredded column (open — for Cipher)
+
+Design §3.1, ruled acceptable by Cipher (D3, items 5-6) and built as specified: the insert binds a
+random unbound intermediate, `onPostInsert` re-encrypts bound to the generated identifier and writes
+one `UPDATE` over raw JDBC in the same transaction, and a failure aborts the transaction.
+
+Two consequences worth stating rather than leaving to be discovered:
+
+1. **Two ticks of the per-key encryption counter** (control 3) per shredded column on an `IDENTITY`
+   insert. The limit is 2^32 and the counter triggers a rotation rather than a refusal, so the
+   effect is halving the interval between rotations for an `IDENTITY`-heavy workload. Noted in
+   `SECURITY-NOTES.md` beside control 3.
+2. **The intermediate reaches the WAL and any logical replication slot**, as Cipher's item 5
+   anticipated. It is bound to a 128-bit random value under a tag no real identifier's encoding can
+   equal, so it verifies against no row on any reader — which is the property item 5 asked for — but
+   it is still a ciphertext of the value, decryptable by anyone holding the subject's data key. That
+   is the same bound `SECURITY-NOTES.md`'s "Backups, PITR archives, WAL, replicas" residual already
+   states for every stored value; the rebind does not widen it, it only makes the row appear twice.
+
+**Recommendation.** Accept both. The alternative — refusing `IDENTITY` — was Cipher's to take and it
+declined it explicitly.
+
+## #24 "No write scope survives a `StackOverflowError`" is a measurement, not a guarantee (open — for Cipher)
+
+**What happened.** Cipher's `CipherProbeBracketUnwindTest` asserts that 0 of 200 forced stack
+overflows inside a nested `ShreddingContext.with(...)` leave a write scope on the thread. During this
+work it went 0/200 → 154/200 → 0/200 → 1/200 → 0/200, and every move was explained:
+
+- 154/200 was a real regression I introduced and the probe caught: `popWrite` used
+  `Deque.removeIf`, which allocates an iterator and calls through a lambda. At the depth where the
+  stack is already exhausted, those extra frames are extra chances for the cleanup itself to throw
+  the second `StackOverflowError` that skips the `finally`. Fixed by popping the top directly when
+  the top is the token being popped, which is every ordinary case.
+- The earlier 0/200 was partly an artefact of a *different* bug: `pushWrite` cleared the whole stack
+  on every push, so a deeply nested `with(...)` left at most one entry and the probe's
+  `current().isPresent()` check passed for the wrong reason. That bug also treated a legitimately
+  nested `with(...)` as residue and logged once per level — 43 MB of WARN in one probe run. Split
+  into `pushWrite` (plain, nests) and `pushBind` (drops residue, used only by the `Pre*` listeners).
+- 1/200 was a genuine flake, and it is the honest state of this property: a `finally` has to *call*
+  something, and at stack exhaustion that call throws again. C-32 established exactly this. I have
+  reduced the frames on the unwind path as far as I can see how to — the `ThreadLocal` is resolved
+  before the body runs and `with(...)` unwinds the deque in-line rather than calling a helper — and
+  it now measures 0/200 on five consecutive runs. It is not 0 by construction and I will not claim it
+  is.
+
+**Why I left the assertion at 0 anyway.** It is Cipher's bar, it passes, and lowering it to "usually
+0" would hide the next real regression exactly as the 154/200 one would have been hidden. If it
+flakes in CI I would rather find out.
+
+**Why a leak is not a breach either way.** The security property this design rests on is not "no
+scope survives" but *a surviving scope is never consumed*, and that has three independent guards,
+none of which depends on unwinding: `pushBind` drops anything still live before the next bind;
+`ShreddingContext.require` refuses a scope pushed for a different entity; and the post-hoc header
+check after every insert and update refuses, inside the same flush, any row whose stored header is
+not bound to the `(tenant, subject, rowId)` it was written under.
+`probe_a_leaked_write_scope_is_dropped_by_the_next_bind_rather_than_consumed` tests the first
+directly.
+
+**Recommendation.** Keep the strict assertion. If Cipher would rather have a stable build than a
+strict one, the alternative is to assert unconsumability and print the leak count as evidence — say
+which and I will change it in one commit.
