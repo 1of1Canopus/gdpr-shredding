@@ -117,3 +117,62 @@ property this design can hold. C-37 and C-38 stay Isis's and are unaffected.
 6. **D6.** After a `StackOverflowError`, residue can install a stale plaintext for the identical
    row+field+subject. Recommendation: a residual; removing it needs a liveness signal the JVM does
    not offer.
+
+## Cipher design review (2026-09-09)
+
+**Verdict: APPROVED WITH CHANGES.** "Ambient state may accuse, never authorise" is the first proposal in five passes
+that removes the authority instead of re-accounting for it, and rowId-in-AAD closes C-34 and C-26's whole class at
+once. Fourteen changes are mandatory before code; 8, 13 and 14 break the design as written.
+
+**Rulings.** D1 **accepted** — §1 is the design. D2 **accepted with change 1**: silence is not acceptable
+where a signal exists. D3 **accepted subject to 5-7**; I do not require refusing `IDENTITY`. D4 **accepted
+subject to 8-11**. D5 **accepted with 12**. D6 **rejected as stated**: change 4 turns the stale value into
+a refusal for the price of one field. The changes, all mandatory before any code:
+
+1. **No region ⇒ throw, never a placeholder.** A placeholder outside an open region discards today's
+   `SHRED-READ-UNSCOPED` (C-17/18/20) and is a narrowing. D2's silent set then empties: `Stream` after the call,
+   `@Async`, hand-written DAO, raw `EntityManager` have no region and stay loud. §2 rows 6-7 change.
+2. **`null` is never a placeholder.** For `LocalDate`/`BigDecimal`/JSON it is silent destruction: an entity whose
+   install never ran holds `null` in field *and* loaded state, and the next non-`@DynamicUpdate` UPDATE writes `NULL`
+   over the ciphertext, unseen by `SHRED-PLACEHOLDER-001`. Non-null constants, compared by **reference identity**.
+3. **The token is unforgeable and log-safe**: per JVM run, `[SHRED-PLACEHOLDER-<hex>]`, ASCII, no control characters
+   or `%`/`{}`, so an attacker with `UPDATE` cannot store a value that reads back as one.
+4. **Drain only under the current region's owner token**; a foreign-token entry is discarded and the load refuses.
+   D6 becomes `SHRED-READ-UNVERIFIED`, and post-erasure residue — a false proof — dies with it.
+5. **No unbound header exists.** A v2 header with rowId absent or zero that still verifies reopens C-34 for anyone
+   with `UPDATE`. The IDENTITY insert binds a random 128-bit rowId and `onPostInsert` rebinds, so an intermediate
+   captured by CDC, a trigger or a replica is bound to no row.
+6. **Rebind failure aborts the transaction**, on raw JDBC via `session.doWork` — never the session query API or
+   `flush()`, unsupported inside the action queue. Probe batched `saveAll`, rollback, `StatelessSession`.
+7. **rowId bytes come from the identifier's column value**, length-prefixed into the AAD, not `toString()`. A
+   single-column `@EmbeddedId` passes C-38's check but is not basic: refuse a non-basic id at startup. Name id
+   reuse after a delete as an accepted residual.
+8. **`POST_LOAD` must be prepended.** `ShreddingIntegrator` appends, so `PostLoadEventListenerStandardImpl`
+   runs first and every `@PostLoad` callback and `@EntityListeners` bean sees the placeholder.
+9. **Verify first, install second** (entity and `EntityEntry` loaded state), so an L1 retry yields a placeholder.
+10. **Refuse at startup where loaded-state mutation cannot hold:** `@OptimisticLocking(ALL|DIRTY)` (the UPDATE's
+    WHERE would carry plaintext against a ciphertext column), `@SelectBeforeUpdate`, `@NaturalId` on a shredded
+    column — `getDatabaseSnapshot` re-reads through the converter with no `PostLoad` and compares placeholders.
+11. **Document and probe `equals`/`hashCode`.** Before install the field holds the placeholder, so an instance added
+    to a `Set` first is unreachable after; dirty checking is safe (the install writes both sides). README rule:
+    shredded fields never participate in `equals`/`hashCode`.
+12. **A v1 header is refused, not ignored** (`SHRED-FORMAT`).
+13. **`ShreddingContext.require` must compare `scope.entityName()` to the converter's entity** — it ignores it
+    today, which is C-41 itself: a residual scope pushed for A is handed to a bind of B.
+14. **§1's C-41 answer is false.** `refuseIfSubjectMoved` runs on `onPreUpdate` only, never on insert, and on update
+    only when the Pre hook pushed a fresh scope: vacuous on every path where residue is consumable. Property: *a write
+    scope is consumable only by the bind it was pushed for* — tag it with session and flush generation, refuse a
+    foreign or dead-generation scope in `require`, add the post-hoc header check to `onPostInsert`, and run the
+    placeholder write-back check on the state array in the Pre hooks, before `writeBlindIndexes`.
+
+**Sound as argued.** The pooled-thread claim holds once the frame key carries tenant and rowId: same
+entity+field+tenant+subject+rowId is the same row, so residue cannot cross subjects. `StackOverflowError`,
+`OutOfMemoryError`, a throw from `onPostLoad` and a session closed without commit all reduce to residue, which change
+4 reduces to a refusal. Session-scoped storage and the per-row re-read: rejections accepted. Jackson: with change 1 a
+placeholder is serialisable only from inside a region whose close refuses first.
+
+**Probes once built.** Listener order against a user `@PostLoad`; the null-placeholder UPDATE erasing a `BigDecimal`
+ciphertext; a projection with no region; a forged placeholder in the column; a foreign-token drain after a forced
+`StackOverflowError`; a read after erasure with residue; the INSERT/UPDATE window under CDC and under rollback;
+single-column `@EmbeddedId`; `StatelessSession`; `merge`, `refresh`, `@SelectBeforeUpdate`, `OptimisticLockType.ALL`;
+a `Set` keyed on a shredded field; the 200-row count; every `CipherProbe*` unchanged.
