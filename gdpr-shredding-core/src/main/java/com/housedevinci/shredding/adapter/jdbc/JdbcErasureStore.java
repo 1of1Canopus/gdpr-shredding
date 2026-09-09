@@ -255,7 +255,13 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
                   "SELECT "
                       + COLUMNS
                       + " FROM shredding_erasure WHERE tenant = ? AND subject_pseudonym = ?"
-                      + " ORDER BY ts DESC, seq DESC LIMIT 1")) {
+                      // CIPHER-15: the log is append-only and seq is its own monotonic bigserial;
+                      // ts is clock.instant() from the application and a backwards clock step
+                      // (NTP, a container resume, two nodes disagreeing) between two appends could
+                      // otherwise return an older COMPLETE ahead of a later PARTIAL and hide an
+                      // outstanding erasure from the DPO who asked. Order by the column that
+                      // actually orders the chain.
+                      + " ORDER BY seq DESC LIMIT 1")) {
             ps.setString(1, tenant.value());
             ps.setString(2, subjectPseudonym);
             try (ResultSet rs = ps.executeQuery()) {

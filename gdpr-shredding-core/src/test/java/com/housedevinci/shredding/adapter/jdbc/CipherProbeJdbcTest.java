@@ -131,6 +131,63 @@ class CipherProbeJdbcTest {
   }
 
   /**
+   * CIPHER-15: {@code latestForSubject} used to order by {@code ts DESC, seq DESC}. {@code ts} is
+   * {@code clock.instant()} from the application; {@code seq} is the log's own monotonic {@code
+   * bigserial}. A backwards clock step between two appends - NTP, a container resume, two nodes
+   * disagreeing - could return an older {@code COMPLETE} ahead of a later {@code PARTIAL} and hide
+   * an outstanding erasure from the DPO who asked. Two records are appended directly (bypassing
+   * {@code ErasureService}'s own clock, which this test does not control) with a {@code PARTIAL}
+   * whose {@code ts} is earlier than the {@code COMPLETE} already in the log but whose {@code seq}
+   * is later, exactly what a backwards clock step produces.
+   */
+  @Test
+  void probe_a_backwards_clock_hides_an_outstanding_partial() {
+    JdbcErasureStore store = store(List.of());
+    SubjectId subject = SubjectId.of("s-clockback");
+    String pseudonym = new Pseudonymiser(SECRET).pseudonym(TENANT, subject);
+    Instant later = Instant.now();
+    Instant earlier = later.minus(Duration.ofHours(1));
+
+    store.append(
+        com.housedevinci.shredding.domain.ErasureRecord.of(
+            later,
+            TENANT,
+            pseudonym,
+            "dpo",
+            "art 17",
+            3,
+            1,
+            2,
+            0,
+            com.housedevinci.shredding.domain.ErasureOutcome.COMPLETE,
+            List.of(),
+            later.plus(Duration.ofDays(30))));
+    var partial =
+        store.append(
+            com.housedevinci.shredding.domain.ErasureRecord.of(
+                earlier,
+                TENANT,
+                pseudonym,
+                "dpo",
+                "art 17",
+                0,
+                1,
+                2,
+                0,
+                com.housedevinci.shredding.domain.ErasureOutcome.PARTIAL,
+                List.of(),
+                earlier.plus(Duration.ofDays(30))));
+
+    var latest = store.latestForSubject(TENANT, pseudonym);
+    assertThat(latest).isPresent();
+    assertThat(latest.get().sequence())
+        .as("the later-appended PARTIAL, not the earlier-ts COMPLETE, must be reported latest")
+        .isEqualTo(partial.sequence());
+    assertThat(latest.get().outcome())
+        .isEqualTo(com.housedevinci.shredding.domain.ErasureOutcome.PARTIAL);
+  }
+
+  /**
    * An erasure that destroys the key but does not write the record leaves an erasure nobody can
    * prove; a record without the destruction is a false proof. Both must be impossible, which means
    * one transaction, not two calls.
