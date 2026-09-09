@@ -59,9 +59,8 @@ public final class ShreddingContext {
    */
   public static void clearAll() {
     SCOPES.remove();
-    READ_BRACKET_DEPTH.remove();
+    READ_FRAMES.remove();
     READ_SCOPES.remove();
-    DECODED_READS.remove();
   }
 
   public static void pop() {
@@ -106,8 +105,8 @@ public final class ShreddingContext {
   }
 
   /**
-   * CIPHER-11: whether a decrypt reached from within a managed entity load is currently in
-   * progress, on this thread.
+   * CIPHER-11 / C-17..C-22 (third pass): a bracket that owes a debt, not a permission granted by
+   * the caller's identity.
    *
    * <p>Hibernate hands a shredded field's {@code AttributeConverter} nothing but the column bytes,
    * and - confirmed against the Hibernate ORM 7.4 loader bytecode this module builds against, the
@@ -116,37 +115,95 @@ public final class ShreddingContext {
    * row. There is therefore no Hibernate hook that can gate an individual row's own decrypt before
    * it happens, for an entity load any more than for a projection; the only usable difference
    * between the two is that an entity load can be bracketed from <em>outside</em> Hibernate, at the
-   * point the application asks for one. {@code ShreddingReadBracketRepositoryFactoryCustomizer}
-   * does exactly that for every Spring Data JPA repository call; {@link #withRead} does it for a
-   * caller-supplied {@link Scope} around a bare {@code EntityManager} use.
+   * point the application asks for one. {@link
+   * com.housedevinci.shredding.autoconfigure.ShreddingReadBracketCustomizer} does exactly that for
+   * every Spring Data JPA repository call; {@link #withReadBracket} does it for a caller-supplied
+   * {@code EntityManager} entity operation.
    *
-   * <p>A decrypt reached with the bracket open and no explicit read scope defers verification to
-   * the existing, now-fixed {@code onPostLoad}/{@code refuseIfSubjectMoved} pair (CIPHER-12,
-   * CIPHER-14) once the row is fully hydrated - the same "decrypt now, refuse before return"
-   * relaxation Cipher accepted for entity loads under QUESTIONS #13. A decrypt reached with the
-   * bracket closed and no explicit read scope has nothing to verify against at all and is refused
-   * outright ({@link com.housedevinci.shredding.domain.ErrorCodes#READ_UNSCOPED}): that is
-   * precisely CIPHER-11's projection, tuple and constructor-expression case, none of which any
-   * Hibernate load listener ever sees.
+   * <p>Third pass, CIPHER-11's fix text corrected by Cipher's own re-verification: the first
+   * version of this bracket was a flat depth counter, and {@link #recordDecoded} wrote into a flat
+   * map keyed only by {@code entity.field}. That is a permission ("you are inside something that
+   * will <em>probably</em> get verified"), not a proof, and it let a repository {@code @Query}
+   * projection, a Spring Data interface projection and a second, uninstrumented {@code
+   * EntityManagerFactory} all decrypt with nothing ever draining the record (C-17, C-18, C-20) -
+   * and let one row's undrained record be mistaken for a later, unrelated row's (C-22).
+   *
+   * <p>The fix: every {@link #pushReadBracket()} opens a {@code Frame}. {@link #recordDecoded}
+   * files into the frame currently on top of this thread's stack, not into a shared map. A verifier
+   * drains an entry out of that same frame - {@code ShreddingEventListener.onPostLoad} for the row
+   * it just verified, or an explicit {@link #withRead} scope for a projection that cannot go
+   * through a managed load at all. {@link #popReadBracket()} closes the frame and, if anything in
+   * it was never drained, throws {@link
+   * com.housedevinci.shredding.domain.ErrorCodes#READ_UNVERIFIED} - after the value was computed,
+   * but strictly before the repository method that opened the bracket hands its result back to the
+   * caller (the proxy that opens the bracket must let this exception replace a normal return, not
+   * merely log past it). A decrypt reached with the bracket closed and no explicit read scope still
+   * has nothing to verify against at all and is still refused outright ({@link
+   * com.housedevinci.shredding.domain.ErrorCodes#READ_UNSCOPED}): that is CIPHER-11's original
+   * projection, tuple and constructor-expression case, none of which any Hibernate load listener
+   * ever sees.
    */
-  private static final ThreadLocal<Integer> READ_BRACKET_DEPTH = ThreadLocal.withInitial(() -> 0);
+  private static final class Frame {
+    private final Map<String, Decoded> pending = new HashMap<>();
+  }
+
+  private static final ThreadLocal<Deque<Frame>> READ_FRAMES =
+      ThreadLocal.withInitial(ArrayDeque::new);
 
   /** Reentrant: a repository call can trigger a lazy load of another shredded entity. */
   public static void pushReadBracket() {
-    READ_BRACKET_DEPTH.set(READ_BRACKET_DEPTH.get() + 1);
+    READ_FRAMES.get().push(new Frame());
   }
 
+  /**
+   * Closes the innermost frame. If it still holds a decode nothing ever drained, the debt is
+   * unpaid: throws {@link com.housedevinci.shredding.domain.ErrorCodes#READ_UNVERIFIED} naming the
+   * field (never the plaintext), after the frame is already gone so a retry starts clean. Callers
+   * that must not let this exception obscure one already in flight - the bracket unwinding on the
+   * proxy's exceptional path - should call {@link #discardReadBracket()} instead.
+   */
   public static void popReadBracket() {
-    int depth = READ_BRACKET_DEPTH.get() - 1;
-    if (depth <= 0) {
-      READ_BRACKET_DEPTH.remove();
-    } else {
-      READ_BRACKET_DEPTH.set(depth);
+    Frame frame = popFrame();
+    if (frame != null && !frame.pending.isEmpty()) {
+      String first = frame.pending.keySet().iterator().next();
+      throw new ShreddingException(
+          ErrorCodes.READ_UNVERIFIED,
+          "a read bracket closed with "
+              + frame.pending.size()
+              + " decoded @Shredded value(s) that no verifier ever drained, the first being "
+              + first
+              + ". Every decrypt inside ShreddingContext.pushReadBracket()/withReadBracket(...) must"
+              + " be reached either by a managed entity load - which ShreddingEventListener"
+              + ".onPostLoad verifies once the row is fully hydrated - or by an explicit"
+              + " ShreddingContext.withRead(...) scope. A repository @Query projection, a Spring"
+              + " Data interface projection, a bare EntityManager read against an uninstrumented"
+              + " EntityManagerFactory, or any other decrypt that reaches a shredded converter"
+              + " while the bracket is open but is never handed to a verifier, is refused rather"
+              + " than returned.");
     }
   }
 
+  /**
+   * Closes the innermost frame without checking it, discarding whatever it holds. For the
+   * exceptional path only: the bracket must still unwind so a pooled thread does not carry a stale
+   * frame into the next, unrelated call, but a frame left non-empty because the body threw before
+   * reaching its verifier is not the failure worth reporting - the original exception is.
+   */
+  public static void discardReadBracket() {
+    popFrame();
+  }
+
+  private static Frame popFrame() {
+    Deque<Frame> stack = READ_FRAMES.get();
+    Frame frame = stack.isEmpty() ? null : stack.pop();
+    if (stack.isEmpty()) {
+      READ_FRAMES.remove();
+    }
+    return frame;
+  }
+
   public static boolean inReadBracket() {
-    return READ_BRACKET_DEPTH.get() > 0;
+    return !READ_FRAMES.get().isEmpty();
   }
 
   /**
@@ -158,14 +215,21 @@ public final class ShreddingContext {
    * reaches a shredded converter exactly like any other load. Do not reach for this around a
    * scalar, {@code Tuple} or constructor-expression projection - that is exactly the case CIPHER-11
    * refuses, and this would silently defeat it; use {@link #withRead} instead, which verifies.
+   *
+   * <p>Documented in {@code README.md} and {@code docs/index.md} (C-23): this is the contract for
+   * every {@code EntityManager} entity read, not only an error code a user meets after the fact.
    */
   public static <T> T withReadBracket(java.util.function.Supplier<T> body) {
     pushReadBracket();
+    T result;
     try {
-      return body.get();
-    } finally {
-      popReadBracket();
+      result = body.get();
+    } catch (RuntimeException e) {
+      discardReadBracket();
+      throw e;
     }
+    popReadBracket();
+    return result;
   }
 
   /**
@@ -232,28 +296,36 @@ public final class ShreddingContext {
    */
   public record Decoded(TenantId tenant, SubjectId subject) {}
 
-  private static final ThreadLocal<Map<String, Decoded>> DECODED_READS =
-      ThreadLocal.withInitial(HashMap::new);
-
   /**
+   * Records into the frame currently on top of this thread's read-bracket stack (C-17/C-22): a
+   * decode with no open bracket - an explicit {@link #withRead} scope with nothing bracketing it -
+   * has already been verified atomically by the caller-supplied scope and has no frame to owe a
+   * debt to, so it is not recorded anywhere and there is nothing left to drain.
+   *
    * @param key qualified as {@code entityName + "." + fieldName}, so two entity types that happen
    *     to share a field name cannot collide
    */
   public static void recordDecoded(String key, TenantId tenant, SubjectId subject) {
-    DECODED_READS.get().put(key, new Decoded(tenant, subject));
+    Deque<Frame> stack = READ_FRAMES.get();
+    if (stack.isEmpty()) {
+      return;
+    }
+    stack.peek().pending.put(key, new Decoded(tenant, subject));
   }
 
   /**
-   * Removes and returns what was recorded for {@code key}, if anything. Removing on read means a
-   * value from a previous row's hydration can never be mistaken for the current row's: a field that
-   * was {@code null} for this row, and so was never decoded, correctly has nothing to check.
+   * Removes and returns what was recorded for {@code key} in the frame currently on top of this
+   * thread's read-bracket stack, if anything. Removing on read means a value from a previous row's
+   * hydration can never be mistaken for the current row's: a field that was {@code null} for this
+   * row, and so was never decoded, correctly has nothing to check. Draining the frame - not a flat,
+   * bracket-wide map - is what stops a decode taken by one row's {@code onPostLoad} from being the
+   * one recorded by an unrelated projection earlier in the same bracket (C-22).
    */
   public static Optional<Decoded> takeDecoded(String key) {
-    Map<String, Decoded> map = DECODED_READS.get();
-    Decoded value = map.remove(key);
-    if (map.isEmpty()) {
-      DECODED_READS.remove();
+    Deque<Frame> stack = READ_FRAMES.get();
+    if (stack.isEmpty()) {
+      return Optional.empty();
     }
-    return Optional.ofNullable(value);
+    return Optional.ofNullable(stack.peek().pending.remove(key));
   }
 }

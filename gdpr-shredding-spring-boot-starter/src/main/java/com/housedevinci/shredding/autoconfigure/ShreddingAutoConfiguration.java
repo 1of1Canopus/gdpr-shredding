@@ -247,16 +247,19 @@ public class ShreddingAutoConfiguration {
    * refused. {@code @ConditionalOnClass} rather than a hard dependency: this module does not
    * require Spring Data JPA, only benefits from bracketing it when it is present.
    *
-   * <p>{@code static}: a {@code BeanPostProcessor} {@code @Bean} method must not require the
-   * declaring {@code @Configuration} class itself to be instantiated early, and this one has no
-   * dependencies to inject.
+   * <p>C-20: no longer {@code static}. The customizer now needs {@code ObjectProvider<
+   * EntityManagerFactory>} to refuse startup outright when more than one {@code
+   * EntityManagerFactory} bean exists (see its javadoc) - an {@code ObjectProvider} is lazy, so
+   * this does not force the declaring {@code @Configuration} class, or any {@code
+   * EntityManagerFactory} bean, to be instantiated any earlier than it otherwise would be.
    */
   @Bean
   @ConditionalOnMissingBean
   @org.springframework.boot.autoconfigure.condition.ConditionalOnClass(
       org.springframework.data.repository.Repository.class)
-  public static ShreddingReadBracketCustomizer shreddingReadBracketCustomizer() {
-    return new ShreddingReadBracketCustomizer();
+  public ShreddingReadBracketCustomizer shreddingReadBracketCustomizer(
+      ObjectProvider<EntityManagerFactory> entityManagerFactories) {
+    return new ShreddingReadBracketCustomizer(entityManagerFactories);
   }
 
   @Bean

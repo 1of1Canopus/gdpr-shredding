@@ -64,4 +64,22 @@ public final class ErrorCodes {
    * reason to display an already-decrypted value.
    */
   public static final String SUBJECT_UNRESOLVED = "SHRED-SUBJECT-UNRESOLVED";
+
+  /**
+   * C-17/C-18/C-20/C-22: a decrypt was reached with the read bracket open but no verifier (neither
+   * {@code onPostLoad} nor an explicit {@code ShreddingContext.withRead(...)} scope) ever drained
+   * it before the bracket closed. Thrown from {@code popReadBracket()}, after the value was
+   * computed but before it is handed back to the caller - the bracket owes a debt, and this is what
+   * it means for the debt to go unpaid. Never carries the decrypted value.
+   */
+  public static final String READ_UNVERIFIED = "SHRED-READ-UNVERIFIED";
+
+  /**
+   * C-20: a Spring Data repository call was bracketed, but the module could not establish that
+   * every {@code EntityManagerFactory} bean in the application is the one instance {@code
+   * ShreddingIntegrator} is wired to. A bracket that cannot tell which Hibernate session it is
+   * vouching for cannot vouch for anything, so bracketing every repository is refused outright at
+   * startup rather than silently trusting a factory with no listener.
+   */
+  public static final String EMF_UNINSTRUMENTED = "SHRED-EMF-UNINSTRUMENTED";
 }
