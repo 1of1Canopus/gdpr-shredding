@@ -6,6 +6,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.housedevinci.shredding.application.ErasureChainVerifier;
 import com.housedevinci.shredding.application.ErasureRequest;
 import com.housedevinci.shredding.application.ErasureService;
+import com.housedevinci.shredding.autoconfigure.fixture.Blob;
+import com.housedevinci.shredding.autoconfigure.fixture.BlobRepository;
+import com.housedevinci.shredding.autoconfigure.fixture.BlobSeq;
+import com.housedevinci.shredding.autoconfigure.fixture.BlobSeqRepository;
+import com.housedevinci.shredding.autoconfigure.fixture.Doc;
+import com.housedevinci.shredding.autoconfigure.fixture.DocRepository;
 import com.housedevinci.shredding.autoconfigure.fixture.Gadget;
 import com.housedevinci.shredding.autoconfigure.fixture.GadgetRepository;
 import com.housedevinci.shredding.autoconfigure.fixture.Widget;
@@ -17,6 +23,7 @@ import com.housedevinci.shredding.domain.SubjectId;
 import com.housedevinci.shredding.domain.TenantId;
 import com.housedevinci.shredding.jpa.ShreddingContext;
 import jakarta.persistence.EntityManager;
+import jakarta.persistence.Tuple;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import org.junit.jupiter.api.Test;
@@ -92,6 +99,9 @@ class ShreddingIntegrationTest {
 
   @Autowired WidgetRepository widgets;
   @Autowired GadgetRepository gadgets;
+  @Autowired DocRepository docs;
+  @Autowired BlobRepository blobs;
+  @Autowired BlobSeqRepository blobSeqs;
   @Autowired ErasureService erasures;
   @Autowired ErasureChainVerifier verifier;
   @Autowired EntityManager entityManager;
@@ -224,6 +234,322 @@ class ShreddingIntegrationTest {
 
     assertThatThrownBy(() -> widgets.findByOwnerId(bobId))
         .satisfies(t -> assertThat(shreddingCode(t)).isEqualTo(ErrorCodes.SUBJECT_MISMATCH));
+  }
+
+  // -- CIPHER-11: a projection, unwrapped, has no read scope and is refused -----------------
+
+  @Test
+  void probe_a_moved_blob_is_returned_by_a_scalar_projection() throws Exception {
+    String aliceId = "owner-alice-scalar-" + System.nanoTime();
+    String bobId = "owner-bob-scalar-" + System.nanoTime();
+    docs.save(new Doc(aliceId, "ALICE-SECRET-TITLE", "alice body"));
+    docs.save(new Doc(bobId, "bob title", "bob body"));
+    moveColumn("doc", "title", aliceId, bobId);
+
+    assertThatThrownBy(
+            () ->
+                transactions.executeWithoutResult(
+                    status ->
+                        entityManager
+                            .createQuery(
+                                "select d.title from Doc d where d.ownerId = :id", String.class)
+                            .setParameter("id", bobId)
+                            .getSingleResult()))
+        .satisfies(t -> assertThat(shreddingCode(t)).isEqualTo(ErrorCodes.READ_UNSCOPED));
+  }
+
+  @Test
+  void probe_a_moved_blob_is_returned_by_a_tuple_projection() throws Exception {
+    String aliceId = "owner-alice-tuple-" + System.nanoTime();
+    String bobId = "owner-bob-tuple-" + System.nanoTime();
+    docs.save(new Doc(aliceId, "ALICE-SECRET-TITLE-2", "alice body 2"));
+    docs.save(new Doc(bobId, "bob title 2", "bob body 2"));
+    moveColumn("doc", "title", aliceId, bobId);
+
+    assertThatThrownBy(
+            () ->
+                transactions.executeWithoutResult(
+                    status ->
+                        entityManager
+                            .createQuery(
+                                "select d.title, d.body from Doc d where d.ownerId = :id",
+                                Tuple.class)
+                            .setParameter("id", bobId)
+                            .getSingleResult()))
+        .satisfies(t -> assertThat(shreddingCode(t)).isEqualTo(ErrorCodes.READ_UNSCOPED));
+  }
+
+  @Test
+  void probe_a_moved_blob_is_returned_by_a_constructor_expression_dto() throws Exception {
+    String aliceId = "owner-alice-ctor-" + System.nanoTime();
+    String bobId = "owner-bob-ctor-" + System.nanoTime();
+    docs.save(new Doc(aliceId, "ALICE-SECRET-TITLE-3", "alice body 3"));
+    docs.save(new Doc(bobId, "bob title 3", "bob body 3"));
+    moveColumn("doc", "title", aliceId, bobId);
+
+    assertThatThrownBy(
+            () ->
+                transactions.executeWithoutResult(
+                    status ->
+                        entityManager
+                            .createQuery(
+                                "select new "
+                                    + DocTitle.class.getName()
+                                    + "(d.title) from Doc d where d.ownerId = :id",
+                                DocTitle.class)
+                            .setParameter("id", bobId)
+                            .getSingleResult()))
+        .satisfies(t -> assertThat(shreddingCode(t)).isEqualTo(ErrorCodes.READ_UNSCOPED));
+  }
+
+  /** CIPHER-11's fix list: an unscoped projection of a row nothing was ever moved into either. */
+  @Test
+  void an_unscoped_projection_of_a_legitimate_row_is_refused_too() {
+    String ownerId = "owner-legit-" + System.nanoTime();
+    docs.save(new Doc(ownerId, "a perfectly ordinary title", "a perfectly ordinary body"));
+
+    assertThatThrownBy(
+            () ->
+                transactions.executeWithoutResult(
+                    status ->
+                        entityManager
+                            .createQuery(
+                                "select d.title from Doc d where d.ownerId = :id", String.class)
+                            .setParameter("id", ownerId)
+                            .getSingleResult()))
+        .satisfies(t -> assertThat(shreddingCode(t)).isEqualTo(ErrorCodes.READ_UNSCOPED));
+  }
+
+  /** The documented escape hatch: an explicit read scope makes the same projection succeed. */
+  @Test
+  void an_explicit_read_scope_allows_a_projection_of_the_row_it_names() {
+    String ownerId = "owner-scoped-" + System.nanoTime();
+    docs.save(new Doc(ownerId, "scoped title", "scoped body"));
+
+    String title =
+        transactions.execute(
+            status ->
+                ShreddingContext.withRead(
+                    new ShreddingContext.Scope(
+                        TenantId.of("default"), SubjectId.of(ownerId), "Doc"),
+                    () ->
+                        entityManager
+                            .createQuery(
+                                "select d.title from Doc d where d.ownerId = :id", String.class)
+                            .setParameter("id", ownerId)
+                            .getSingleResult()));
+    assertThat(title).isEqualTo("scoped title");
+  }
+
+  /** An explicit read scope still refuses a moved blob - it is verified, not just permitted. */
+  @Test
+  void an_explicit_read_scope_still_refuses_a_moved_blob() throws Exception {
+    String aliceId = "owner-alice-scoped-" + System.nanoTime();
+    String bobId = "owner-bob-scoped-" + System.nanoTime();
+    docs.save(new Doc(aliceId, "ALICE-SECRET-TITLE-4", "alice body 4"));
+    docs.save(new Doc(bobId, "bob title 4", "bob body 4"));
+    moveColumn("doc", "title", aliceId, bobId);
+
+    assertThatThrownBy(
+            () ->
+                transactions.executeWithoutResult(
+                    status ->
+                        ShreddingContext.withRead(
+                            new ShreddingContext.Scope(
+                                TenantId.of("default"), SubjectId.of(bobId), "Doc"),
+                            () ->
+                                entityManager
+                                    .createQuery(
+                                        "select d.title from Doc d where d.ownerId = :id",
+                                        String.class)
+                                    .setParameter("id", bobId)
+                                    .getSingleResult())))
+        .satisfies(t -> assertThat(shreddingCode(t)).isEqualTo(ErrorCodes.SUBJECT_MISMATCH));
+  }
+
+  /** A repository call keeps decrypting transparently: the read bracket, not an explicit scope. */
+  @Test
+  void a_repository_call_reads_transparently_through_the_bracket() {
+    String ownerId = "owner-bracket-" + System.nanoTime();
+    docs.save(new Doc(ownerId, "bracketed title", "bracketed body"));
+    Doc loaded = docs.findByOwnerId(ownerId).get(0);
+    assertThat(loaded.getTitle()).isEqualTo("bracketed title");
+  }
+
+  // -- CIPHER-12: an unresolvable subject on a row carrying a shredded value is a refusal -----
+
+  @Test
+  void probe_a_moved_blob_is_returned_when_the_subject_source_is_null() throws Exception {
+    String aliceId = "owner-alice-null-" + System.nanoTime();
+    String bobId = "owner-bob-null-" + System.nanoTime();
+    docs.save(new Doc(aliceId, "ALICE-SECRET-TITLE-5", "alice body 5"));
+    Doc bob = docs.save(new Doc(bobId, "bob title 5", "bob body 5"));
+    Long bobId0 = bob.getId();
+    moveColumn("doc", "title", aliceId, bobId);
+    try (var c = dataSource.getConnection();
+        var ps = c.prepareStatement("UPDATE doc SET owner_id = NULL WHERE id = ?")) {
+      ps.setLong(1, bobId0);
+      ps.executeUpdate();
+    }
+    entityManager.clear();
+
+    assertThatThrownBy(() -> docs.findById(bobId0).orElseThrow())
+        .satisfies(t -> assertThat(shreddingCode(t)).isEqualTo(ErrorCodes.SUBJECT_UNRESOLVED));
+  }
+
+  /** The other half of the ruling: no shredded value on the row, an unresolvable subject loads. */
+  @Test
+  void a_row_with_no_shredded_value_loads_despite_an_unresolvable_subject() throws Exception {
+    Doc row = docs.save(new Doc("owner-empty-" + System.nanoTime(), null, null));
+    Long id = row.getId();
+    try (var c = dataSource.getConnection();
+        var ps = c.prepareStatement("UPDATE doc SET owner_id = NULL WHERE id = ?")) {
+      ps.setLong(1, id);
+      ps.executeUpdate();
+    }
+    entityManager.clear();
+
+    Doc reloaded = docs.findById(id).orElseThrow();
+    assertThat(reloaded.getTitle()).isNull();
+    assertThat(reloaded.getBody()).isNull();
+  }
+
+  // -- CIPHER-13: a refused, unscoped projection leaves nothing behind on the thread ----------
+
+  @Test
+  @Transactional
+  void probe_a_projection_leaves_a_stale_decoded_entry_that_breaks_a_later_load() {
+    String aliceId = "owner-alice-stale-" + System.nanoTime();
+    String carolId = "owner-carol-stale-" + System.nanoTime();
+    docs.save(new Doc(aliceId, "alice's real title", "alice's real body"));
+    docs.save(new Doc(carolId, null, "carol's body, title never set"));
+
+    assertThatThrownBy(
+            () ->
+                entityManager
+                    .createQuery("select d.title from Doc d where d.ownerId = :id", String.class)
+                    .setParameter("id", aliceId)
+                    .getSingleResult())
+        .satisfies(t -> assertThat(shreddingCode(t)).isEqualTo(ErrorCodes.READ_UNSCOPED));
+
+    // The refused projection above must not corrupt the next, unrelated load in this transaction.
+    Doc carol = docs.findByOwnerId(carolId).get(0);
+    assertThat(carol.getTitle()).isNull();
+    assertThat(carol.getBody()).isEqualTo("carol's body, title never set");
+  }
+
+  // -- CIPHER-14: every shredded column is checked, not only the first --------------------------
+
+  @Test
+  void probe_the_update_check_is_skipped_when_the_first_shredded_column_is_null() {
+    String victim = "owner-victim-" + System.nanoTime();
+    String hijacker = "owner-hijacker-" + System.nanoTime();
+    Doc saved = docs.save(new Doc(victim, null, "VICTIM-SECRET-BODY"));
+    Long id = saved.getId();
+
+    assertThatThrownBy(
+            () ->
+                transactions.executeWithoutResult(
+                    status -> {
+                      Doc loaded = docs.findById(id).orElseThrow();
+                      loaded.setOwnerId(hijacker);
+                      entityManager.flush();
+                    }))
+        .satisfies(t -> assertThat(shreddingCode(t)).isEqualTo(ErrorCodes.SUBJECT_IMMUTABLE));
+  }
+
+  @Test
+  void probe_a_row_escapes_its_subjects_erasure_scope_when_the_first_column_is_null() {
+    String victim = "owner-victim2-" + System.nanoTime();
+    String hijacker = "owner-hijacker2-" + System.nanoTime();
+    Doc saved = docs.save(new Doc(victim, null, "VICTIM-SECRET-BODY-2"));
+    Long id = saved.getId();
+
+    assertThatThrownBy(
+            () ->
+                transactions.executeWithoutResult(
+                    status -> {
+                      Doc loaded = docs.findById(id).orElseThrow();
+                      loaded.setOwnerId(hijacker);
+                      entityManager.flush();
+                    }))
+        .satisfies(t -> assertThat(shreddingCode(t)).isEqualTo(ErrorCodes.SUBJECT_IMMUTABLE));
+
+    erasures.erase(
+        new ErasureRequest(TenantId.of("default"), SubjectId.of(victim), "dpo", "art 17"));
+    entityManager.clear();
+
+    Doc afterErasure = docs.findByOwnerId(victim).get(0);
+    assertThat(afterErasure.getBody()).isEqualTo(ErasedValue.MARKER);
+  }
+
+  // -- CIPHER-16 / QUESTIONS #15: byte[] + IDENTITY (and SEQUENCE) round-trips ------------------
+
+  @Test
+  void a_shredded_byte_array_field_round_trips_under_identity() {
+    String owner = "owner-blob-identity-" + System.nanoTime();
+    byte[] payload = {1, 2, 3, 4, 5, 6, 7, 8};
+    Blob saved = blobs.save(new Blob(owner, payload));
+    entityManager.clear();
+
+    Blob loaded = blobs.findByOwnerId(owner).get(0);
+    assertThat(loaded.getPayload()).isEqualTo(payload);
+
+    erasures.erase(new ErasureRequest(TenantId.of("default"), SubjectId.of(owner), "dpo", "test"));
+    entityManager.clear();
+    Blob afterErasure = blobs.findByOwnerId(owner).get(0);
+    assertThat(afterErasure.getPayload()).isEqualTo(ErasedValue.BYTES_MARKER);
+    assertThat(saved.getId()).isNotNull();
+  }
+
+  @Test
+  void a_shredded_byte_array_field_round_trips_under_sequence() {
+    String owner = "owner-blob-sequence-" + System.nanoTime();
+    byte[] payload = {9, 8, 7, 6, 5, 4, 3, 2, 1};
+    blobSeqs.save(new BlobSeq(owner, payload));
+    entityManager.clear();
+
+    BlobSeq loaded = blobSeqs.findByOwnerId(owner).get(0);
+    assertThat(loaded.getPayload()).isEqualTo(payload);
+
+    erasures.erase(new ErasureRequest(TenantId.of("default"), SubjectId.of(owner), "dpo", "test"));
+    entityManager.clear();
+    BlobSeq afterErasure = blobSeqs.findByOwnerId(owner).get(0);
+    assertThat(afterErasure.getPayload()).isEqualTo(ErasedValue.BYTES_MARKER);
+  }
+
+  /** A minimal constructor-expression DTO, for the CIPHER-11 JPQL {@code new ...(...)} variant. */
+  public static final class DocTitle {
+    private final String title;
+
+    public DocTitle(String title) {
+      this.title = title;
+    }
+
+    public String title() {
+      return title;
+    }
+  }
+
+  private void moveColumn(String table, String column, String fromOwner, String toOwner)
+      throws Exception {
+    byte[] value;
+    try (var c = dataSource.getConnection();
+        var ps =
+            c.prepareStatement("SELECT " + column + " FROM " + table + " WHERE owner_id = ?")) {
+      ps.setString(1, fromOwner);
+      try (var rs = ps.executeQuery()) {
+        rs.next();
+        value = rs.getBytes(1);
+      }
+    }
+    try (var c = dataSource.getConnection();
+        var ps =
+            c.prepareStatement("UPDATE " + table + " SET " + column + " = ? WHERE owner_id = ?")) {
+      ps.setBytes(1, value);
+      ps.setString(2, toOwner);
+      ps.executeUpdate();
+    }
   }
 
   private static String shreddingCode(Throwable thrown) {

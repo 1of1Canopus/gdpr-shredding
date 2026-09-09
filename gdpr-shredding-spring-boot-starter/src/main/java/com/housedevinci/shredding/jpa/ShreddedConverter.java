@@ -7,6 +7,8 @@ import com.housedevinci.shredding.domain.ErrorCodes;
 import com.housedevinci.shredding.domain.ShreddingException;
 import jakarta.persistence.AttributeConverter;
 import java.util.Objects;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Base class for the per-field converters. A concrete subclass names the entity and the field it
@@ -34,6 +36,8 @@ import java.util.Objects;
  * @param <T> the entity attribute type
  */
 public abstract class ShreddedConverter<T> implements AttributeConverter<T, byte[]> {
+
+  private static final Logger log = LoggerFactory.getLogger(ShreddedConverter.class);
 
   private final String entity;
   private final String field;
@@ -110,6 +114,55 @@ public abstract class ShreddedConverter<T> implements AttributeConverter<T, byte
     // whole entity is hydrated and refuse before the value is handed to any caller. See
     // ShreddingContext.Decoded for why this cannot be checked earlier than that.
     var header = EncryptedValue.decode(dbData);
+    // CIPHER-11: the header-versus-row check now lives here, at the one place every decrypt goes
+    // through, not only on the entity-load event. Three cases:
+    //   1. An explicit read scope is present (ShreddingContext.withRead) - a caller vouching for
+    //      this row's subject/tenant, typically a projection that cannot be verified any other
+    //      way. Checked atomically, right now, before this method returns anything.
+    //   2. No explicit scope, but the read bracket is open - this decrypt is happening inside a
+    //      managed entity load (a Spring Data repository call, or an application's own
+    //      ShreddingContext.withRead around a raw EntityManager use). Hibernate gives no hook
+    //      earlier than this one to verify against here, so verification is deferred to
+    //      onPostLoad/refuseIfSubjectMoved once the row is fully hydrated - the same relaxation
+    //      Cipher accepted for entity loads under QUESTIONS #13.
+    //   3. Neither: a projection, a native query, a detached use, or an EntityManager call made
+    //      outside any repository or explicit scope. Nothing here can be verified against, so this
+    //      is refused rather than decrypted and handed back unverified. This is CIPHER-11's actual
+    //      repro (`select d.title from Doc d ...`).
+    var explicitReadScope = ShreddingContext.currentReadScope();
+    if (explicitReadScope.isPresent()) {
+      var scope = explicitReadScope.get();
+      boolean subjectMismatch = !header.subject().equals(scope.subject());
+      boolean tenantMismatch = !header.tenant().equals(scope.tenant());
+      if (subjectMismatch || tenantMismatch) {
+        log.warn(
+            "shredding: refusing to decrypt {}.{}: the stored value's header names a different"
+                + " {} than the caller-supplied read scope",
+            entity,
+            field,
+            subjectMismatch ? "subject" : "tenant");
+        throw subjectMismatchError(subjectMismatch);
+      }
+    } else if (!ShreddingContext.inReadBracket()) {
+      log.warn(
+          "shredding: refusing to decrypt {}.{}: no read scope at all - not a managed entity load"
+              + " and not an explicit ShreddingContext.withRead(...)",
+          entity,
+          field);
+      throw new ShreddingException(
+          ErrorCodes.READ_UNSCOPED,
+          "no read scope while decrypting "
+              + entity
+              + "."
+              + field
+              + ". A @Shredded field can only be decrypted through a managed entity load (a Spring"
+              + " Data repository call, or a raw EntityManager entity operation - find, merge,"
+              + " refresh, an entity-returning query - wrapped in"
+              + " ShreddingContext.withReadBracket(...)) or an explicit read scope"
+              + " (ShreddingContext.withRead(...)). A scalar, Tuple or constructor-expression"
+              + " projection has neither by default and is refused rather than decrypted with"
+              + " nothing to verify its header against.");
+    }
     ShreddingContext.recordDecoded(entity + "." + field, header.tenant(), header.subject());
     var runtime = ShreddingRuntime.require();
     var plaintext = runtime.cipher().decrypt(entity, field, dbData, runtime.policy());
@@ -118,6 +171,19 @@ public abstract class ShreddedConverter<T> implements AttributeConverter<T, byte
     }
     // EXCEPTION already threw inside the cipher; only SENTINEL and NULL reach here.
     return runtime.policy() == ErasedValuePolicy.NULL ? null : erasedSentinel();
+  }
+
+  private ShreddingException subjectMismatchError(boolean subjectMismatch) {
+    return new ShreddingException(
+        ErrorCodes.SUBJECT_MISMATCH,
+        "the stored value for "
+            + entity
+            + "."
+            + field
+            + " belongs to a different "
+            + (subjectMismatch ? "subject" : "tenant")
+            + " than the read scope it was read under. A ciphertext moved between rows, subjects or"
+            + " tenants is refused rather than decrypted and displayed.");
   }
 
   private static String require(String value, String what) {

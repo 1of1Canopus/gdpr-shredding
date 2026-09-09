@@ -47,4 +47,21 @@ public final class ErrorCodes {
 
   /** A value or identifier failed boundary validation. */
   public static final String INVALID = "SHRED-INVALID-001";
+
+  /**
+   * CIPHER-11: a {@code @Shredded} converter ran with no read scope at all - not through a managed
+   * entity load (which a Spring Data repository call or {@code ShreddingEventListener} brackets)
+   * and not through an explicit {@code ShreddingContext.withRead(...)}. A projection, a native
+   * query or a detached use has no ambient owner to check the header against, so it is refused
+   * rather than decrypted and handed back unverified.
+   */
+  public static final String READ_UNSCOPED = "SHRED-READ-UNSCOPED";
+
+  /**
+   * CIPHER-12: a row carries at least one shredded value and its subject expression could not be
+   * evaluated. Unlike {@link #SUBJECT_MISMATCH} (a header naming a different subject than the row),
+   * this is a row whose true subject cannot be established at all - and an unknown owner is never a
+   * reason to display an already-decrypted value.
+   */
+  public static final String SUBJECT_UNRESOLVED = "SHRED-SUBJECT-UNRESOLVED";
 }

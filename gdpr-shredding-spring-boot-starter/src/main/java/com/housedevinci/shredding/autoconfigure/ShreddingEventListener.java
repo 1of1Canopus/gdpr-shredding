@@ -164,6 +164,22 @@ public final class ShreddingEventListener
     if (fields == null) {
       return;
     }
+    String entityName = entityName(event.getPersister());
+    // CIPHER-13: drain every shredded field's decoded header for this row up front, whatever
+    // happens next below - a field this row never decoded (its column was null) correctly has
+    // nothing recorded and nothing to drain; anything that *was* decoded must not survive this
+    // method to be mistaken for a later, unrelated row's header.
+    var decodedByField = new java.util.LinkedHashMap<String, ShreddingContext.Decoded>();
+    for (var field : fields) {
+      ShreddingContext.takeDecoded(entityName + "." + field.fieldName())
+          .ifPresent(d -> decodedByField.put(field.fieldName(), d));
+    }
+    if (decodedByField.isEmpty()) {
+      // Nothing on this row was ever decrypted (every shredded column null, or this load went
+      // through an explicit read scope that already verified atomically in the converter) - there
+      // is nothing left to check.
+      return;
+    }
     // CIPHER-01: every shredded field's converter has already run by the time any load listener
     // fires (see ShreddingContext.Decoded). This is the first point at which the row's true
     // subject and tenant - resolved from the now fully-hydrated entity, the same way the write
@@ -173,21 +189,32 @@ public final class ShreddingEventListener
     try {
       trueSubject = resolveSubject(event.getEntity(), fields);
     } catch (RuntimeException e) {
-      // A row whose subject expression cannot be evaluated on load is not a reason to fail the
-      // read; a write to it will refuse with a clear message if it is ever attempted.
-      return;
+      // CIPHER-12: this row carries at least one already-decrypted shredded value (decodedByField
+      // is non-empty, checked above) and its true subject cannot be established at all. An
+      // unresolvable subject is not a reason to let the read through - it is the exact reason this
+      // check exists. The attacker who can move a ciphertext between rows is by construction the
+      // attacker who can null one more column, and a `return` here used to hand the moved value
+      // straight back through this same code path.
+      log.warn(
+          "shredding: refusing to load {}: it carries a shredded value but its subject could not"
+              + " be resolved ({})",
+          entityName,
+          e.getClass().getSimpleName());
+      throw new ShreddingException(
+          ErrorCodes.SUBJECT_UNRESOLVED,
+          "the data subject of "
+              + entityName
+              + " could not be resolved while it carries at least one shredded value. An unknown"
+              + " owner is never a reason to display an already-decrypted value; fix the subject"
+              + " source, or erase the row if it is orphaned.",
+          e);
     }
     var first = fields.get(0);
     TenantId trueTenant =
         first.tenant() != null ? TenantId.of(first.tenant().evaluate(event.getEntity())) : null;
     SubjectId subjectId = SubjectId.of(trueSubject);
-    String entityName = entityName(event.getPersister());
-    for (var field : fields) {
-      var decoded = ShreddingContext.takeDecoded(entityName + "." + field.fieldName());
-      if (decoded.isEmpty()) {
-        continue;
-      }
-      var header = decoded.get();
+    for (var entry : decodedByField.entrySet()) {
+      var header = entry.getValue();
       boolean subjectMismatch = !header.subject().equals(subjectId);
       boolean tenantMismatch = trueTenant != null && !header.tenant().equals(trueTenant);
       if (subjectMismatch || tenantMismatch) {
@@ -195,14 +222,14 @@ public final class ShreddingEventListener
             "shredding: refusing to load {}.{}: the stored value's header names a different"
                 + " {} than the row it was read from",
             entityName,
-            field.fieldName(),
+            entry.getKey(),
             subjectMismatch ? "subject" : "tenant");
         throw new ShreddingException(
             ErrorCodes.SUBJECT_MISMATCH,
             "the stored value for "
                 + entityName
                 + "."
-                + field.fieldName()
+                + entry.getKey()
                 + " belongs to a different "
                 + (subjectMismatch ? "subject" : "tenant")
                 + " than the row it was read from. A ciphertext moved between rows, subjects or"
@@ -230,6 +257,14 @@ public final class ShreddingEventListener
    * for the header - no key material is touched. When the stored row has no shredded blob at all
    * (every shredded column null, or the field was only just added to the entity) there is nothing
    * that could have been moved out of an erasure scope, and the update is allowed.
+   *
+   * <p>CIPHER-14: every shredded column of the entity is read in this one query, not only {@code
+   * fields.get(0)}. Checking a single column let a row whose first shredded column was null and
+   * whose second held a live ciphertext escape unchecked: the subject changed, Hibernate's default
+   * (non-{@code @DynamicUpdate}) UPDATE re-encrypted every shredded column under the new subject's
+   * key on the very next flush, and the row left the original subject's erasure scope for good.
+   * Early return happens only when *every* shredded column is null, which is the case the ruling
+   * actually blessed.
    */
   private void refuseIfSubjectMoved(
       PreUpdateEvent event,
@@ -242,15 +277,19 @@ public final class ShreddingEventListener
       // than silently wrong.
       return;
     }
+    String columns =
+        fields.stream()
+            .map(f -> quote(f.columnName()))
+            .collect(java.util.stream.Collectors.joining(", "));
     String sql =
         "SELECT "
-            + quote(first.columnName())
+            + columns
             + " FROM "
             + quote(first.tableName())
             + " WHERE "
             + quote(idColumns[0])
             + " = ?";
-    byte[] stored =
+    Object[] stored =
         event
             .getSession()
             .doReturningWork(
@@ -258,24 +297,39 @@ public final class ShreddingEventListener
                   try (PreparedStatement ps = connection.prepareStatement(sql)) {
                     ps.setObject(1, event.getId());
                     try (ResultSet rs = ps.executeQuery()) {
-                      return rs.next() ? rs.getBytes(1) : null;
+                      if (!rs.next()) {
+                        return null;
+                      }
+                      Object[] row = new Object[fields.size()];
+                      for (int i = 0; i < fields.size(); i++) {
+                        row[i] = rs.getBytes(i + 1);
+                      }
+                      return row;
                     }
                   }
                 });
     if (stored == null) {
       return;
     }
-    var header = EncryptedValue.decode(stored);
-    boolean subjectMoved = !header.subject().equals(scope.subject());
-    boolean tenantMoved = !header.tenant().equals(scope.tenant());
-    if (subjectMoved || tenantMoved) {
-      throw new ShreddingException(
-          ErrorCodes.SUBJECT_IMMUTABLE,
-          "the data subject of a persisted "
-              + first.entityName()
-              + " row cannot change. It was captured at first persist and is bound into the"
-              + " ciphertext's own header; changing it would re-encrypt the row under another"
-              + " subject's key and move it out of the first subject's erasure scope.");
+    for (int i = 0; i < fields.size(); i++) {
+      byte[] column = (byte[]) stored[i];
+      if (column == null) {
+        // Not the whole row - just this one shredded column, unwritten so far. Keep checking the
+        // rest; only "every column null" is the residual the ruling accepts.
+        continue;
+      }
+      var header = EncryptedValue.decode(column);
+      boolean subjectMoved = !header.subject().equals(scope.subject());
+      boolean tenantMoved = !header.tenant().equals(scope.tenant());
+      if (subjectMoved || tenantMoved) {
+        throw new ShreddingException(
+            ErrorCodes.SUBJECT_IMMUTABLE,
+            "the data subject of a persisted "
+                + first.entityName()
+                + " row cannot change. It was captured at first persist and is bound into the"
+                + " ciphertext's own header; changing it would re-encrypt the row under another"
+                + " subject's key and move it out of the first subject's erasure scope.");
+      }
     }
   }
 

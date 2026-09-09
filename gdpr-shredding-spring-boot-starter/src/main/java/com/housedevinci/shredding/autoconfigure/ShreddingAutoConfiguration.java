@@ -240,6 +240,25 @@ public class ShreddingAutoConfiguration {
             (IntegratorProvider) () -> List.of(new ShreddingIntegrator(listener)));
   }
 
+  /**
+   * CIPHER-11: opens the read bracket around every Spring Data JPA repository call, so an ordinary
+   * {@code repository.findByX(...)} keeps decrypting transparently (verified afterwards by {@code
+   * onPostLoad}), while a bare, unwrapped projection has nothing to open the bracket and is
+   * refused. {@code @ConditionalOnClass} rather than a hard dependency: this module does not
+   * require Spring Data JPA, only benefits from bracketing it when it is present.
+   *
+   * <p>{@code static}: a {@code BeanPostProcessor} {@code @Bean} method must not require the
+   * declaring {@code @Configuration} class itself to be instantiated early, and this one has no
+   * dependencies to inject.
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  @org.springframework.boot.autoconfigure.condition.ConditionalOnClass(
+      org.springframework.data.repository.Repository.class)
+  public static ShreddingReadBracketCustomizer shreddingReadBracketCustomizer() {
+    return new ShreddingReadBracketCustomizer();
+  }
+
   @Bean
   public ShreddingStartupCheck shreddingStartupCheck(
       ShreddingProperties properties,

@@ -46,12 +46,24 @@ The startup scan cross-checks every `@Shredded` field against the `@Convert` tha
 refuses to start if the names disagree. Base classes ship for `String`, `byte[]`, `LocalDate`,
 `BigDecimal` and JSON-as-`String`.
 
-> **`ShreddedBytesConverter` (the `byte[]` base class) is not production-ready.** An entity with a
-> `byte[]` `@Shredded` field and `@GeneratedValue(strategy = GenerationType.IDENTITY)` refuses its
-> own first insert with `SHRED-CONTEXT-001`: Hibernate deep-copies a mutable attribute's value to
-> build the entity's dirty-checking snapshot, which calls the converter a second time outside the
-> write-path bracket. See QUESTIONS.md #15. Use `String`, `LocalDate`, `BigDecimal` or the JSON
-> converter until this is fixed and covered by a regression test.
+> **`ShreddedBytesConverter` (the `byte[]` base class) needs `@Immutable` on the field.** Hibernate
+> treats `byte[]` as mutable and deep-copies the *converted* value - calling the converter a second
+> time, outside the write-path bracket - to build the entity's dirty-checking snapshot; under
+> `@GeneratedValue(strategy = GenerationType.IDENTITY)` that second call has no write scope and
+> refuses the row's own first insert with `SHRED-CONTEXT-001`. Add
+> `org.hibernate.annotations.Immutable` to the field and the startup scan requires it is there:
+>
+> ```java
+> @Shredded(subject = "#{ownerId}")
+> @Convert(converter = DocumentPayloadConverter.class)
+> @Immutable
+> @Column(name = "payload")
+> byte[] payload;
+> ```
+>
+> `ShreddedConverter`'s `toBytes`/`fromBytes` already return a fresh array, so nothing shares state
+> and the claim is honest. Covered end to end (insert, read, erase, re-read) under both `IDENTITY`
+> and `SEQUENCE` id strategies. See QUESTIONS.md #15.
 
 > Two lines per field is boilerplate, and we know it. An annotation processor that generates these
 > converters from `@Shredded` alone is a later improvement, deliberately not in this release: the

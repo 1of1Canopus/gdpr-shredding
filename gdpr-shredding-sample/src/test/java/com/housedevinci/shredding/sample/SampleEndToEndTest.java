@@ -7,6 +7,7 @@ import com.housedevinci.shredding.application.ErasureChainVerifier;
 import com.housedevinci.shredding.domain.ErasedValue;
 import com.housedevinci.shredding.domain.ErrorCodes;
 import com.housedevinci.shredding.domain.ShreddingException;
+import com.housedevinci.shredding.jpa.ShreddingContext;
 import jakarta.persistence.EntityManager;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
@@ -279,6 +280,12 @@ class SampleEndToEndTest {
    * that never loaded it - so a cache of "what this process loaded" has nothing on it. The
    * second-query check in {@code onPreUpdate} still catches it, because it reads the row's current
    * header from the database rather than from anything this process remembered.
+   *
+   * <p>CIPHER-11: {@code EntityManager.merge} re-loads the row's current persisted state internally
+   * to reconcile it against the detached instance, which reaches a shredded converter exactly like
+   * any other load - so it needs the read bracket open, the same as a Spring Data repository call
+   * gets automatically. {@code ShreddingContext.withReadBracket(...)} is the documented way for a
+   * raw {@code EntityManager} entity operation to get it explicitly.
    */
   @Test
   void probe_changing_the_subject_expression_moves_a_row_out_of_erasure_scope_on_a_detached_merge()
@@ -294,10 +301,13 @@ class SampleEndToEndTest {
     assertThatThrownBy(
             () ->
                 transactions.executeWithoutResult(
-                    status -> {
-                      entityManager.merge(detached);
-                      entityManager.flush();
-                    }))
+                    status ->
+                        ShreddingContext.withReadBracket(
+                            () -> {
+                              entityManager.merge(detached);
+                              entityManager.flush();
+                              return null;
+                            })))
         .satisfies(t -> assertThat(shreddingCode(t)).isEqualTo(ErrorCodes.SUBJECT_IMMUTABLE));
   }
 

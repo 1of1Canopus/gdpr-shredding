@@ -139,6 +139,7 @@ public final class ShreddedModel {
     for (Class<?> type : entities) {
       String entityName = entityName(type);
       var shreddedHere = new ArrayList<String>();
+      var shreddedFieldsHere = new ArrayList<ShreddedField>();
 
       for (Field field : allFields(type)) {
         Shredded annotation = field.getAnnotation(Shredded.class);
@@ -150,7 +151,27 @@ public final class ShreddedModel {
           throw config("@Shredded on " + where + " must be an instance field");
         }
         ShreddedConverter<?> converter = requireMatchingConverter(field, entityName, where);
-        shredded.add(
+        // CIPHER-16: a byte[] attribute is mutable by Hibernate's own reckoning, so without
+        // @Immutable, AttributeConverterMutabilityPlan deep-copies the converted value - calling
+        // convertToDatabaseColumn a second time, outside the onPreInsert/onPostInsert bracket - to
+        // build the entity's dirty-checking snapshot. Under @GeneratedValue(IDENTITY) that second
+        // call has no write scope and refuses the row's own first insert. Checked at startup,
+        // naming the field, rather than surfacing as SHRED-CONTEXT-001 on whichever row happens to
+        // be inserted first.
+        if (byte[].class.equals(field.getType())
+            && !hasAnnotation(field, "org.hibernate.annotations.Immutable")) {
+          throw config(
+              "@Shredded on "
+                  + where
+                  + " is a byte[] field with no @org.hibernate.annotations.Immutable. Hibernate"
+                  + " treats byte[] as mutable and deep-copies the *converted* value to build its"
+                  + " dirty-checking snapshot, which calls the converter a second time outside the"
+                  + " write bracket and fails an IDENTITY-strategy insert with SHRED-CONTEXT-001."
+                  + " Add @Immutable to the field: ShreddedBytesConverter already returns a fresh"
+                  + " array from toBytes/fromBytes, so nothing shares state and the claim is"
+                  + " honest.");
+        }
+        var shreddedField =
             new ShreddedField(
                 type,
                 entityName,
@@ -161,8 +182,29 @@ public final class ShreddedModel {
                     ? null
                     : new SubjectExpression(where, annotation.tenant()),
                 tableName(type),
-                columnName(field)));
+                columnName(field));
+        shredded.add(shreddedField);
+        shreddedFieldsHere.add(shreddedField);
         shreddedHere.add(field.getName());
+      }
+
+      // CIPHER-14: refuseIfSubjectMoved reads every shredded column of the entity in one query
+      // against one table. An entity whose @Shredded fields are split across a secondary table
+      // (@SecondaryTable / @Column(table=...)) would have that query silently check only some of
+      // them against the wrong table's row, or fail outright - refused here, at startup, instead.
+      if (shreddedFieldsHere.size() > 1) {
+        long distinctTables =
+            shreddedFieldsHere.stream().map(ShreddedField::tableName).distinct().count();
+        if (distinctTables > 1) {
+          throw config(
+              entityName
+                  + " has @Shredded fields spanning more than one table (a @SecondaryTable or"
+                  + " @Column(table=...) mapping). The update-time subject-immutability check"
+                  + " reads every shredded column of an entity from its one primary table in a"
+                  + " single query; a field mapped to a secondary table cannot be checked that way"
+                  + " and is refused rather than silently skipped or checked against the wrong"
+                  + " table.");
+        }
       }
 
       for (Field field : allFields(type)) {
@@ -335,6 +377,15 @@ public final class ShreddedModel {
 
   private static boolean hasAnnotation(Class<?> type, String annotationName) {
     for (var annotation : type.getAnnotations()) {
+      if (annotation.annotationType().getName().equals(annotationName)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static boolean hasAnnotation(Field field, String annotationName) {
+    for (var annotation : field.getAnnotations()) {
       if (annotation.annotationType().getName().equals(annotationName)) {
         return true;
       }
