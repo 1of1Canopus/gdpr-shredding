@@ -316,6 +316,68 @@ more investigation than a remediation pass has room for. Flagging it here so it 
 covered by a regression test**, and the docs (`docs/index.md`'s converter list) should say so until
 then.
 
+## #16 CIPHER-11: the `PreLoadEventListener` shape does not work in this Hibernate version (taken; a deviation, with evidence); `RepositoryFactoryCustomizer` replaced with a `BeanPostProcessor` (found by a failing probe)
+
+Cipher's fix text for CIPHER-11 offered two shapes and said either was acceptable: (1) a
+`PreLoadEventListener` that resolves the row's subject/tenant from the identifier and the loaded
+state array and pushes a read scope before the converter runs, or (2) make
+`convertToEntityAttribute` fail closed when no read scope is present at all, relying on the
+application to open one.
+
+**Shape (1) is not available.** `ShreddingContext.Decoded`'s javadoc, written in the previous
+remediation round and accepted by Cipher under QUESTIONS #13 ("she disassembled
+`EntityInitializerImpl` in the Hibernate 7.4 this module builds against and showed every converter
+has run before the first load listener fires"), already established this for `onPostLoad`. I
+re-checked it specifically for `onPreLoad` this round: `javap -c` on
+`EntityInitializerImpl.resolveEntityState` (Hibernate ORM 7.4.5.Final) shows the method building the
+row's full Java-level attribute state - which for a `@Shredded` field means invoking
+`AttributeConverterBean.toDomainValue`, i.e. the converter, i.e. the decrypt - and only afterwards
+constructing and firing `PreLoadEvent` with that already-built state
+(`PreLoadEvent.setState([Ljava/lang/Object;)`). There is no Hibernate hook, `PreLoad` included, that
+fires before an entity row's own shredded columns are decrypted. Cipher's own CIPHER-01 finding
+established this for `onPostLoad`; it is equally true for `onPreLoad`, which a `PreLoadEventListener`
+would need in order to gate anything.
+
+**Shape (2), taken, with a mechanism for "no read scope" that is not simply "not
+`ShreddingContext.withRead(...)`".** A literal, unconditional "no scope ⇒ refuse" would refuse
+every ordinary `repository.findByX(...)` too, since nothing pushes a scope for those today. Rather
+than require every application to wrap every entity read explicitly - which the "entity path is the
+relaxation, not the mechanism" framing in Cipher's own fix text argues against - the converter
+distinguishes three cases: an explicit read scope (verified atomically, right there); the "read
+bracket" open (defers to the existing, now-fixed `onPostLoad`/`refuseIfSubjectMoved`, i.e. today's
+behaviour for entity loads); neither (refused, `SHRED-READ-UNSCOPED`). The read bracket is what
+makes shape (2) practical without becoming shape (1) by another name: it does not try to establish
+the *row's* true subject before decrypt (impossible, per the evidence above); it only marks "this
+decrypt is happening inside something that will get `onPostLoad`'s verification afterwards; if it
+does not, refuse."
+
+**How the bracket is opened, and why not `RepositoryFactoryCustomizer`.** Cipher's fix text does not
+prescribe a mechanism for opening it, only that an entity load should not need the application to
+open one by hand. `RepositoryFactoryCustomizer` is the documented Spring Data extension point for
+exactly this ("customize how repository proxies are built"), and it is what I wrote first: a
+`@Bean` that calls `factory.addRepositoryProxyPostProcessor(...)` to add a `MethodInterceptor`
+around every repository method. **It does not work**: a failing probe (`widgets.findByOwnerId(...)`
+throwing `SHRED-READ-UNSCOPED` from inside a plain, unmoved read) showed the advice never runs, on
+this Spring Boot/Spring Data generation, for `@EnableJpaRepositories`-declared repositories built the
+ordinary way. I did not chase why further once I had a working alternative - `BeanPostProcessor`,
+registered as a `static` `@Bean` with `postProcessAfterInitialization` wrapping every bean that is
+an `org.springframework.data.repository.Repository` in a decorating `java.lang.reflect.Proxy` that
+opens the bracket around every method call. This is a plainer, lower-level Spring SPI that every
+singleton bean in the context goes through unconditionally, including a `Repository` proxy produced
+by a `FactoryBean`, and the same probe is green against it. If a later Spring Data release makes
+`RepositoryFactoryCustomizer` reach these repositories reliably, the `BeanPostProcessor` can be
+dropped in its favour; until then, note the deviation here rather than leave a comment claiming a
+mechanism that measurably does not fire.
+
+**A raw `EntityManager` entity operation** - `find`, `merge`, `refresh`, an entity-returning
+JPQL/Criteria query, none of which go through a Spring Data repository - needs the same relaxation
+for the same reason (`EntityManager.merge` in particular re-loads the row's current persisted state
+internally to reconcile it against a detached instance, reaching a shredded converter exactly like
+any other load). `ShreddingContext.withReadBracket(...)` is the public, documented way an
+application opens it explicitly for this case; `SampleEndToEndTest`'s detached-merge probe (QUESTIONS
+#4) now uses it. `ShreddingContext.withRead(...)` stays reserved for the different, verified case: a
+caller who actually knows and vouches for the row's subject, typically a projection.
+
 ## #12 ENISA pseudonymisation report: section to verify (open)
 
 An ENISA pseudonymisation report is the obvious fourth source, and I have seen it cited for exactly

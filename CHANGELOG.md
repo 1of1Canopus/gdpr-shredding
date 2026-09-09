@@ -17,6 +17,80 @@ All notable changes to this project. The format follows
   licence scan by `groupId` (`excludedGroups`), not by licence name, since
   `com.housedevinci:gdpr-shredding-core` no longer matches the third-party allowlist.
 
+### Fixed (re-verification at `96713f9`)
+
+Cipher's re-verification (`docs/SECURITY-REVIEW-feat-shredding-core.md`, `## Re-verification
+(96713f9)`), 2026-09-09. Three HIGH, three MEDIUM, four LOW, all closed.
+
+- **CIPHER-11 (HIGH)** - CIPHER-01's fix closed the ordinary entity load, but a scalar, `Tuple` or
+  constructor-expression JPQL projection runs the converter with no `onPostLoad` (or any other
+  Hibernate load listener) ever reaching it, so a moved ciphertext decrypted and returned with
+  nothing to verify its header against. The header-versus-row check moves into
+  `ShreddedConverter.convertToEntityAttribute` itself, the one place every decrypt goes through: a
+  decrypt with an explicit read scope (`ShreddingContext.withRead(...)`) is verified atomically,
+  right there; a decrypt inside the read bracket a Spring Data JPA repository call opens
+  automatically (`ShreddingReadBracketCustomizer`, a `BeanPostProcessor` over every `Repository`
+  bean) or a raw `EntityManager` entity operation opens explicitly
+  (`ShreddingContext.withReadBracket(...)`) defers to the existing `onPostLoad`, as before; a
+  decrypt with neither is refused outright (`SHRED-READ-UNSCOPED`). `onPostLoad` stays as
+  belt-and-braces for every managed entity load. See QUESTIONS.md #16 for why the
+  `PreLoadEventListener` shape offered as the first alternative does not work in this Hibernate
+  version, with bytecode evidence, and why a `RepositoryFactoryCustomizer` bean - the documented
+  Spring Data extension point for this - was replaced with a `BeanPostProcessor` after it did not
+  reliably reach every `@EnableJpaRepositories` factory.
+- **CIPHER-12 (HIGH)** - `onPostLoad` `return`ed on any `RuntimeException` from resolving the row's
+  subject, including on a row carrying an already-decrypted shredded value - exactly the row an
+  attacker who nulled the subject-source column wanted through. An unresolvable subject on a row
+  that decoded at least one shredded field is now a refusal (`SHRED-SUBJECT-UNRESOLVED`) with a
+  WARN naming the entity, never plaintext. A row with no decoded shredded value still loads despite
+  an unresolvable subject, matching the ruling's own carve-out.
+- **CIPHER-14 (HIGH)** - the update-time subject-immutability check read only `fields.get(0)`'s
+  column and returned early when it was null, so an entity whose *first* shredded field happened to
+  be null and whose *second* held a live ciphertext got no check at all: the subject could be
+  changed and the row left its original subject's erasure scope permanently. The verification query
+  now reads every shredded column of the entity in one query against its one table; early return
+  only when every one of them is null. `ShreddedModel.scan` also now refuses a shredded entity whose
+  fields span more than one table, since that query assumes a single table.
+- **CIPHER-13 (MEDIUM)** - a projection's decoded header, never drained by `onPostLoad` (nothing
+  reaches it), could survive on the thread and be mistaken for a later, unrelated row's header.
+  Falls out of CIPHER-11 mostly by construction (an unscoped read is refused before it ever reaches
+  `recordDecoded`); `onPostLoad` also now drains every field's decoded entry up front, before
+  deciding anything, and `ShreddingContext.clearAll()` clears the read bracket, the read-scope stack
+  and `DECODED_READS` at the same transaction boundary that already cleared the write scope.
+- **CIPHER-15 (MEDIUM)** - `JdbcErasureStore.latestForSubject` ordered `ts DESC, seq DESC`; `ts` is
+  the application clock and a backwards step between two appends could return an older `COMPLETE`
+  ahead of a later `PARTIAL`, hiding an outstanding erasure. Orders by `seq DESC` only - the log's
+  own monotonic column.
+- **CIPHER-16 (MEDIUM) / QUESTIONS #15** - `ShreddedBytesConverter` refused its own entity's first
+  insert under `@GeneratedValue(IDENTITY)`. Declaring the field
+  `@org.hibernate.annotations.Immutable` stops `AttributeConverterMutabilityPlan` deep-copying the
+  converted value (a second, out-of-bracket converter call) to build the dirty-checking snapshot;
+  `ShreddedModel.scan` now requires the annotation on every `byte[]` `@Shredded` field, naming it at
+  startup rather than on whichever row is inserted first. Covered end to end under both `IDENTITY`
+  and `SEQUENCE`. `docs/index.md`'s "not production-ready" warning is replaced with the
+  `@Immutable` requirement.
+- **L11 (LOW)** - `JdbcSupport.lockSubject`'s javadoc claimed a fixed salt gave its advisory locks a
+  namespace separate from the schema step's and the chain-append lock's, which
+  `pg_advisory_xact_lock(bigint)`'s single flat 64-bit space cannot give (any collision was already
+  harmless, but the comment claimed a property the code did not have). Switched to the two-argument
+  `pg_advisory_xact_lock(int4, int4)` form, which *is* a genuinely separate namespace, and to the
+  same length-prefixed canonical pairing used elsewhere in this module rather than a
+  `"|"`-delimited string.
+- **L12 (LOW)** - `SubjectExpression.evaluate` accepted any non-null resolved value via
+  `String.valueOf`, so `#{#this}`/`#{#root}` (permitted by
+  `SimpleEvaluationContext.forReadOnlyDataBinding()`, which restricts property navigation but not
+  which root object a bare reference resolves to) silently became the subject
+  `"ClassName@identityHashCode"` - a different value every run, encrypting the row under a key no
+  later erasure could ever name. Refuses a resolved value that is not a `CharSequence`, `Number`,
+  `UUID`, `Enum` or date/time value, and refuses a resolved string with the exact
+  `Object.toString()` shape.
+- **L13 (LOW)** - `pom.xml`'s third-party licence allowlist comment still called Apache-2.0 "the
+  licence of this project", stale since the FSL-1.1-ALv2 switch.
+- **L14 (LOW)** - `LogScanTest` never asserted its output capture observed anything, so a logging
+  misconfiguration that captured nothing at all would have read as a pass. Asserts the capture
+  contains a known-benign sentinel (`ShreddingStartupCheck`'s own start-up line) before asserting
+  the plaintext fixture's absence.
+
 ### Added
 
 - **Envelope encryption for JPA fields.** `@Shredded` on a `String`, `byte[]`, `LocalDate`,

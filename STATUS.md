@@ -2,6 +2,10 @@
 
 Licensing (2026-09-08): free core switched from Apache-2.0 to FSL-1.1-ALv2 (Souhaile's decision); `LICENSE`/`NOTICE` added, `pom.xml` updated, `./mvnw -B clean verify` re-confirmed green.
 
+Re-verification (2026-09-09): Cipher's `## Re-verification (96713f9)` pass found 3 HIGH, 3 MEDIUM
+and 4 LOW findings against the first review's fix. All ten closed by Isis; see the CHANGELOG's
+"Fixed (re-verification at `96713f9`)" entry and QUESTIONS.md #16.
+
 Branch `feat/shredding-core`. `main` holds the plan commit only.
 Full `./mvnw -B clean verify` green with Docker up.
 
@@ -22,15 +26,16 @@ Full `./mvnw -B clean verify` green with Docker up.
 | 11 | Odin's regulatory corrections and the wording rule | done |
 | 12 | CI green-locally / red-on-CI bug found and fixed (see below) | done |
 | 13 | Cipher's first PR review (2026-09-08): 2 HIGH, 8 MEDIUM, 10 LOW/INFO, all closed | done |
+| 14 | Cipher's re-verification (2026-09-09): 3 HIGH (CIPHER-11/12/14), 3 MEDIUM (CIPHER-13/15/16), 4 LOW (L11-L14), all closed | done |
 
 ## Tests
 
 | Module | Tests | Notes |
 |---|---|---|
-| `gdpr-shredding-core` | 76 | includes the CIPHER-01/02/03/04/05/10 probes and the Testcontainers PostgreSQL suite |
-| `gdpr-shredding-spring-boot-starter` | 25 | includes `ShreddingIntegrationTest` (new: real Hibernate/Testcontainers coverage of the event listener, the context stack and the auto-configuration bean graph) |
-| `gdpr-shredding-sample` | 17 | includes the CIPHER-01 (moved-blob), QUESTIONS #4 (detached-merge), CIPHER-08 (stale-scope), the live-actuator and the log-scan probes |
-| **total** | **118** | |
+| `gdpr-shredding-core` | 77 | includes the CIPHER-01/02/03/04/05/10/15 probes and the Testcontainers PostgreSQL suite |
+| `gdpr-shredding-spring-boot-starter` | 40 | includes `ShreddingIntegrationTest` (real Hibernate/Testcontainers coverage of the event listener, the context stack and the auto-configuration bean graph - now also CIPHER-11/12/13/14/16's `Doc`/`Blob`/`BlobSeq` fixtures) and `CipherProbeSpelTest`'s L12 probe |
+| `gdpr-shredding-sample` | 17 | includes the CIPHER-01 (moved-blob), QUESTIONS #4 (detached-merge, now wrapped in `ShreddingContext.withReadBracket`), CIPHER-08 (stale-scope), the live-actuator and the log-scan probes |
+| **total** | **134** | |
 
 Nothing is skipped and nothing is `@Disabled`.
 
@@ -38,8 +43,8 @@ Nothing is skipped and nothing is `@Disabled`.
 
 | Module | Covered / Total | % | Gate |
 |---|---|---|---|
-| `gdpr-shredding-core` | 965 / 1152 | 83.8% | 80% |
-| `gdpr-shredding-spring-boot-starter` | 541 / 655 | 82.6% | 80% (was unmeasured before this pass - L2) |
+| `gdpr-shredding-core` | 979 / 1158 | 84.5% | 80% |
+| `gdpr-shredding-spring-boot-starter` | 654 / 768 | 85.2% | 80% |
 | `gdpr-shredding-sample` | 63 / 95 | 66.3% | 30% smoke gate (L2) |
 
 The JaCoCo executions moved from `gdpr-shredding-core`'s own POM to the parent's
