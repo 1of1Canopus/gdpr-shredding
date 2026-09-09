@@ -143,8 +143,49 @@ public final class ShreddingContext {
    * projection, tuple and constructor-expression case, none of which any Hibernate load listener
    * ever sees.
    */
+  /**
+   * C-26: what a decode is filed under. Not {@code entity.field} alone - Hibernate ORM 7.4 defers
+   * every row's {@code PostLoad} callback until the whole {@code JdbcValues} result set has been
+   * hydrated, so two rows of the same entity in one query write their converters' decodes in
+   * sequence, and a flat {@code entity.field} key lets the second overwrite the first: one row's
+   * verification then stood in for both (the leak), or a legitimate second subject's row drained an
+   * entry that was never its own header (the false refusal). {@code tenant} and {@code subject} are
+   * what the header itself said at decode time - the converter has no row identity to key by (no
+   * session, no entity - {@link ShreddedConverter} is handed nothing but the column bytes), but the
+   * header carries tenant and subject already, so those are what the key uses instead of a row id
+   * this class cannot obtain.
+   *
+   * <p>The verifier ({@code ShreddingEventListener.onPostLoad}) does not trust this key for
+   * correctness - it independently re-reads each row's own stored bytes by id, the way {@code
+   * refuseIfSubjectMoved} already does on the write path, and compares against the row's true
+   * subject and tenant. This key exists only so the frame can still answer "was every decode
+   * eventually looked at by somebody" (C-17/C-18/C-20): the verifier drains the exact entry its own
+   * fresh, per-row header re-read names, never a different row's.
+   */
+  public record FrameKey(String entity, String field, TenantId tenant, SubjectId subject) {
+    public FrameKey {
+      Objects.requireNonNull(entity, "entity");
+      Objects.requireNonNull(field, "field");
+      Objects.requireNonNull(tenant, "tenant");
+      Objects.requireNonNull(subject, "subject");
+    }
+  }
+
+  /**
+   * A multiset, not a map: one person can legitimately own several rows of the same entity in one
+   * result set, and each row's converter records its own decode under the identical {@link
+   * FrameKey} (same entity, same field, same tenant, same subject) as every other row of that same
+   * subject. A {@code Map.put} would let the second overwrite the first exactly the way the old
+   * flat key did; a count drained once per verified row is what lets N legitimate rows of one
+   * subject both record N times and drain N times without ever mistaking "nothing left to drain"
+   * for "nothing was ever decoded".
+   */
   private static final class Frame {
-    private final Map<String, Decoded> pending = new HashMap<>();
+    private final Map<FrameKey, Integer> pending = new HashMap<>();
+
+    private int total() {
+      return pending.values().stream().mapToInt(Integer::intValue).sum();
+    }
   }
 
   private static final ThreadLocal<Deque<Frame>> READ_FRAMES =
@@ -165,13 +206,17 @@ public final class ShreddingContext {
   public static void popReadBracket() {
     Frame frame = popFrame();
     if (frame != null && !frame.pending.isEmpty()) {
-      String first = frame.pending.keySet().iterator().next();
+      // Never the tenant or subject value in the message (PII): only entity.field, the same shape
+      // the pre-C-26 message used.
+      FrameKey first = frame.pending.keySet().iterator().next();
       throw new ShreddingException(
           ErrorCodes.READ_UNVERIFIED,
           "a read bracket closed with "
-              + frame.pending.size()
+              + frame.total()
               + " decoded @Shredded value(s) that no verifier ever drained, the first being "
-              + first
+              + first.entity()
+              + "."
+              + first.field()
               + ". Every decrypt inside ShreddingContext.pushReadBracket()/withReadBracket(...) must"
               + " be reached either by a managed entity load - which ShreddingEventListener"
               + ".onPostLoad verifies once the row is fully hydrated - or by an explicit"
@@ -219,17 +264,33 @@ public final class ShreddingContext {
    * <p>Documented in {@code README.md} and {@code docs/index.md} (C-23): this is the contract for
    * every {@code EntityManager} entity read, not only an error code a user meets after the fact.
    */
+  /**
+   * C-32: the frame must unwind on any {@link Throwable}, not only a {@link RuntimeException}. An
+   * {@code Error} - a {@code StackOverflowError} from a deep object graph, an {@code
+   * AssertionError} from application code reached inside {@code body} - used to unwind past both
+   * {@link #discardReadBracket()} and {@link #popReadBracket()}, leaving the frame on the thread
+   * for whatever the pool handed it next. {@link
+   * com.housedevinci.shredding.autoconfigure.ShreddingReadBracketCustomizer.Bracket#invoke} already
+   * caught {@code Throwable}; this is the one caller of {@link #pushReadBracket()} that did not.
+   * {@code try}/{@code finally} with an explicit "did the frame already close?" flag, rather than a
+   * second {@code catch}, so the frame closes exactly once on every path: normal return, a checked
+   * exception smuggled out as unchecked by {@code body}, a {@code RuntimeException}, and an {@code
+   * Error} all reach the same {@code finally}.
+   */
   public static <T> T withReadBracket(java.util.function.Supplier<T> body) {
     pushReadBracket();
-    T result;
+    boolean threw = true;
     try {
-      result = body.get();
-    } catch (RuntimeException e) {
-      discardReadBracket();
-      throw e;
+      T result = body.get();
+      threw = false;
+      return result;
+    } finally {
+      if (threw) {
+        discardReadBracket();
+      } else {
+        popReadBracket();
+      }
     }
-    popReadBracket();
-    return result;
   }
 
   /**
@@ -277,55 +338,58 @@ public final class ShreddingContext {
   }
 
   /**
-   * What a shredded column's stored header actually named, for the row currently being hydrated
-   * (CIPHER-01).
+   * Records a decode into the frame currently on top of this thread's read-bracket stack
+   * (C-17/C-22/C-26): a decode with no open bracket - an explicit {@link #withRead} scope with
+   * nothing bracketing it - has already been verified atomically by the caller-supplied scope and
+   * has no frame to owe a debt to, so it is not recorded anywhere and there is nothing left to
+   * drain.
    *
-   * <p>{@code AttributeConverter.convertToEntityAttribute} is handed nothing but the column bytes:
-   * no entity, no session, no row. By the time any Hibernate listener fires for a load, every
-   * converter on that row has already run - confirmed against the Hibernate ORM 7.4 loader bytecode
-   * this module builds against, not assumed - so there is no hook that fires <em>before</em> a
-   * shredded field is decrypted on read, the way {@code PreInsertEvent}/{@code PreUpdateEvent} fire
-   * before a write. The read-side check is therefore necessarily two-phase: {@code
-   * ShreddedConverter} records what the header actually said the instant it decodes it, and {@code
-   * ShreddingEventListener.onPostLoad} - which runs synchronously as part of the load, before the
-   * entity is handed to any caller - resolves the row's true subject and tenant from the
-   * now-fully-hydrated entity and compares. A mismatch throws from {@code onPostLoad}, which aborts
-   * the load: the value is decrypted internally for a few instructions, but it is never returned to
-   * a caller. See QUESTIONS.md CIPHER-01 for why this is not "checked before the key store is
-   * touched" the way the write path is.
+   * <p>C-26: keyed by {@link FrameKey} - entity, field, and the tenant/subject the header itself
+   * named at decode time, not a row id ({@code ShreddedConverter} has none to give). Incrementing a
+   * count, not overwriting a map entry, is what lets a second row of the same entity - one
+   * legitimately sharing the first row's (entity, tenant, subject, field), or one whose ciphertext
+   * was moved from the first and so happens to share its header - record its own entry without
+   * erasing the first row's.
    */
-  public record Decoded(TenantId tenant, SubjectId subject) {}
-
-  /**
-   * Records into the frame currently on top of this thread's read-bracket stack (C-17/C-22): a
-   * decode with no open bracket - an explicit {@link #withRead} scope with nothing bracketing it -
-   * has already been verified atomically by the caller-supplied scope and has no frame to owe a
-   * debt to, so it is not recorded anywhere and there is nothing left to drain.
-   *
-   * @param key qualified as {@code entityName + "." + fieldName}, so two entity types that happen
-   *     to share a field name cannot collide
-   */
-  public static void recordDecoded(String key, TenantId tenant, SubjectId subject) {
+  public static void recordDecoded(
+      String entity, String field, TenantId tenant, SubjectId subject) {
     Deque<Frame> stack = READ_FRAMES.get();
     if (stack.isEmpty()) {
       return;
     }
-    stack.peek().pending.put(key, new Decoded(tenant, subject));
+    var key = new FrameKey(entity, field, tenant, subject);
+    stack.peek().pending.merge(key, 1, Integer::sum);
   }
 
   /**
-   * Removes and returns what was recorded for {@code key} in the frame currently on top of this
-   * thread's read-bracket stack, if anything. Removing on read means a value from a previous row's
-   * hydration can never be mistaken for the current row's: a field that was {@code null} for this
-   * row, and so was never decoded, correctly has nothing to check. Draining the frame - not a flat,
-   * bracket-wide map - is what stops a decode taken by one row's {@code onPostLoad} from being the
-   * one recorded by an unrelated projection earlier in the same bracket (C-22).
+   * Drains one count for {@code key} from the frame currently on top of this thread's read-bracket
+   * stack, if any is left. C-26: the caller - {@code ShreddingEventListener.onPostLoad} - builds
+   * {@code key} from the header it just independently re-read from the row's own stored bytes by
+   * id, not from anything this class handed back; draining the exact key a fresh, per-row read
+   * names is what stops one row's decode from paying another row's debt (C-22's original defect,
+   * one level down from where the third pass fixed it).
+   *
+   * @return {@code true} if a count was present and one was drained; {@code false} if the frame had
+   *     nothing recorded under this exact key (no open bracket, or a decode this verifier's own
+   *     re-read did not expect to find, both of which leave the count where it stood)
    */
-  public static Optional<Decoded> takeDecoded(String key) {
+  public static boolean drainDecoded(
+      String entity, String field, TenantId tenant, SubjectId subject) {
     Deque<Frame> stack = READ_FRAMES.get();
     if (stack.isEmpty()) {
-      return Optional.empty();
+      return false;
     }
-    return Optional.ofNullable(stack.peek().pending.remove(key));
+    var key = new FrameKey(entity, field, tenant, subject);
+    Frame frame = stack.peek();
+    Integer count = frame.pending.get(key);
+    if (count == null) {
+      return false;
+    }
+    if (count <= 1) {
+      frame.pending.remove(key);
+    } else {
+      frame.pending.put(key, count - 1);
+    }
+    return true;
   }
 }

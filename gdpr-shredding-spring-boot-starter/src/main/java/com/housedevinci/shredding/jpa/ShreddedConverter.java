@@ -109,10 +109,11 @@ public abstract class ShreddedConverter<T> implements AttributeConverter<T, byte
     if (dbData == null) {
       return null;
     }
-    // CIPHER-01: record what the header actually says the instant it is decoded, so
-    // ShreddingEventListener.onPostLoad can compare it against the row's true subject once the
-    // whole entity is hydrated and refuse before the value is handed to any caller. See
-    // ShreddingContext.Decoded for why this cannot be checked earlier than that.
+    // CIPHER-01: decode the header the instant it is available. ShreddingEventListener.onPostLoad
+    // independently re-reads this row's own stored bytes by id once the whole entity is hydrated
+    // (C-26) and compares against the row's true subject, refusing before the value is handed to
+    // any caller; this converter cannot do that comparison itself because it is handed nothing but
+    // the column bytes - no entity, no session, no row.
     var header = EncryptedValue.decode(dbData);
     // CIPHER-11: the header-versus-row check now lives here, at the one place every decrypt goes
     // through, not only on the entity-load event. Three cases:
@@ -169,7 +170,7 @@ public abstract class ShreddedConverter<T> implements AttributeConverter<T, byte
               + " brackets automatically; or any other EntityManager use, inside or outside a"
               + " repository call, that was not itself wrapped in withReadBracket(...).");
     }
-    ShreddingContext.recordDecoded(entity + "." + field, header.tenant(), header.subject());
+    ShreddingContext.recordDecoded(entity, field, header.tenant(), header.subject());
     var runtime = ShreddingRuntime.require();
     var plaintext = runtime.cipher().decrypt(entity, field, dbData, runtime.policy());
     if (plaintext.isPresent()) {

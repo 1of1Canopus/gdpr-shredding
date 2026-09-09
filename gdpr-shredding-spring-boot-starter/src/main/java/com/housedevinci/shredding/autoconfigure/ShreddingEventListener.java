@@ -158,6 +158,28 @@ public final class ShreddingEventListener
     }
   }
 
+  /**
+   * C-26: correlates each row's decode to that row's own stored bytes, not to whatever a
+   * converter's flat, row-blind {@code entity.field} key last held. Hibernate ORM 7.4 defers every
+   * {@code PostLoad} callback until the whole {@code JdbcValues} result set has been hydrated, so a
+   * two-row query hydrates row 1 (its converter records), hydrates row 2 (its converter
+   * <em>overwrites</em> the same flat key), then fires {@code onPostLoad(row 1)} - which used to
+   * drain row 2's header - then {@code onPostLoad(row 2)}, which found nothing left at all and
+   * treated that as "nothing was decrypted". One row's verification stood in for both: a leak when
+   * a ciphertext had moved, and a false refusal when it had not.
+   *
+   * <p>The fix does not try to make the frame carry a row identity the converter cannot know (no
+   * session, no entity - {@code ShreddedConverter} is handed nothing but the column bytes). Instead
+   * this method independently re-reads the row's own currently stored shredded columns by id -
+   * exactly what {@link #refuseIfSubjectMoved} already does on the write path, public header only,
+   * no key material touched - and compares those headers against the row's true subject and tenant,
+   * resolved from the now fully-hydrated entity the same way the write path resolves them. That
+   * comparison needs nothing from the frame to be correct. The frame keeps a narrower job: {@link
+   * ShreddingContext#drainDecoded} removes the exact entry this fresh, per-row re-read just proved
+   * correct, so {@link ShreddingContext#popReadBracket()} can still tell whether a decrypt happened
+   * that no verifier - not this one, not an explicit {@code withRead} scope - ever looked at at all
+   * (C-17/C-18/C-20).
+   */
   @Override
   public void onPostLoad(PostLoadEvent event) {
     var fields = model().byEntityName().get(entityName(event.getPersister()));
@@ -165,56 +187,68 @@ public final class ShreddingEventListener
       return;
     }
     String entityName = entityName(event.getPersister());
-    // CIPHER-13: drain every shredded field's decoded header for this row up front, whatever
-    // happens next below - a field this row never decoded (its column was null) correctly has
-    // nothing recorded and nothing to drain; anything that *was* decoded must not survive this
-    // method to be mistaken for a later, unrelated row's header.
-    var decodedByField = new java.util.LinkedHashMap<String, ShreddingContext.Decoded>();
-    for (var field : fields) {
-      ShreddingContext.takeDecoded(entityName + "." + field.fieldName())
-          .ifPresent(d -> decodedByField.put(field.fieldName(), d));
-    }
-    if (decodedByField.isEmpty()) {
-      // Nothing on this row was ever decrypted (every shredded column null, or this load went
-      // through an explicit read scope that already verified atomically in the converter) - there
-      // is nothing left to check.
+    String[] idColumns = event.getPersister().getIdentifierColumnNames();
+    if (idColumns.length != 1) {
+      // Composite identifiers: the same documented residual refuseIfSubjectMoved already accepts
+      // on the write path (QUESTIONS.md). No entity in this codebase has one.
       return;
     }
-    // CIPHER-01: every shredded field's converter has already run by the time any load listener
-    // fires (see ShreddingContext.Decoded). This is the first point at which the row's true
-    // subject and tenant - resolved from the now fully-hydrated entity, the same way the write
-    // path resolves them - can be compared against what each field's header actually said. A
-    // mismatch throws here, before the entity is returned from the load that is in progress.
+    Object[] stored =
+        readStoredShreddedColumns(event.getSession(), event.getId(), fields, idColumns[0]);
+    if (stored == null) {
+      // The row was concurrently deleted between the load and this re-read: nothing left to check.
+      return;
+    }
+    boolean anyStored = false;
+    for (Object column : stored) {
+      if (column != null) {
+        anyStored = true;
+        break;
+      }
+    }
+    if (!anyStored) {
+      // Every shredded column of this row is null: no converter ever ran on it, nothing was
+      // decrypted, nothing to verify.
+      return;
+    }
+
     String trueSubject;
     try {
       trueSubject = resolveSubject(event.getEntity(), fields);
     } catch (RuntimeException e) {
-      // CIPHER-12: this row carries at least one already-decrypted shredded value (decodedByField
-      // is non-empty, checked above) and its true subject cannot be established at all. An
-      // unresolvable subject is not a reason to let the read through - it is the exact reason this
-      // check exists. The attacker who can move a ciphertext between rows is by construction the
-      // attacker who can null one more column, and a `return` here used to hand the moved value
-      // straight back through this same code path.
+      // CIPHER-12: this row carries at least one stored shredded value (anyStored, checked above)
+      // and its true subject cannot be established at all. An unresolvable subject is not a reason
+      // to let the read through - it is the exact reason this check exists. The attacker who can
+      // move a ciphertext between rows is by construction the attacker who can null one more
+      // column, and letting the load through here used to hand the moved value straight back.
       log.warn(
           "shredding: refusing to load {}: it carries a shredded value but its subject could not"
               + " be resolved ({})",
           entityName,
           e.getClass().getSimpleName());
-      throw new ShreddingException(
-          ErrorCodes.SUBJECT_UNRESOLVED,
-          "the data subject of "
-              + entityName
-              + " could not be resolved while it carries at least one shredded value. An unknown"
-              + " owner is never a reason to display an already-decrypted value; fix the subject"
-              + " source, or erase the row if it is orphaned.",
-          e);
+      throw refuseLoad(
+          event,
+          new ShreddingException(
+              ErrorCodes.SUBJECT_UNRESOLVED,
+              "the data subject of "
+                  + entityName
+                  + " could not be resolved while it carries at least one shredded value. An"
+                  + " unknown owner is never a reason to display an already-decrypted value; fix"
+                  + " the subject source, or erase the row if it is orphaned.",
+              e));
     }
     var first = fields.get(0);
     TenantId trueTenant =
         first.tenant() != null ? TenantId.of(first.tenant().evaluate(event.getEntity())) : null;
     SubjectId subjectId = SubjectId.of(trueSubject);
-    for (var entry : decodedByField.entrySet()) {
-      var header = entry.getValue();
+
+    for (int i = 0; i < fields.size(); i++) {
+      byte[] column = (byte[]) stored[i];
+      if (column == null) {
+        continue;
+      }
+      var field = fields.get(i);
+      var header = EncryptedValue.decode(column);
       boolean subjectMismatch = !header.subject().equals(subjectId);
       boolean tenantMismatch = trueTenant != null && !header.tenant().equals(trueTenant);
       if (subjectMismatch || tenantMismatch) {
@@ -222,20 +256,73 @@ public final class ShreddingEventListener
             "shredding: refusing to load {}.{}: the stored value's header names a different"
                 + " {} than the row it was read from",
             entityName,
-            entry.getKey(),
+            field.fieldName(),
             subjectMismatch ? "subject" : "tenant");
-        throw new ShreddingException(
-            ErrorCodes.SUBJECT_MISMATCH,
-            "the stored value for "
-                + entityName
-                + "."
-                + entry.getKey()
-                + " belongs to a different "
-                + (subjectMismatch ? "subject" : "tenant")
-                + " than the row it was read from. A ciphertext moved between rows, subjects or"
-                + " tenants is refused rather than decrypted and displayed.");
+        throw refuseLoad(
+            event,
+            new ShreddingException(
+                ErrorCodes.SUBJECT_MISMATCH,
+                "the stored value for "
+                    + entityName
+                    + "."
+                    + field.fieldName()
+                    + " belongs to a different "
+                    + (subjectMismatch ? "subject" : "tenant")
+                    + " than the row it was read from. A ciphertext moved between rows, subjects"
+                    + " or tenants is refused rather than decrypted and displayed."));
       }
+      // C-26: drain the exact (entity, field, tenant, subject) this fresh, per-row header re-read
+      // just proved correct - not whatever a converter running on a different row of this same
+      // result set happened to record last.
+      ShreddingContext.drainDecoded(
+          entityName, field.fieldName(), header.tenant(), header.subject());
     }
+  }
+
+  /**
+   * C-27: a row refused here has already been registered, fully hydrated - decrypted shredded
+   * fields and all - in the session's first-level cache by the time {@code onPostLoad} fires. The
+   * exception aborts the load in progress, but by itself leaves the instance sitting in the
+   * persistence context: a second read of the same row in the same transaction was a cache hit - no
+   * SQL, no converter, no {@code PostLoad}, an empty frame - that handed the intact entity back to
+   * whoever asked the second time. Evicting the instance closes that: with no entry left in the
+   * persistence context, the next read of this row's id is a real load, through this same check,
+   * again.
+   *
+   * <p><strong>Deviation from Cipher's fix text (recorded in QUESTIONS.md C-27): the transaction is
+   * not also marked rollback-only.</strong> That half was tried first, via {@code
+   * Transaction.markRollbackOnly()} on {@code event.getSession().accessTransaction()}. Cipher's own
+   * probe for this finding (and the two others in the same handed-over file that reach a mismatch,
+   * {@code CipherProbeFrameTest} F1 and F5) catch this exception <em>inside</em> the transactional
+   * callback and return a plain value, exactly the "a {@code try}/{@code catch} around a repository
+   * call is not exotic" pattern the finding itself names - and every one of them then failed, not
+   * on the property being tested, but on {@code
+   * org.springframework.transaction.UnexpectedRollbackException} thrown from {@code
+   * TransactionTemplate.execute}'s own commit, outside any of the probes' own try/catch. That is
+   * not a quirk of calling Hibernate's API directly: {@code UnexpectedRollbackException} is what
+   * Spring throws by construction whenever a transaction marked rollback-only - through any API,
+   * Hibernate's or Spring's own {@code
+   * TransactionSynchronizationManager.setCurrentTransactionRollbackOnly()} - reaches a commit
+   * attempt after the exception that caused the mark was caught and not rethrown. Every probe
+   * demonstrating "catch the refusal and keep going in this transaction" therefore conflicts with
+   * "and also mark it rollback-only": one cannot both swallow the exception and avoid the
+   * commit-time one that marking rollback-only exists to cause. Evicting the instance already
+   * closes the exact leak C-27 demonstrates (a stale, still-decrypted entity served from the
+   * first-level cache) without this conflict: a retry is forced back through a real reload and this
+   * same check, every time, rather than being blocked from committing unrelated work the finding
+   * did not describe an attack against.
+   */
+  private ShreddingException refuseLoad(PostLoadEvent event, ShreddingException cause) {
+    var session = (org.hibernate.event.spi.EventSource) event.getSession();
+    try {
+      session.evict(event.getEntity());
+    } catch (RuntimeException e) {
+      log.warn(
+          "shredding: could not evict a refused {} from the persistence context",
+          entityName(event.getPersister()),
+          e);
+    }
+    return cause;
   }
 
   @Override
@@ -277,37 +364,8 @@ public final class ShreddingEventListener
       // than silently wrong.
       return;
     }
-    String columns =
-        fields.stream()
-            .map(f -> quote(f.columnName()))
-            .collect(java.util.stream.Collectors.joining(", "));
-    String sql =
-        "SELECT "
-            + columns
-            + " FROM "
-            + quote(first.tableName())
-            + " WHERE "
-            + quote(idColumns[0])
-            + " = ?";
     Object[] stored =
-        event
-            .getSession()
-            .doReturningWork(
-                connection -> {
-                  try (PreparedStatement ps = connection.prepareStatement(sql)) {
-                    ps.setObject(1, event.getId());
-                    try (ResultSet rs = ps.executeQuery()) {
-                      if (!rs.next()) {
-                        return null;
-                      }
-                      Object[] row = new Object[fields.size()];
-                      for (int i = 0; i < fields.size(); i++) {
-                        row[i] = rs.getBytes(i + 1);
-                      }
-                      return row;
-                    }
-                  }
-                });
+        readStoredShreddedColumns(event.getSession(), event.getId(), fields, idColumns[0]);
     if (stored == null) {
       return;
     }
@@ -331,6 +389,51 @@ public final class ShreddingEventListener
                 + " subject's key and move it out of the first subject's erasure scope.");
       }
     }
+  }
+
+  /**
+   * A fresh {@code SELECT} of one row's own shredded columns, by id, decoded only for the header -
+   * no key material is touched. Shared by {@link #refuseIfSubjectMoved} (the write path, QUESTIONS
+   * #4 ruling (c)) and {@link #onPostLoad} (the read path, C-26): both need to know what a row's
+   * shredded columns currently, actually hold, independent of whatever a converter running on a
+   * different row of the same query happened to record.
+   *
+   * @return one entry per {@code fields}, in the same order, {@code null} for a column with no
+   *     stored value; or {@code null} for the whole array if the row no longer exists
+   */
+  private static Object[] readStoredShreddedColumns(
+      org.hibernate.engine.spi.SharedSessionContractImplementor session,
+      Object id,
+      List<ShreddedModel.ShreddedField> fields,
+      String idColumn) {
+    String columns =
+        fields.stream()
+            .map(f -> quote(f.columnName()))
+            .collect(java.util.stream.Collectors.joining(", "));
+    String sql =
+        "SELECT "
+            + columns
+            + " FROM "
+            + quote(fields.get(0).tableName())
+            + " WHERE "
+            + quote(idColumn)
+            + " = ?";
+    return session.doReturningWork(
+        connection -> {
+          try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setObject(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+              if (!rs.next()) {
+                return null;
+              }
+              Object[] row = new Object[fields.size()];
+              for (int i = 0; i < fields.size(); i++) {
+                row[i] = rs.getBytes(i + 1);
+              }
+              return row;
+            }
+          }
+        });
   }
 
   private static String quote(String identifier) {
