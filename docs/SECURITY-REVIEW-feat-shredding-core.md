@@ -1298,3 +1298,288 @@ review; the fixtures they need are `DocProjectionRepository`, `DocMatrixReposito
   not reproduced. It is not a leak in either outcome.
 - **Spring Data JDBC.** Not on the classpath; there is no shredded read path through it to attack.
 - **Multi-node behaviour**, unchanged from the previous pass.
+
+## Fourth pass (0ba0f6f)
+
+*2026-09-09. Branch `feat/shredding-core`, HEAD `0ba0f6f`, draft PR #1. Docker up; every test in this
+section ran against a real Testcontainers PostgreSQL. No test was skipped.*
+
+### Verdict
+
+**NOT MERGEABLE.**
+
+C-17 through C-25 are closed *as they were reported*. Every third-pass probe is green, no probe was
+narrowed, and the reverse metamodel scan, the `Object`-method skip, the explicit order and the
+documentation are all real. The read bracket now genuinely owes a debt.
+
+But the debt is filed under the wrong name. `ShreddingContext.recordDecoded` keys a frame entry by
+`entityName + "." + fieldName` and nothing else — no row. Hibernate hydrates every row of a result
+set before it fires the first `PostLoad` for that set, so in any query returning more than one row of
+the same entity, each row's decode overwrites the previous row's under that one key, and the entry
+that survives is verified against whichever row happens to drain first. Every other row in the set is
+verified by nobody, and the frame is empty at `popReadBracket()`, so nothing notices.
+
+That is C-17's own defect one level down: not "inside a bracket, therefore permitted", but "some row
+was verified, therefore all of them were". It is not a contrived shape. It fires on
+`repository.findAll()`.
+
+### Numbers
+
+Full `./mvnw clean verify`, exit 0.
+
+| Module | Tests | Fail | Err | Skip | Line coverage | Branch |
+| --- | --- | --- | --- | --- | --- | --- |
+| `gdpr-shredding-core` | 77 | 0 | 0 | 0 | **84.54 %** (979/1158) | 58.37 % |
+| `gdpr-shredding-spring-boot-starter` | 50 | 0 | 0 | 0 | **85.42 %** (715/837) | 66.67 % |
+| `gdpr-shredding-sample` | 17 | 0 | 0 | 0 | 66.32 % (63/95) | 33.33 % |
+| **Total** | **144** | **0** | **0** | **0** | | |
+
+Isis's reported figures (144 tests: 77/50/17; 84.5 % / 85.4 %) reproduce exactly from the three
+`jacoco.csv` files. The sample module is below the 80 % gate by design; the gate is scoped to the
+published artefacts.
+
+### Probes: none narrowed
+
+`git diff 114dc4f..HEAD -- '*CipherProbe*'` touches four files — `CipherProbeMatrixTest`,
+`CipherProbeMatrix2Test`, `CipherProbeReadScopeTest`, `CipherProbeReverseScanTest` — **854 insertions,
+zero deletions**. All four are new; no probe from the first three passes was removed, renamed,
+weakened or had an assertion relaxed. Seven new `probe_` methods, all green. Two of them are weak,
+not narrowed: see C-30 and C-31.
+
+### The nine prior findings, judged
+
+| # | Sev | Ruling |
+| --- | --- | --- |
+| C-17 | HIGH | **Closed as reported.** The repository `@Query` projection is refused with `SHRED-READ-UNVERIFIED`, from `popReadBracket()`, before the list reaches the caller. Re-ran the probe. |
+| C-18 | HIGH | **Closed as reported.** Same mechanism, same refusal, on the interface projection. |
+| C-19 | HIGH | **Closed for the shape it was reported in, incomplete.** `refuseUnmodelledShreddedConverters` walks the mapping metamodel and refuses `Ledger.secret` at startup, naming the attribute. It walks top-level `BasicValuedModelPart` attributes only; an `@Embeddable` or `@ElementCollection` is not one. See C-29. |
+| C-20 | HIGH | **Closed, on the frame accounting, as QUESTIONS #17 says.** The second-EMF probe is green. Its closure is inherited from the frame, so it inherits C-26 with it. |
+| C-21 | MEDIUM | **Closed.** The `ShreddedModel` startup message no longer claims "nothing shares state"; it names the in-place-mutation trap and the assign-a-new-array rule. `README.md`, `docs/index.md` and `SECURITY-NOTES.md` repeat it. See the ruling on QUESTIONS #18. |
+| C-22 | MEDIUM | **Closed across repository calls, reopened inside one result set.** Each call gets its own frame, so alice's refused projection no longer contaminates bob's separate call — the probe proves it. Within a single frame the flat `entity.field` key is unchanged, and that is C-26. |
+| C-23 | MEDIUM | **Closed.** `SHRED-READ-UNSCOPED`'s message now names the four real causes including the `Stream` case; `withReadBracket` appears in `README.md` and `docs/index.md`, twice each. |
+| C-24 | LOW | **Closed.** The phantom class name survives only in `CHANGELOG.md` and in this document's own history, where it belongs. |
+| C-25 | LOW | **Closed.** `Object` methods bypass the bracket entirely; `getOrder()` returns `LOWEST_PRECEDENCE` with the reasoning written down. |
+
+### New findings
+
+#### HIGH
+
+##### C-26 — the frame is keyed by `entity.field`, so one row's verification stands in for every row's
+
+`ShreddingContext.recordDecoded(entity + "." + field, …)` writes into a `HashMap` whose key carries no
+row identity. `ShreddingEventListener.onPostLoad` drains by the same key. In Hibernate ORM 7.4 the
+`PostLoad` callbacks for a query are deferred until the whole `JdbcValues` result set has been
+processed, so the ordering in a two-row query is: hydrate row 1 (converter records), hydrate row 2
+(converter **overwrites**), `onPostLoad(row 1)`, `onPostLoad(row 2)`. One entry exists for two rows.
+The first row to drain takes it; the second finds nothing, and `onPostLoad`'s
+`if (decodedByField.isEmpty()) return;` treats "nothing recorded" as "nothing was decrypted" — which,
+after the overwrite, is false.
+
+This is the same value that made `Doc` look safe in the third pass: `Doc` has two shredded fields, so
+the *other* field's collision throws first and the row looks refused. An entity with one shredded
+field has nothing to catch it.
+
+*Repro, the leak.* `Widget` (one `@Shredded` field). Save alice with `ALICE-FRAME-SECRET` and bob with
+`bob name`; `UPDATE widget SET name = <alice's ciphertext> WHERE owner_id = <bob>`; then an ordinary
+`widgets.findAll(Sort.by("ownerId"))`. Alice sorts first, drains the surviving entry, and it is her own
+header, so she passes. Bob drains nothing and is never checked:
+
+```
+FRAME F1 multi-row single-shredded-field -> RETURNED [ALICE-FRAME-SECRET, ALICE-FRAME-SECRET]
+```
+
+No exception. The moved plaintext is returned to the caller, twice.
+
+Probe: `probe_a_moved_ciphertext_in_a_second_row_of_one_result_set`.
+
+*Repro, the mirror.* The same defect with honest data refuses honest data. Two `Widget` rows, two
+subjects, nothing moved, one `findAll(Sort.by("ownerId"))`:
+
+```
+FRAME F6 legitimate two-subject read -> REFUSED SHRED-SUBJECT-MISMATCH
+```
+
+Alice's row drains bob's header and is refused for a mismatch that is an artefact of the map. **Any
+list query spanning more than one data subject throws.** That is every admin screen, every export,
+every report in a multi-tenant application. No existing test covers it, which is why CI is green.
+
+Probe: `probe_two_rows_of_two_subjects_read_in_one_query`.
+
+*Fix.* A decode must be correlated to the row it came from; `entity.field` is not a row identity and a
+count is not either (two rows of one result set swapping their ciphertexts would balance). The
+converter genuinely cannot know its row — that part of QUESTIONS #16 stands. So stop trying to carry
+the answer across from the converter, and have the verifier fetch it: in `onPostLoad`, for the entity
+being loaded, re-read that row's own shredded columns by `event.getId()` and decode the headers, the
+way `refuseIfSubjectMoved` already does on the write path (public header only, no key material, one
+`SELECT` per loaded row of a shredded entity). Compare those headers against the row's resolved
+subject and tenant. Keep the frame, but reduce it to what it can honestly do — *count* decodes and
+require the count to reach zero — so a decrypt no `onPostLoad` ever ran for is still refused by
+`popReadBracket()`, which is what closes C-17, C-18 and C-20. If you would rather not pay a `SELECT`
+per row, propose the alternative with a probe; I will review it, but I will not accept a thread-local
+correlation that cannot name a row.
+
+Probes that must end green: the two above, plus every C-17/C-18/C-20/C-22 probe unchanged.
+
+##### C-27 — a row refused by `onPostLoad` stays in the persistence context and is returned on the next read
+
+`onPostLoad` throws *after* Hibernate has registered the fully hydrated entity — decrypted shredded
+fields and all — in the session's first-level cache. The exception aborts the load in progress. It
+does not remove the instance. The next read of that row in the same transaction is a cache hit: no
+SQL, no converter, no `PostLoad`, an empty frame, and the entity is handed over intact.
+
+The bracket proxy's `discardReadBracket()` on the exceptional path is correct as far as the frame
+goes, and it is also what makes this silent: the aborted call leaves no debt behind.
+
+*Repro.* Alice's `Widget` ciphertext moved into bob's row. In one transaction, call
+`widgets.findByOwnerId(bob)` — refused — catch it, then call `widgets.findById(bobId)`:
+
+```
+FRAME F2 first-level-cache retry -> first=[REFUSED SHRED-SUBJECT-MISMATCH] second=[RETURNED ALICE-L1-SECRET]
+```
+
+A `try`/`catch` around a repository call is not an exotic thing to write. Neither is a service that
+falls back to `findById` when a finder refuses.
+
+Probe: `probe_a_refused_row_is_returned_on_the_retry_from_the_persistence_context`.
+
+*Fix.* Before `onPostLoad` throws, evict the offending instance from the session's persistence context
+(`event.getSession().getPersistenceContextInternal().removeEntityHolder(...)` / `evict`) so no
+first-level-cache hit can serve it, and mark the transaction rollback-only so the poisoned session
+cannot be reused for anything else. A refusal that only holds until the caller asks a second time is
+not a refusal. Probe: the one above, with `second=` refused or empty.
+
+#### MEDIUM
+
+##### C-29 — the reverse metamodel scan does not walk `@Embeddable` or `@ElementCollection` attributes
+
+`refuseUnmodelledShreddedConverters` iterates `persister.getAttributeMappings()` and returns early on
+anything that is not a `BasicValuedModelPart`. An `@Embedded` component is an
+`EmbeddableValuedModelPart` and an `@ElementCollection` is a `PluralAttributeMapping`; the shredded
+converters mapped inside either are never inspected. The forward scan cannot see them either —
+`allFields` walks the entity class and its superclasses, not its components — so a `@Shredded` field
+declared inside an `@Embeddable` is invisible to the module in both directions. (`@MappedSuperclass` is
+fine: `allFields` walks superclasses. A `@Converter(autoApply = true)` `ShreddedConverter` is fine in
+the other direction: it attaches to top-level basic attributes, which the reverse scan does see, and
+is refused at startup.)
+
+*Repro.* `Vault` with a properly declared `@Shredded label` and an `@Embedded Secrets` holding a
+`@Shredded @Convert token`:
+
+```
+EMBED -> STARTED / WROTE / READ-REFUSED SHRED-READ-UNVERIFIED
+```
+
+The application starts. The token column is encrypted correctly. It can never be read back, and the
+error the developer meets says a verifier was never reached — true, but it names the bracket rather
+than the mapping they actually got wrong.
+
+Fail-closed, and only by accident: the sole reason this is a refusal and not a C-19-shaped leak is
+that the frame is non-empty at `popReadBracket()`. **The C-26 fix must not lose that.** If the frame
+is reduced to a counter, the counter must still be non-zero here.
+
+Probe: `probe_a_shredded_field_inside_an_embeddable` (must fail at startup, naming
+`Vault.secrets.token`).
+
+*Fix.* Recurse into `EmbeddableValuedModelPart` and `PluralAttributeMapping` in
+`refuseUnmodelledShreddedConverters`, and refuse at startup with the C-19 message extended: a
+`@Shredded` field inside a component or an element collection is not supported, because the subject
+expression, the `@Immutable` check, the secondary-table check and `onPostLoad`'s field list are all
+built from the entity's own declared fields.
+
+#### LOW
+
+- **C-30** — `probe_a_second_row_in_the_same_result_set_is_never_verified` asserts only
+  `assertThat(shreddingCode(t)).isNotBlank()`. It is the probe for the exact bug C-26 describes, it
+  runs on `Doc` (two shredded fields), and it passes on `Doc.body`'s collision throwing
+  `SHRED-SUBJECT-MISMATCH` while `Doc.title` — the field the probe moved — was never checked at all.
+  A probe that green-lights the bug it is named for is worse than no probe. Assert the specific error
+  code, and make the fixture single-shredded-field so nothing else can throw first.
+- **C-31** — `probe_an_in_place_mutation_of_an_immutable_byte_array_is_persisted` asserts
+  `isEqualTo((byte) 1)`, i.e. that the mutation is **lost**. The assertion is right (see the ruling on
+  QUESTIONS #18); the name is the opposite of it. Rename it
+  `probe_an_in_place_mutation_of_an_immutable_byte_array_is_silently_discarded`. Isis was right not to
+  rename a probe Cipher named; this is the instruction.
+- **C-32** — `ShreddingContext.withReadBracket` catches `RuntimeException` only. An `Error` thrown by
+  the body — `StackOverflowError` from a deep object graph, an `AssertionError` from application
+  code — unwinds past both `discardReadBracket()` and `popReadBracket()` and leaves the frame on the
+  thread for whatever the pool hands it next. The proxy's own `Bracket.invoke` gets this right
+  (`catch (Throwable t)`); the public API does not. Use `try`/`finally` with an explicit
+  "threw?" flag, or catch `Throwable`.
+
+#### Not verified
+
+- **A lazy basic attribute.** `@Basic(fetch = LAZY)` on a shredded column is inert without Hibernate's
+  bytecode enhancement, and no enhancement plugin is configured in any of the three POMs, so there is
+  no path here to attack. In an application that does enable enhancement, the column would be fetched
+  on first getter access, which for an entity returned out of a repository call is after the bracket
+  closed: reasoned to be `SHRED-READ-UNSCOPED`, i.e. fail-closed, but not reproduced. It belongs in the
+  documented residuals either way — the module should say that shredded fields must not be mapped
+  lazily.
+- **Multi-node behaviour**, unchanged from every previous pass.
+
+### Attacks that found nothing
+
+- Nested brackets. An outer frame's undrained decode survives an inner repository call opening and
+  cleanly closing its own frame, and the outer `popReadBracket()` still refuses
+  (`probe_a_nested_repository_call_does_not_absolve_the_outer_frames_debt`). A decode is filed to the
+  frame on top of the stack at the moment it happens, which is the right frame in both directions:
+  the wrong-frame cases fail closed with `SHRED-READ-UNVERIFIED`, never open.
+- Two entity types sharing a field name, or two entities sharing an id value. The frame key carries the
+  entity name, so `Doc.title` and `Widget.title` cannot collide. Only same-entity rows collide, which
+  is C-26.
+- Empty results. `findByOwnerId` with no match, `findById` on a missing id, an empty `Optional`: no
+  decode, a trivially clean frame, no refusal (`probe_empty_results_are_not_refused`).
+- `@Transactional(readOnly = true)` with `FlushMode.MANUAL`. A moved ciphertext is still refused
+  (`SHRED-SUBJECT-MISMATCH`); nothing about the read path depends on the flush mode.
+- `@MappedSuperclass` and `@Converter(autoApply = true)`, both covered above.
+- The `Object`-method skip. `toString`, `equals` and `hashCode` on a repository bean no longer open a
+  frame, and no shredded converter is reachable from any of them.
+
+### Ruling: QUESTIONS #17 — accepted
+
+The evidence is correct and I verified it independently rather than taking it on trust:
+`javap -v` on `org.springframework.boot.jpa.autoconfigure.JpaBaseConfiguration` shows
+`entityManagerFactory(...)` annotated `@Bean`, `@Primary`, and
+`@ConditionalOnMissingBean(value = [LocalContainerEntityManagerFactoryBean.class,
+EntityManagerFactory.class])`. Declaring a second factory bean the ordinary way does suppress the
+auto-configured, instrumented one instead of coexisting with it, so the shape
+`CipherProbeSecondEmfStartupTest` was written to construct cannot be constructed through ordinary
+auto-configuration. Deleting the test rather than committing it failing or `@Disabled` is the right
+call, and recording why in QUESTIONS.md is exactly what that file is for.
+
+The check stays as a safety rail; it is reachable in the one wiring that matters (a context that
+excludes `HibernateJpaAutoConfiguration` and hand-rolls two factories) and it costs nothing. C-20 is
+closed on the frame accounting, as claimed — and therefore reopens with C-26, which is a comment on my
+own prescription, not on this deviation.
+
+### Ruling: QUESTIONS #18 — the rewrite is legitimate, not a narrowing
+
+My own third-pass fix list for C-21 was documentation only, and the third-pass text says in as many
+words that making the mutation persist would reintroduce CIPHER-16. A probe asserting
+`reloaded[0] == 99` therefore asserts a behaviour I had already ruled must not exist. It could never
+have gone green, and Isis is right that fixing the documentation and passing that probe as written are
+mutually exclusive.
+
+A narrowing is an assertion weakened to stop protecting a property that was being protected. This
+assertion protects nothing — it characterises an accepted, documented residual, and the direction it
+now asserts is the direction the corrected documentation promises. The security-relevant half of C-21
+is the text, and the text is verifiably corrected in `ShreddedModel`, `README.md`, `docs/index.md` and
+`SECURITY-NOTES.md`.
+
+The name is a separate problem and it is mine: I named the probe. C-31 above is the instruction to
+rename it.
+
+### Fix list for Isis
+
+| # | Sev | What |
+| --- | --- | --- |
+| C-26 | HIGH | The frame's key carries no row identity. Verify each row's headers per row — re-read the row's shredded columns by id in `onPostLoad`, the way `refuseIfSubjectMoved` does — and reduce the frame to a drain count that must reach zero. Probes: `probe_a_moved_ciphertext_in_a_second_row_of_one_result_set`, `probe_two_rows_of_two_subjects_read_in_one_query`, and every C-17/C-18/C-20/C-22 probe still green. |
+| C-27 | HIGH | Evict the refused instance from the persistence context and mark the transaction rollback-only before `onPostLoad` throws. Probe: `probe_a_refused_row_is_returned_on_the_retry_from_the_persistence_context`. |
+| C-29 | MEDIUM | Recurse into `EmbeddableValuedModelPart` and `PluralAttributeMapping` in `refuseUnmodelledShreddedConverters`; refuse `@Shredded` inside a component or element collection at startup. Probe: `probe_a_shredded_field_inside_an_embeddable`. |
+| C-30 | LOW | `probe_a_second_row_in_the_same_result_set_is_never_verified`: assert the specific error code, on a single-shredded-field fixture. |
+| C-31 | LOW | Rename `probe_an_in_place_mutation_of_an_immutable_byte_array_is_persisted` to `..._is_silently_discarded`. |
+| C-32 | LOW | `ShreddingContext.withReadBracket` must unwind the frame on `Throwable`, not only `RuntimeException`. |
+| — | INFO | Document that a `@Shredded` field must not be mapped `@Basic(fetch = LAZY)`, and that bytecode enhancement is untested against this module. |
+
+Probe sources for C-26, C-27 and C-29 are `CipherProbeFrameTest`, `CipherProbeEmbeddableScanTest` and
+the `…autoconfigure.embed` fixture package, handed to Isis with this review.
