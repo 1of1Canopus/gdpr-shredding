@@ -54,11 +54,20 @@ public final class JdbcSupport {
   }
 
   /**
-   * The fixed salt handed to {@code hashtextextended} so this namespace of advisory locks cannot
-   * collide with the schema step's own single-key lock or with {@code JdbcErasureStore}'s chain
-   * append lock, which both use plain {@code bigint} keys.
+   * L11: the fixed class id handed to the two-argument {@code pg_advisory_xact_lock(int4, int4)}.
+   * {@code pg_advisory_xact_lock(bigint)} - the one-argument form the schema step and {@code
+   * JdbcErasureStore}'s chain-append lock both use - is a single flat 64-bit space; a salt folded
+   * into a hash changes *which* value in that space a pair lands on, it does not give it a separate
+   * namespace, so the previous javadoc's claim that a fixed salt "cannot collide" with those locks
+   * was a property the code did not have (the same defect as L5 in the first pass - true collision
+   * probability 2^-64, and every collision here is benign: two unrelated pairs, or a pair and the
+   * chain lock, simply serialise against each other, which is never a missed exclusion - but the
+   * comment claimed more than that). The two-argument form *is* a genuinely separate namespace from
+   * the one-argument form and from every other two-argument class id this module uses, so this
+   * class id cannot collide with {@code LOCK_KEY} or the schema step's lock at all, by construction
+   * rather than by low probability.
    */
-  private static final long SUBJECT_LOCK_SALT = 6072873668427846209L;
+  private static final int SUBJECT_LOCK_CLASS = 0x5355424A; // "SUBJ"
 
   /**
    * Takes a transaction-scoped advisory lock on {@code (tenant, subject)}, in the caller's current
@@ -77,11 +86,26 @@ public final class JdbcSupport {
   public static void lockSubject(Connection c, TenantId tenant, SubjectId subject)
       throws SQLException {
     try (PreparedStatement ps =
-        c.prepareStatement("SELECT pg_advisory_xact_lock(hashtextextended(?, ?))")) {
-      ps.setString(1, tenant.value() + "|" + subject.value());
-      ps.setLong(2, SUBJECT_LOCK_SALT);
+        c.prepareStatement("SELECT pg_advisory_xact_lock(?, hashtext(?))")) {
+      ps.setInt(1, SUBJECT_LOCK_CLASS);
+      // L11: length-prefixed, the same canonical form as Pseudonymiser.append and ErasureChain,
+      // rather than a "|"-joined string - "a|b" + "c" and "a" + "b|c" hash the same joined string
+      // (harmless here, since a collision only serialises two unrelated pairs against each other,
+      // but there is no reason to leave the question open when the canonical form is one line).
+      ps.setString(2, canonicalPair(tenant.value(), subject.value()));
       ps.execute();
     }
+  }
+
+  private static String canonicalPair(String tenant, String subject) {
+    var sb = new StringBuilder();
+    appendLengthPrefixed(sb, tenant);
+    appendLengthPrefixed(sb, subject);
+    return sb.toString();
+  }
+
+  private static void appendLengthPrefixed(StringBuilder sb, String value) {
+    sb.append('|').append(value.getBytes(StandardCharsets.UTF_8).length).append(':').append(value);
   }
 
   static OffsetDateTime ts(Instant i) {
