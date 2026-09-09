@@ -971,3 +971,330 @@ project".
   is also affected is a question for the fix's own test, which is why it is in the fix text.
 - **`@DynamicUpdate`.** No entity in this repository uses it, so QUESTIONS #14's reasoning about it
   is unexercised in both directions.
+
+---
+
+## Third pass (8095d2c)
+
+*2026-09-09. Branch `feat/shredding-core`, HEAD `8095d2c`, draft PR #1. Docker up; every test in this
+section ran against a real Testcontainers PostgreSQL. No test was skipped.*
+
+### Verdict
+
+**NOT MERGEABLE.**
+
+CIPHER-11 is closed for the shape it was reported in — a projection run straight off an
+`EntityManager` — and open for every other shape of the same attack. The read bracket introduced to
+close it is an *unconditional permission granted by the caller's identity* ("you are inside a Spring
+Data repository call"), not a *proof that a verifier will run*. Four HIGH findings below are the same
+root cause seen from four directions: a decrypt that takes the bracket branch and is never reached by
+`onPostLoad` is returned to the caller with nothing having checked it. Three of the four leak a
+different subject's plaintext across the module's own boundary, on code an ordinary user writes on
+purpose (`@Query` projections, interface projections), not on code an attacker has to contrive.
+
+The ten findings from the re-verification pass are otherwise genuinely closed, the numbers are
+honest, and no probe was narrowed. The design is one control away from being right; it is not right
+yet.
+
+### Numbers
+
+Full `./mvnw clean verify`, exit 0.
+
+| Module | Tests | Fail | Err | Skip | Line coverage | Branch |
+| --- | --- | --- | --- | --- | --- | --- |
+| `gdpr-shredding-core` | 77 | 0 | 0 | 0 | **84.54 %** (979/1158) | 58.37 % |
+| `gdpr-shredding-spring-boot-starter` | 40 | 0 | 0 | 0 | **85.16 %** (654/768) | 65.87 % |
+| `gdpr-shredding-sample` | 17 | 0 | 0 | 0 | **66.32 %** (63/95) | 33.33 % |
+| **Total** | **134** | **0** | **0** | **0** | | |
+
+Isis's reported figures (134 tests: 77/40/17; 84.5 % / 85.2 % / 66.3 %) reproduce exactly from the
+three `jacoco.csv` files. The sample module is below the 80 % gate by design (the gate is scoped to
+the published artefacts), unchanged from the previous pass.
+
+### Probes: none narrowed
+
+`git diff dcae873..HEAD -- '*CipherProbe*'` touches two files, both **pure additions, zero
+deletions**: `CipherProbeJdbcTest` (+57, `probe_a_backwards_clock_hides_an_outstanding_partial`) and
+`CipherProbeSpelTest` (+29, `probe_a_subject_expression_resolving_to_an_identity_hash_is_refused`).
+No probe method was removed, renamed, weakened or had an assertion relaxed. Every probe from the
+first two passes runs unchanged and green.
+
+### The ten prior findings, judged
+
+| # | Sev | Ruling |
+| --- | --- | --- |
+| CIPHER-11 | HIGH | **Partially closed.** The reported repro (`select d.title from Doc d` off the `EntityManager`) is refused, and so are the `Tuple`, constructor-expression and Criteria variants — I re-ran all four. The *same projection declared on a repository* is not (C-17, C-18 below). |
+| CIPHER-12 | HIGH | **Closed.** `onPostLoad` throws `SHRED-SUBJECT-UNRESOLVED` instead of returning when any shredded column decoded and the subject cannot be resolved. Verified in code and by the existing probe. |
+| CIPHER-13 | MEDIUM | **Partially closed.** `clearAll()` now drops `READ_BRACKET_DEPTH`, `READ_SCOPES` and `DECODED_READS` at the transaction boundary, and `onPostLoad` drains every shredded field of the row up front. But the bracket created a new producer of undrained entries, and the original symptom is reproducible again inside one transaction (C-22 below). |
+| CIPHER-14 | HIGH | **Closed.** `refuseIfSubjectMoved` reads every shredded column in one query and only early-returns when all are null; `ShreddedModel.scan` refuses a shredded entity spanning a secondary table. Verified in code. |
+| CIPHER-15 | MEDIUM | **Closed.** `latestForSubject` is `ORDER BY seq DESC LIMIT 1`; the backwards-clock probe is green. |
+| CIPHER-16 | MEDIUM | **Closed as reported, with a new trap it creates.** `byte[]` round-trips under both IDENTITY (`Blob`) and SEQUENCE (`BlobSeq`), and `@Immutable` is enforced at startup naming the field. See C-20 and C-21 for what that enforcement costs and what it does not cover. |
+| L11 | LOW | Closed. |
+| L12 | LOW | Closed; new probe green. |
+| L13 | LOW | Closed. |
+| L14 | LOW | Closed; `LogScanTest` asserts a non-empty capture first. |
+
+### New findings
+
+#### HIGH
+
+##### C-17 — a repository `@Query` projection returns another subject's plaintext
+
+The exact attack CIPHER-11 named, moved from an `EntityManager` to a repository method. The
+`BeanPostProcessor` opens the read bracket for *any* method on *any* `Repository` bean, including one
+whose `@Query` is a scalar projection. `convertToEntityAttribute` therefore takes branch 2 ("defer to
+`onPostLoad`") — and `onPostLoad` never fires, because no entity was loaded. Nothing verifies, and
+the value is returned.
+
+*Repro.* Fixture `DocProjectionRepository extends Repository<Doc, Long>` with
+`@Query("select d.title from Doc d where d.ownerId = :id") List<String> titlesOf(String id)`. Save a
+`Doc` for alice with title `ALICE-SECRET-TITLE` and one for bob; `UPDATE doc SET title = <alice's
+ciphertext> WHERE owner_id = <bob>`; call `projections.titlesOf(bob)`.
+
+```
+Expecting ["ALICE-SECRET-TITLE"] not to contain ["ALICE-SECRET-TITLE"] but found ["ALICE-SECRET-TITLE"]
+```
+
+Probe: `probe_a_repository_query_projection_returns_a_moved_ciphertext`.
+
+##### C-18 — a Spring Data interface projection returns another subject's plaintext
+
+Same mechanism, on the return type Spring Data's own documentation recommends for projections, and
+with no `@Query` at all — a derived finder is enough.
+
+*Repro.* `interface TitleView { String getTitle(); }` and
+`List<TitleView> findByOwnerId(String id)` on the same repository, same moved row:
+
+```
+Expecting ["ALICE-IFACE-SECRET"] not to contain ["ALICE-IFACE-SECRET"] but found ["ALICE-IFACE-SECRET"]
+```
+
+Probe: `probe_a_repository_interface_projection_returns_a_moved_ciphertext`.
+
+C-17 and C-18 generalise: *any* code that reaches a shredded converter while a repository call is on
+the stack is unverified. A repository fragment implementation running a projection, a
+`JdbcTemplate`/`JdbcClient` read that calls a converter by hand from inside a service that a
+repository call is nested in, and an `EntityManager` projection issued inside a custom repository
+method all inherit the same permission. Outside a repository call every one of those is refused
+(`SHRED-READ-UNSCOPED`) — I confirmed the raw-`EntityManager` and Criteria cases. The bracket is the
+only difference, and it proves nothing.
+
+##### C-19 — a converter-mapped column with no field-level `@Shredded` is encrypted but never verified
+
+`ShreddedModel.scan` finds shredded fields by walking `getDeclaredFields()` looking for `@Shredded`.
+There is no reverse check: nothing asks the metamodel which attributes are actually mapped by a
+`ShreddedConverter`. A column mapped through a class-level `@Convert(attributeName = "secret", …)`
+(equally: an `orm.xml` `<convert>`) is therefore invisible to the model — while the write path still
+encrypts it correctly, because the entity is in the model via a *different*, properly annotated
+field, so `onPreInsert` pushes the scope for the whole state array.
+
+The result is a column that is fully shredded, fully encrypted, and completely unprotected:
+`onPostLoad` never drains or checks it (it is not in `fields`), the `@Immutable` check never sees it,
+and neither does the second-level-cache or secondary-table refusal.
+
+*Repro.* Fixture `Ledger` with `@Shredded note` (declared normally) and
+`@Converts({@Convert(attributeName = "secret", converter = LedgerSecretConverter.class)})` on the
+class for a `secret` column carrying no `@Shredded`. Application starts clean. Move alice's `secret`
+ciphertext into bob's row, then `ledgers.findByOwnerId(bob)`:
+
+```
+Expecting ["ALICE-LEDGER-SECRET"] not to contain ["ALICE-LEDGER-SECRET"] but found ["ALICE-LEDGER-SECRET"]
+```
+
+Probe: `probe_a_class_level_convert_column_is_shredded_but_never_verified`.
+
+This is also the answer to the second half of the `@Immutable` question: **yes, the startup
+enforcement is bypassable.** Not by annotating a getter — a property-access entity with `@Shredded`
+on the field is refused at startup for having no field-level `@Convert`, and one without `@Shredded`
+is simply not a shredded field as far as the module is concerned — but by moving the `@Convert` to
+the class or to XML, which takes the attribute out of the model entirely rather than only out of the
+`byte[]` check.
+
+##### C-20 — a second `EntityManagerFactory` has no listener, no startup scan, and still gets the bracket
+
+`ShreddingIntegrator` is installed through a `HibernatePropertiesCustomizer` bean, which Spring Boot
+applies only to the auto-configured `EntityManagerFactory`. A second, hand-built
+`LocalContainerEntityManagerFactoryBean` — the ordinary multi-datasource shape — gets no
+`PreInsert`/`PreUpdate`/`PostLoad` listener and its entities are never scanned. The converters still
+run (they are mapping-level), and `ShreddingReadBracketCustomizer` still wraps its repositories,
+because it keys on `instanceof Repository` and knows nothing about which factory a repository belongs
+to. Every decrypt through that factory takes the bracket branch and is verified by nobody.
+
+*Repro.* Build a second EMF over the same `DataSource` and the same `Doc` entity, then read the moved
+row inside `ShreddingContext.withReadBracket(...)` — exactly what a repository bound to that factory
+would do for the caller:
+
+```
+MATRIX2 second EMF read -> ALICE-EMF2-SECRET
+```
+
+Probe: `probe_a_second_entity_manager_factory_decrypts_a_moved_ciphertext`.
+
+#### MEDIUM
+
+##### C-21 — `@Immutable` on `byte[]` silently discards an in-place mutation
+
+The module now *requires* `@org.hibernate.annotations.Immutable` on every shredded `byte[]` field and
+refuses to start without it. That annotation is what stops `AttributeConverterMutabilityPlan` from
+deep-copying the converted value — which is the whole point of the fix — but the same deep copy is
+how Hibernate builds the dirty-checking snapshot. With the copy gone, the snapshot holds *the same
+array reference* the entity holds, `PrimitiveByteArrayJavaType.areEqual` compares the array against
+itself, and an in-place mutation is never dirty.
+
+For an entity with no setter — which `Blob`, the module's own fixture, is, and which the module's
+"immutable value objects" style encourages — in-place mutation is the *only* way to change the value,
+and it is silently lost. No exception, no log line, no UPDATE.
+
+*Repro.* Save a `Blob` with payload `{1,2,3,4}`; in a transaction, load it and set
+`b.getPayload()[0] = 99`; commit; reload:
+
+```
+MATRIX @Immutable in-place mutation -> stored[0]=1
+```
+
+Probe: `probe_an_in_place_mutation_of_an_immutable_byte_array_is_persisted`.
+
+Aggravating: the startup message that mandates the annotation tells the user *"`ShreddedBytesConverter`
+already returns a fresh array from `toBytes`/`fromBytes`, so nothing shares state and the claim is
+honest."* That is the opposite of what happens. The converter returning a fresh array is exactly what
+makes the shared snapshot possible; state *is* shared, deliberately, and the user is told it is not.
+The claim must be corrected wherever it appears.
+
+##### C-22 — CIPHER-13's stale-decode bug is reproducible again, through the bracket
+
+`convertToEntityAttribute` calls `recordDecoded` on every path, including the bracket path taken by a
+repository projection — a path no `onPostLoad` will ever drain. The entry survives until the next
+`clearAll()` at the transaction boundary. Inside that transaction, the next entity load of the same
+`entity.field` whose column happens to be `NULL` drains the stale header and compares it against its
+own row.
+
+The visible symptom in this direction is a false refusal of legitimate data; the mirror direction is
+worse in principle — a stale entry naming the right subject would let a genuinely moved value pass.
+
+*Repro.* Alice's `Doc` has a title, bob's `Doc` has `title = NULL`. In one transaction, call
+`projections.titlesOf(alice)` (records `Doc.title` for alice, nothing drains it), then
+`docs.findByOwnerId(bob)`:
+
+```
+MATRIX stale-decode contamination -> SHRED-SUBJECT-MISMATCH
+```
+
+Bob's row is refused although nothing was ever done to it. Probe:
+`probe_a_projection_decode_contaminates_a_later_rows_check`.
+
+##### C-23 — supported repository return types and idiomatic DAOs are refused, with a message that misnames the cause
+
+The bracket's lifetime is the repository method call, so anything lazy outlives it.
+
+- A `Stream<Doc>`-returning repository method — a first-class Spring Data return type — fails on
+  consumption with `SHRED-READ-UNSCOPED`, correctly refusing but with a message that tells the user
+  they wrote "a scalar, `Tuple` or constructor-expression projection", which they did not.
+  Probe: `probe_a_streaming_repository_method_still_decrypts`.
+- A hand-written `@Repository` DAO holding an `@PersistenceContext EntityManager` — not a Spring Data
+  `Repository`, so never proxied — is refused for an ordinary entity query.
+- `EntityManager.find` and `getReference` are refused unless the caller wraps them in
+  `withReadBracket`. This is the intended contract, and it is fail-closed, but **`withReadBracket`
+  appears nowhere in `README.md` or `docs/`** — only in `SECURITY-NOTES.md`'s control table, and only
+  as the error code. A mandatory API contract that the user meets an exception before they meet the
+  documentation is not documented.
+
+`Page`, `Slice`, `Streamable`, `Specification`, derived finders and `findById` all work (materialised
+inside the call). A `nativeQuery` returning the raw column returns ciphertext, correctly.
+
+#### LOW
+
+- **C-24** — `ShreddingContext`'s javadoc, on the security-critical class, still names
+  `ShreddingReadBracketRepositoryFactoryCustomizer`. That class does not exist; the mechanism was
+  replaced by `ShreddingReadBracketCustomizer`. The same paragraph is the primary written explanation
+  of the read design.
+- **C-25** — `ShreddingReadBracketCustomizer` opens a bracket for `toString`, `equals` and `hashCode`
+  on every repository bean, and implements no `Ordered`, leaving its position relative to any other
+  post-processor that wraps `Repository` beans unspecified. It also replaces every repository bean
+  with a JDK `Proxy` (`jdk.proxy2.$Proxy166` here), so `AopUtils`/`Advised` unwrapping in application
+  code now sees an extra, non-Spring layer.
+
+### Ruling: QUESTIONS #16
+
+**The evidence is accepted; the mechanism is not. Prescribed instead.**
+
+Two of the three claims in #16 stand and I am not asking for them again:
+
+1. Shape (1) is genuinely unavailable. The `javap -c` reading of
+   `EntityInitializerImpl.resolveEntityState` is correct and matches what I established for
+   `onPostLoad` in the previous pass. No Hibernate hook fires before a row's own converters run. I
+   withdraw the `PreLoadEventListener` half of the CIPHER-11 fix text.
+2. Preferring a `BeanPostProcessor` over a `RepositoryFactoryCustomizer` that measurably does not
+   fire is the right instinct, honestly recorded. Noting a deviation beats shipping a comment that
+   claims a mechanism which does not run.
+
+What I do not accept is what the bracket *is*. #16 describes it as marking "this decrypt is happening
+inside something that will get `onPostLoad`'s verification afterwards; if it does not, refuse." The
+code does the first half and not the second: there is no "if it does not". `pushReadBracket()` is a
+depth counter, `inReadBracket()` returns true, the converter takes branch 2, and if `onPostLoad`
+never comes, nothing notices. C-17 through C-20 are four ways to be inside the bracket and never
+reach a verifier, and three of them return another subject's plaintext.
+
+The fix is to make the bracket owe a debt rather than grant a permission, and to close the model's
+one-directional scan:
+
+1. **`ShreddingContext`: make the deferral accountable.** `pushReadBracket()` opens a frame.
+   `recordDecoded` records into *that frame*, not into a flat map. `onPostLoad` drains the entries
+   for the row it verifies. `popReadBracket()` must find the frame **empty**; any entry still in it
+   is a decrypt that no verifier ever reached, and it throws `SHRED-READ-UNVERIFIED` from the pop —
+   after the value was computed, but before the repository method returns it to the caller, which is
+   the same "decrypt now, refuse before return" relaxation already accepted under QUESTIONS #13. This
+   closes C-17, C-18, C-20 and C-22 with one change, and it makes the class's own javadoc true.
+   Probes: the C-17, C-18, C-20 and C-22 probes above must all end in a refusal.
+2. **`ShreddedModel.scan`: add the reverse check.** After the field scan, walk the
+   `EntityManagerFactory`'s metamodel for every attribute whose JPA converter is a
+   `ShreddedConverter`, and refuse to start on any that has no matching `@Shredded` entry, naming the
+   entity and attribute and saying that `@Convert` must sit on the field beside `@Shredded`. Closes
+   C-19 and the `@Immutable` bypass in one place. Probe:
+   `probe_a_class_level_convert_column_is_shredded_but_never_verified` must fail at startup.
+3. **`ShreddingReadBracketCustomizer`: bind the bracket to the factory it belongs to,** or refuse at
+   startup when more than one `EntityManagerFactory` is present and the shredded entities are not all
+   on the instrumented one. A bracket that cannot tell which Hibernate session it is vouching for
+   cannot vouch for anything. Second half of C-20.
+4. Keep `withRead` exactly as it is. It is the one branch that actually verifies, atomically, at
+   decrypt time, and it is the model the rest should be measured against.
+
+### Fix list for Isis
+
+| # | Sev | What |
+| --- | --- | --- |
+| C-17 | HIGH | Bracket must account for undrained decodes; `popReadBracket` throws `SHRED-READ-UNVERIFIED`. Probe: `probe_a_repository_query_projection_returns_a_moved_ciphertext`. |
+| C-18 | HIGH | Same fix. Probe: `probe_a_repository_interface_projection_returns_a_moved_ciphertext`. |
+| C-19 | HIGH | `ShreddedModel.scan` reverse check against the metamodel's converters. Probe: `probe_a_class_level_convert_column_is_shredded_but_never_verified` (must fail at startup). |
+| C-20 | HIGH | Bracket bound to the instrumented `EntityManagerFactory`, or a startup refusal. Probe: `probe_a_second_entity_manager_factory_decrypts_a_moved_ciphertext`. |
+| C-21 | MEDIUM | Document the in-place-mutation trap on `@Shredded byte[]`, and correct the "nothing shares state and the claim is honest" sentence in `ShreddedModel` and anywhere it is repeated. Probe: `probe_an_in_place_mutation_of_an_immutable_byte_array_is_persisted`. |
+| C-22 | MEDIUM | Falls out of C-17's frame accounting. Probe: `probe_a_projection_decode_contaminates_a_later_rows_check`. |
+| C-23 | MEDIUM | `SHRED-READ-UNSCOPED`'s message must name the real cause; document `withReadBracket` in `README.md` and `docs/index.md` as the contract for `EntityManager` entity reads, `Stream` returns and hand-written DAOs. |
+| C-24 | LOW | `ShreddingContext` javadoc: `ShreddingReadBracketRepositoryFactoryCustomizer` → `ShreddingReadBracketCustomizer`. |
+| C-25 | LOW | Skip `Object` methods in the bracket proxy; give the `BeanPostProcessor` an explicit order. |
+
+Probe sources for all of the above are in the third-pass working set and are handed to Isis with this
+review; the fixtures they need are `DocProjectionRepository`, `DocMatrixRepository`, `Ledger`,
+`LedgerRepository` and `Dao` in `…autoconfigure.fixture`.
+
+### Attacks that found nothing
+
+- Multi-row result sets. `PostLoadEvent` fires per row in this Hibernate, so two `Doc`s in one query
+  with one carrying a moved ciphertext is refused in either ordering. `DECODED_READS`' single
+  entry per `entity.field` is not overwritten across rows.
+- `Page`, `Slice`, `Streamable`, `Specification`, derived finders, `findById`, `Optional` returns.
+- `nativeQuery` returning the shredded column: the converter is not invoked; ciphertext is returned.
+- Criteria API, entity and scalar-projection forms, off a bare `EntityManager`: both refused.
+- `@Async` at the service layer around a repository call: the whole call runs on the async thread, so
+  the thread-local bracket is correct there.
+- Reading an entity after the transaction and bracket have closed: the row was fully hydrated and
+  verified inside the bracket, so nothing decrypts late.
+- Reactive repositories: absent from the module, correctly — a thread-local bracket could not survive
+  a reactive pipeline, and nothing pretends otherwise.
+
+### Not verified
+
+- **`@Async` declared on a repository interface method itself.** Reasoned to be fail-closed (the
+  bracket would be pushed and popped on the caller thread while the work runs on the pool thread),
+  not reproduced. It is not a leak in either outcome.
+- **Spring Data JDBC.** Not on the classpath; there is no shredded read path through it to attack.
+- **Multi-node behaviour**, unchanged from the previous pass.
