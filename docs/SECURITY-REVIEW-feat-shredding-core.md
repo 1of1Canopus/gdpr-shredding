@@ -1905,3 +1905,249 @@ Probe sources are committed under `gdpr-shredding-spring-boot-starter/src/test-p
 fixtures they need in `…autoconfigure.assoc`, `…autoconfigure.composite`, `…autoconfigure.elemcoll`,
 `…autoconfigure.mapkey` and `…autoconfigure.nested`. Run them with `./mvnw -Pprobes-pending test`;
 they do not affect the default build, which is still 152 tests, 0 failures, 84.54 % / 85.45 % / 66.32 %.
+
+## Sixth pass (75af7ea): NOT MERGEABLE
+
+First review of the read path built from the design approved on 2026-09-09 with fourteen changes.
+All fourteen are in the code; the one interpretation note (item 2, Hibernate's loaded state holds
+the converted value, so it holds the placeholder and the write-back is refused with
+`SHRED-PLACEHOLDER-001`) is correct and is what `LoadedStateHostileMappingsTest` now measures.
+
+### The build, from the three JaCoCo CSVs
+
+| module | tests | fail | err | skip | line | branch |
+|---|---|---|---|---|---|---|
+| gdpr-shredding-core | 92 | 0 | 0 | 0 | **85.26 %** (1041/1221) | 61.01 % |
+| gdpr-shredding-spring-boot-starter | 88 | 0 | 0 | 0 | **84.98 %** (956/1125) | 65.92 % |
+| gdpr-shredding-sample | 17 | 0 | 0 | 0 | 66.32 % (63/95) | 33.33 % |
+| **total** | **197** | **0** | **0** | **0** | | |
+
+`./mvnw clean verify` exit 0 on a full run with Docker up; nothing skipped. The `ERROR
+o.s.boot.SpringApplication : Application run failed` lines in the log are the startup-refusal probes
+asserting their own refusals. Every `CipherProbe*` class ran unchanged: 21 classes, 54 `probe_`
+methods, all green. `src/test-pending/java` held only its two `README.md` files before this pass.
+
+**Probe diff against 7efe689 — one narrowing, and it is the subject of #21.** Two probes were
+removed. `probe_a_composite_id_shredded_entity_is_refused_at_startup` was rewritten from "the read
+returns the value" to "startup refuses", which is a strengthening (C-38's fix).
+`probe_a_stack_overflow_inside_a_read_bracket_leaves_no_frame_on_the_thread` and
+`probe_a_stack_overflow_inside_a_read_scope_leaves_no_scope_on_the_thread` are gone, replaced by
+`probe_a_decode_filed_in_a_region_an_error_unwound_past_is_never_drained_later` and
+`probe_a_region_an_error_unwound_past_yields_no_plaintext_to_anybody`. The read scope no longer
+exists, so that half is moot. The other half is a genuine narrowing — "no read state survives" was
+asserted and is now not — and it is exactly what QUESTIONS #21 asks me to rule on. Ruling below. The
+write-scope probe kept its strict assertion, which is right.
+
+### Findings
+
+**S-1 (HIGH) — `hibernate.jdbc.batch_size` silently switches off the insert-side post-hoc header
+check, and personal data is then committed in the clear.**
+`ShreddingEventListener.refuseIfStoredHeadersDisagree` is design item 14's insert half and the one
+control that does not depend on any of the module's own bookkeeping being right: it reads the row
+back and compares every stored header against the scope the row was written under.
+`readStoredShreddedColumns` returns `null` when the `SELECT` finds no row, and the check then
+returns without checking anything. With `hibernate.jdbc.batch_size` set and an id strategy that
+permits insert batching, the `INSERT` is still in the JDBC batch when `onPostInsert` fires, the
+`SELECT` finds nothing, and the check does not happen — for every row of every batch, with no WARN,
+no error and no mention in `SECURITY-NOTES.md`, `README.md` or `QUESTIONS.md`. `IDENTITY` is the one
+strategy that cannot batch, so the path that is probed today is the path that is safe.
+Repro: `probe_the_post_hoc_header_check_still_runs_when_inserts_are_batched`
+(`CipherProbeBatchedInsertCheckTest`), `batch_size=10`, a sequence id, and the mapping this check is
+currently the only thing that catches — an `@Access(AccessType.PROPERTY)` shredded field, whose
+column Hibernate writes unconverted (S-5). Without batching the flush aborts with
+`SHRED-FORMAT-001` and nothing is committed; with batching the probe prints
+`BATCHED INSERT -> COMMITTED; stored BATCHED-SECRET-1|BATCHED-SECRET-2|BATCHED-SECRET-3` — three
+rows of plaintext, committed.
+The update side is weakened the same way and I did not build a second probe for it: under batching
+the `UPDATE` is also still in the batch, so `refuseIfStoredHeadersDisagree` on update reads the
+pre-update row and passes vacuously. Reasoned, not reproduced.
+**DESIGN STOP for Thor.** The property: *for every inserted and every updated shredded row, what
+actually reached the database is compared against the scope it was written under, before the
+transaction commits* — and the paths it must cover, each verified or refused by design: batched
+insert, batched update, `IDENTITY` (unbatchable), assigned id, sequence id, `saveAll`,
+`StatelessSession`, a flush inside a `@Transactional` method that later rolls back, and a bulk JPQL
+update, which fires no event at all. Do not patch this by moving the `SELECT`; a check that runs
+somewhere else in the flush is a mechanism, and mechanisms in fix lists are what produced rounds two
+to four on this module. One page, I review it before any code. Refusing `hibernate.jdbc.batch_size`
+at startup for an application with `@Shredded` entities is a complete answer to the property and is
+not a mechanism; if that is the answer, say so and it is a two-line change plus a documented
+limitation.
+
+**S-2 (MEDIUM, correction) — a second `@Shredded` field's declared tenant is silently ignored, and
+the field survives the erasure of the tenant it names.**
+`scopeFor` and `onPostLoad` both take the tenant from `fields.get(0).tenant()` — the entity's first
+shredded field — and apply it to every shredded field of that entity. `resolveSubject` cross-checks
+that the fields agree about the *subject* and refuses when they do not; nothing, at startup or at
+runtime, cross-checks the tenant. A data key is per `(tenant, subject)`, so the second field is
+encrypted into a different tenant's erasure scope: an erasure carried out for the tenant it declares
+destroys a key it never used, records success in the chain, and leaves the field readable. The
+annotation is per field, which is what invites the mapping.
+Repro: `probe_a_second_shredded_field_is_bound_to_the_tenant_it_declares`
+(`CipherProbeTenantExpressionTest`) — `Dossier.memo`, declared `tenant="#{'org-b'}"`, is stored bound
+to `org-a`.
+Fix: `ShreddedModel.scan`, in the same loop that already refuses a `@SecondaryTable` split, refuses
+at startup when the `@Shredded` fields of one entity do not all declare the same tenant expression
+(all blank, or all the same string), naming the entity and both expressions.
+
+**S-3 (MEDIUM, correction) — a value-equal copy of the placeholder defeats both write-back checks
+and overwrites the live ciphertext with the marker.**
+Item 2's whole reason for a non-null placeholder is that the write-back check turns "an entity whose
+install never ran, flushed anyway" into `SHRED-PLACEHOLDER-001` instead of a destroyed column. Item 3
+then made the comparison reference identity, and `FrameworkMatrixTest.a_placeholder_is_never_re_encrypted`
+asserts that an equal-but-distinct instance is deliberately not recognised. That is the hole: a
+refused load leaves the entity holding the marker and detaches it, and everything an application then
+does to a detached entity — a DTO round trip through Jackson, `new String(...)`, `trim()`, a
+defensive `clone()` of a `byte[]`, a normalising setter — produces a value-equal, reference-distinct
+copy. Neither `ShreddedConverter.convertToDatabaseColumn` nor `refusePlaceholdersInState` recognises
+it, so the marker is encrypted straight over the live ciphertext.
+Repro: `probe_a_value_equal_copy_of_the_placeholder_is_refused_on_write_back`
+(`CipherProbePlaceholderCopyTest`) prints
+`PLACEHOLDER COPY -> WRITTEN; the row now reads as [SHRED-PLACEHOLDER-c81f91…]`. The original value
+is gone, the write was not refused, and the row reads back cleanly afterwards, so nothing downstream
+notices either.
+Value equality does not reopen item 3. The threat there is an attacker holding `UPDATE` on the table,
+and to make a read return the marker they would have to produce a ciphertext of it under the
+subject's data key, which no amount of `UPDATE` gives them; the erased-value marker in the same
+converter is already compared with `equals` for exactly this reason.
+Fix: `Placeholders.isPlaceholder` matches by value as well as by identity — `String.equals`,
+`Arrays.equals` for the `byte[]`, `equals` for the date and the decimal — and
+`FrameworkMatrixTest.a_placeholder_is_never_re_encrypted`'s three `isFalse()` assertions on
+equal-but-distinct instances are inverted, since they currently assert the weaker property.
+
+**S-4 (LOW, correction) — item 4's owner-token discard is unreachable, and an ownerless region
+serves a stale value rather than only costing a refusal.**
+`recordDecoded` files into `stack.peek()` and stamps the entry with *that same region's* token;
+`drain` reads `stack.peek()` and compares against *that same region's* token. `pending.ownerToken()
+!= region.token` is unsatisfiable: the branch cannot fire, and the mechanism item 4 asked for does
+not exist in the built code. `CipherProbeBracketUnwindTest.probe_a_decode_filed_in_a_region_an_error_unwound_past_is_never_drained_later`
+passes because it opens a fresh region first and drains an empty one — it exercises the region
+*stack*, never the token.
+Second half: `drain` takes `entries.remove(0)`, the oldest entry under the key. With an ownerless
+region on the deque holding an earlier decode of the same `(entity, field, tenant, subject, row)`,
+the value installed is the stale plaintext, not the one the current read took out of the column, and
+every check downstream agrees with it because row, subject, tenant and field all match. That is a
+value, not only a lost refusal.
+Repro: `CipherProbeRegionResidueTest`, both methods; R2 prints `R2 installed value -> STALE-SECRET`.
+Fix: (a) `drain` takes the most recent entry, not the oldest — strictly better in every case,
+because two decodes of one row inside one live region are the same value anyway; (b) remove
+`Pending.ownerToken` and the branch, or make the check real, and correct the claim where it is made:
+`ShreddingContext.drain`'s javadoc, `ShreddingContext`'s class javadoc, `CipherProbeBracketUnwindTest`'s
+javadoc, and QUESTIONS #21 and #24, all of which currently rest on it.
+
+**S-5 (LOW, correction) — an `@Access(AccessType.PROPERTY)` shredded mapping starts, with no
+converter on the column at all.**
+Property access moves the mapping to the getters and JPA then ignores the annotations on the fields,
+the `@Convert` among them. The startup scan reads `@Shredded` and `@Convert` off the field and
+accepts; the C-19 reverse check walks the metamodel for attributes whose *resolved* converter is a
+`ShreddedConverter` and finds none, because under property access there is none. The application
+starts with a `@Shredded` column that is a plain varchar. What saves it today is the post-hoc header
+check — the first insert writes plaintext, the read-back cannot decode it, the flush aborts with
+`SHRED-FORMAT-001` — which is fail-closed but is discovered on the first write in production, with a
+message about the SH1 magic that names neither the field nor the mapping, and which S-1 removes
+entirely under batching.
+Repro: `probe_a_property_access_shredded_field_is_refused_at_startup`
+(`CipherProbePropertyAccessTest`) — prints `PROPERTY-ACCESS -> STARTED (nothing refused it)`.
+Fix: `ShreddedModel.scan` adds the forward direction of the C-19 reverse check — for every
+`@Shredded` field, the metamodel attribute of that name must resolve to that field's declared
+`ShreddedConverter` — and refuses at startup naming the entity and the field, like the composite id,
+the `@SecondaryTable` split and the `byte[]` without `@Immutable`.
+
+**S-6 (LOW, correction) — the integrator is installed with an unconditional `put`, and nothing ever
+verifies that this module's listener is registered, or first.**
+`ShreddingAutoConfiguration.shreddingHibernateCustomizer` does
+`properties.put(JpaSettings.INTEGRATOR_PROVIDER, …)`. That key holds one value: a second
+`HibernatePropertiesCustomizer` — a library that ships its own integrator, or an application that
+adds one — replaces it rather than adding to it, and whichever customizer Spring applies last
+decides. Measured on this branch: the auto-configuration's customizer is applied last, so this
+module wins and the *other* library's integrator is silently discarded, an application's own
+auditing or security integrator included. Item 8's property ("no `@PostLoad` callback ever sees the
+placeholder") also holds only while nobody prepends `POST_LOAD` after us; an integrator discovered
+through `META-INF/services`, which Hibernate registers after the provided ones, would. I did not
+reproduce that half — it needs a service file on the module's whole test classpath — and record it
+as reasoned, not proven. Both halves are the same missing check.
+Repro: `probe_a_second_integrator_cannot_displace_the_verifier` (`CipherProbeSecondIntegratorTest`)
+prints `SECOND INTEGRATOR -> READ NOSY-SECRET; observed []`.
+Fix: compose with any `IntegratorProvider` already in the map instead of replacing it, and add to
+`ShreddingStartupCheck` an assertion, made after the `SessionFactory` is built, that this listener is
+registered on `PRE_INSERT`, `PRE_UPDATE`, `POST_INSERT`, `POST_UPDATE` and `POST_LOAD` and is first
+in the `POST_LOAD` group — refusing startup, naming the listener that displaced it, otherwise.
+
+### Rulings on QUESTIONS #21–#24
+
+**#21 — accepted as a residual, with the boundary corrected and the stated cause withdrawn.** Three
+things. First, the stated cause is not reproducible: I measured the `StackOverflowError` path at
+**0/200 nested and 0/200 single-level**, because `ShreddingContext.unwindTo` pops every region above
+the token it is given, so the outermost surviving `finally` reclaims all the inner ones. An `Error`
+does not, on this code, leave a region behind. Second, the state is nevertheless reachable, by the
+public unpaired `openRegion()` — it has to be public for `ShreddingReadBracketCustomizer`, so
+document it as internal rather than change it. Third, the boundary as written — "a leaked region can
+cost a refusal, never a value" — is **wrong**, and S-4 is the correction: `entries.remove(0)` serves
+a stale value of the same row. Take S-4's two fixes and restate #21 as: *an ownerless region costs a
+refusal that should have been raised; with S-4(a) in place it can never serve a value other than
+this row's own, current one.* No `StackWalker`, no liveness signal, no new mechanism.
+
+**#22 — leave it, agreed.** The per-decrypt key-state read is control 7, it predates this design, and
+memoising it caches *authority*, which is the one thing this design took away from ambient state. I
+will not trade the bounded cross-node erasure window for 199 statements. One correction: state the
+cost — one `SELECT` per decrypt, 200 per 200-row page — in `SECURITY-NOTES.md` beside control 7, not
+only in QUESTIONS, so the next person to profile a page does not remove it as an oversight.
+
+**#23 — both accepted.** I declined to refuse `IDENTITY` and I do not get to complain about the price.
+Two ticks of control 3's counter halves the interval between rotations on an `IDENTITY`-heavy
+workload; rotation is a rotation, not a refusal, and the counter is 2^32. The intermediate in the WAL
+is a ciphertext of the value under the subject's own key, inside the residual `SECURITY-NOTES.md`
+already states for backups, PITR, WAL and replicas, and bound under tag `0x7f` to a value no real
+identifier encodes, so it verifies against no row on any reader. Both are documented at
+`SECURITY-NOTES.md` line 344 and line 112 respectively; verified, nothing further owed.
+
+**#24 — keep the strict assertion; the swap is refused.** 0/200 is the bar and it passes. Lowering it
+to an unconsumability assertion would have hidden the 154/200 `removeIf` regression, which is the
+single best piece of evidence in this pass that the strict form earns its keep. Keep *both*: the
+strict one and `probe_a_leaked_write_scope_is_dropped_by_the_next_bind_rather_than_consumed`, which
+already exists. If it flakes in CI, bring me the run — a flake is data, not a reason to weaken an
+assertion.
+
+### What I attacked and found sound
+
+The placeholder, forged three ways: written into the column as its own rendering
+(`SHRED-FORMAT-001`, before anything else happens — the module refuses any column that is not SH1
+bytes, so there is no path from `UPDATE` to a value that reads back as a marker), in a JSON column
+(the same, the JSON converter is the string converter on the wire), and as a `byte[]` (the same).
+`Placeholders.BYTES` is a mutable `public static final byte[]`; an application that zeroes it changes
+the rendering and nothing else, because every comparison is by reference — attempted, no consequence
+found, not a finding. Serialising a placeholder with Jackson: an entity that completes a load never
+holds one (verify-then-install, item 9), and a load that does not complete throws before its result
+reaches a serialiser. The region owner token across threads: regions and write scopes are
+`ThreadLocal` and a token from another thread names nothing on this one; a replayed `closeRegion`
+token throws `SHRED-READ-UNVERIFIED`, a replayed `popWrite` token is a no-op by design, and a
+replayed `discardRegion` token empties the thread's region stack, after which the real close fails
+closed. `RowId`: the one-byte type tag keeps `Long 1` and `String "1"` apart, the encoding is the
+column value and not `toString()`, a UUID and a sequence id are distinct encodings, a row copied with
+its rowId into another table fails on the entity name in the AAD, and an `IDENTITY` intermediate
+captured mid-transaction carries tag `0x7f` and verifies against no row
+(`an_identity_insert_intermediate_is_bound_to_no_row`). `refuseIfSubjectMoved` on insert: it does not
+run there and does not need to — `pushBind` drops residue and the post-hoc check covers the insert —
+except under S-1, which is why S-1 is the HIGH. `StatelessSession` (`a_stateless_session_read_is_refused`),
+`merge` and `refresh` (`a_merge_and_a_refresh_are_verified_like_any_other_load`), the `Set` keyed on a
+shredded field (`a_set_keyed_on_a_shredded_field_is_unreachable_after_the_install`), the `@PostLoad`
+ordering against a user callback (`a_user_post_load_callback_never_sees_a_placeholder`), the load-then-flush
+no-rewrite (`a_load_then_flush_never_rewrites_a_shredded_column`), `OptimisticLockType.ALL`,
+`@SelectBeforeUpdate`, `@NaturalId` and the single-column `@EmbeddedId` (all refused at startup, in
+`LoadedStateHostileMappingsTest`): each ran and each holds. The non-nesting bind rule is right and its
+one rough edge is benign — `pushBind` drops a legitimately nested `ShreddingContext.with(...)` and
+WARNs, after which the outer caller fails closed with `SHRED-CONTEXT-001` rather than writing under a
+scope it no longer owns.
+
+### Verdict
+
+**NOT MERGEABLE.** S-1 is HIGH: a standard Hibernate performance property silently removes design
+item 14's insert-side control, and the probe commits three rows of plaintext personal data to prove
+it. One design stop (S-1) for Thor, five corrections (S-2 to S-6) that can land in parallel; S-2 and
+S-3 are the two that cost data — a field that survives its own tenant's erasure, and a live ciphertext
+overwritten with a marker.
+
+Probe sources are committed under `gdpr-shredding-spring-boot-starter/src/test-pending/java`, with
+their fixtures in `…autoconfigure.propaccess`, `…autoconfigure.propseq` and `…autoconfigure.twotenant`.
+Run them with `./mvnw -Pprobes-pending test`: six classes, seven `probe_` methods, all seven failing
+on 75af7ea. They do not affect the default build, which is still 197 tests, 0 failures, 85.26 % /
+84.98 % / 66.32 %.
