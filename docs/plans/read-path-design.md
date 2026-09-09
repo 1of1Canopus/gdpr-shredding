@@ -259,7 +259,18 @@ otherwise.
 the placeholder (by identity) had a converter run on it and therefore owes an entry; a field holding
 anything else had a `null` column and owes nothing. No `SELECT`.
 
-**200-row list: 1 statement, 2 with a `Page` count**, down from 401.
+**200-row list: 1 statement against the entity's table, 2 with a `Page` count** — down from 201
+(200 per-row re-reads plus the list query). Measured, not asserted: Cipher's P3 counts
+`prepareStatement` on the real `DataSource` and reports 0 per-row re-reads.
+
+What P3 also shows, and revision 1 got wrong by claiming "1 statement" flat: the total is 201, and
+the other 200 are `FieldCipher.decrypt`'s per-decrypt key-state check against
+`shredding_data_key`. That is control 7 — the data-key cache holds key *material*, never
+*authority*, so every decrypt re-reads the row that says whether the key may still be used at all —
+and it predates this design; the fifth pass measured 401 because the 200 per-row entity re-reads
+sat on top of it. Memoising the key state per transaction would remove it, but caching authority is
+a security decision, not a performance one, and it is recorded in `QUESTIONS.md` for Cipher rather
+than taken here.
 
 The write path pays more, not less: one `SELECT` before an update (`refuseIfSubjectMoved`, now on
 every update) and one `SELECT` after every insert and every update (the post-hoc header check of

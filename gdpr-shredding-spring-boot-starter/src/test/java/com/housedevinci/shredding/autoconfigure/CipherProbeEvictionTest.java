@@ -130,8 +130,7 @@ class CipherProbeEvictionTest {
             } catch (RuntimeException e) {
               third = "REFUSED " + code(e);
             }
-            captured.set(
-                "first=[" + first + "] second=[" + second + "] third=[" + third + "]");
+            captured.set("first=[" + first + "] second=[" + second + "] third=[" + third + "]");
           });
       outcome = captured.get();
     } catch (RuntimeException e) {

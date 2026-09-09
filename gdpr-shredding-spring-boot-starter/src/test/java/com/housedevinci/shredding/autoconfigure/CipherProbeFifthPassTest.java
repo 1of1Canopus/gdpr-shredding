@@ -83,8 +83,8 @@ class CipherProbeFifthPassTest {
    *
    * <p>This is exactly {@code CipherProbeFrameTest} F3's shape - an unverified projection decode
    * inside {@code withReadBracket} that nothing drains, which F3 asserts must be refused with
-   * {@code SHRED-READ-UNVERIFIED} - with one addition: a write inside the same transaction, and
-   * the transaction committing inside the bracket rather than outside it.
+   * {@code SHRED-READ-UNVERIFIED} - with one addition: a write inside the same transaction, and the
+   * transaction committing inside the bracket rather than outside it.
    */
   @Test
   void probe_a_transaction_committing_inside_a_read_bracket_does_not_erase_its_debt() {
@@ -217,11 +217,12 @@ class CipherProbeFifthPassTest {
 
   /**
    * Counts {@code prepareStatement} calls on the application's real {@code DataSource}. Registered
-   * as a {@code BeanPostProcessor} so it wraps the auto-configured, Testcontainers-backed
-   * {@code DataSource} rather than replacing it - {@code session.doReturningWork}, which is how
-   * {@code readStoredShreddedColumns} issues its query, goes through the very same connection.
+   * as a {@code BeanPostProcessor} so it wraps the auto-configured, Testcontainers-backed {@code
+   * DataSource} rather than replacing it - {@code session.doReturningWork}, which is how {@code
+   * readStoredShreddedColumns} issues its query, goes through the very same connection.
    */
-  static final class StatementCounter implements org.springframework.beans.factory.config.BeanPostProcessor {
+  static final class StatementCounter
+      implements org.springframework.beans.factory.config.BeanPostProcessor {
     static final java.util.concurrent.atomic.AtomicInteger ALL =
         new java.util.concurrent.atomic.AtomicInteger();
     static final java.util.concurrent.atomic.AtomicInteger BY_ID =
@@ -304,8 +305,7 @@ class CipherProbeFifthPassTest {
       }
     }
     try (var c = dataSource.getConnection();
-        var ps =
-            c.prepareStatement("UPDATE " + table + " SET " + column + " = ? WHERE id = ?")) {
+        var ps = c.prepareStatement("UPDATE " + table + " SET " + column + " = ? WHERE id = ?")) {
       ps.setBytes(1, value);
       ps.setLong(2, toId);
       ps.executeUpdate();
