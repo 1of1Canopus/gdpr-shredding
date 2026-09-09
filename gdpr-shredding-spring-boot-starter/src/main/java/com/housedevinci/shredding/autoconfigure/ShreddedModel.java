@@ -315,48 +315,96 @@ public final class ShreddedModel {
           // @Entity name), the same convention ShreddingEventListener.entityName() uses on the
           // write path - matched here so the two never disagree about which entity a key names.
           String entityName = simpleEntityName(persister.getEntityName());
-          persister
-              .getAttributeMappings()
-              .forEach(
-                  attributeMapping -> {
-                    if (!(attributeMapping
-                        instanceof org.hibernate.metamodel.mapping.BasicValuedModelPart basic)) {
-                      return;
-                    }
-                    var converter = basic.getSingleJdbcMapping().getValueConverter();
-                    if (!(converter
-                        instanceof
-                        org.hibernate.type.descriptor.converter.spi.JpaAttributeConverter<?, ?>
-                            jpaConverter)) {
-                      return;
-                    }
-                    Object bean = jpaConverter.getConverterBean().getBeanInstance();
-                    if (!(bean instanceof ShreddedConverter<?> shreddedConverter)) {
-                      return;
-                    }
-                    String attributeName = attributeMapping.getAttributeName();
-                    String key = entityName + "." + attributeName;
-                    if (!known.contains(key)) {
-                      throw config(
-                          "the attribute "
-                              + key
-                              + " is mapped by "
-                              + shreddedConverter.getClass().getName()
-                              + " (a ShreddedConverter for "
-                              + shreddedConverter.entity()
-                              + "."
-                              + shreddedConverter.field()
-                              + "), but has no field-level @Shredded annotation of its own. This"
-                              + " happens when @Convert is declared at the class level (@Converts"
-                              + " on the entity) or through an orm.xml mapping instead of on the"
-                              + " field: the column is fully encrypted by the write path but"
-                              + " invisible to this module's read verification, the @Immutable"
-                              + " check and the second-level-cache refusal, all of which only ever"
-                              + " look at field-level @Shredded. Move @Convert onto the field,"
-                              + " beside @Shredded.");
-                    }
-                  });
+          scanAttributeMappings(entityName, entityName, persister.getAttributeMappings(), known);
         });
+  }
+
+  /**
+   * C-29: recurses into an {@code @Embeddable} component's own attributes ({@code
+   * EmbeddableValuedModelPart}) and into an {@code @ElementCollection}'s element descriptor ({@code
+   * PluralAttributeMapping}), which itself may be basic-valued or, for an element collection of
+   * embeddables, embeddable-valued in turn. The previous version of this scan looked only at the
+   * entity persister's own top-level {@code BasicValuedModelPart} attributes, so a
+   * {@code @Shredded} field declared inside either shape - invisible to the forward field scan too,
+   * which walks the entity class and its superclasses only ({@link #allFields}) - was never
+   * inspected in either direction: fully encrypted on write, never checked on read.
+   *
+   * @param path the dotted path built so far ({@code EntityName}, {@code EntityName.embedded}, ...
+   *     - {@code known} only ever contains top-level {@code EntityName.field} entries, so a nested
+   *     path can never match and a {@code ShreddedConverter} found at one always refuses, which is
+   *     exactly the "not supported inside a component or an element collection" outcome
+   */
+  private static void scanAttributeMappings(
+      String entityName,
+      String path,
+      org.hibernate.metamodel.mapping.AttributeMappingsList mappings,
+      Set<String> known) {
+    mappings.forEach(
+        attributeMapping ->
+            scanAttribute(
+                entityName,
+                path + "." + attributeMapping.getAttributeName(),
+                attributeMapping,
+                known));
+  }
+
+  private static void scanAttribute(
+      String entityName,
+      String path,
+      org.hibernate.metamodel.mapping.ModelPart part,
+      Set<String> known) {
+    if (part instanceof org.hibernate.metamodel.mapping.BasicValuedModelPart basic) {
+      refuseIfConverterUnmodelled(entityName, path, basic, known);
+      return;
+    }
+    if (part instanceof org.hibernate.metamodel.mapping.EmbeddableValuedModelPart embeddable) {
+      scanAttributeMappings(
+          entityName, path, embeddable.getEmbeddableTypeDescriptor().getAttributeMappings(), known);
+      return;
+    }
+    if (part instanceof org.hibernate.metamodel.mapping.PluralAttributeMapping plural) {
+      // The element descriptor is itself basic-valued (a @Convert on a scalar element type) or
+      // embeddable-valued (an @ElementCollection of an @Embeddable) - either way it is one more
+      // ModelPart to walk the same way, just one segment deeper.
+      scanAttribute(entityName, path + "[]", plural.getElementDescriptor(), known);
+    }
+  }
+
+  private static void refuseIfConverterUnmodelled(
+      String entityName,
+      String path,
+      org.hibernate.metamodel.mapping.BasicValuedModelPart basic,
+      Set<String> known) {
+    var converter = basic.getSingleJdbcMapping().getValueConverter();
+    if (!(converter
+        instanceof
+        org.hibernate.type.descriptor.converter.spi.JpaAttributeConverter<?, ?> jpaConverter)) {
+      return;
+    }
+    Object bean = jpaConverter.getConverterBean().getBeanInstance();
+    if (!(bean instanceof ShreddedConverter<?> shreddedConverter)) {
+      return;
+    }
+    if (!known.contains(path)) {
+      throw config(
+          "the attribute "
+              + path
+              + " is mapped by "
+              + shreddedConverter.getClass().getName()
+              + " (a ShreddedConverter for "
+              + shreddedConverter.entity()
+              + "."
+              + shreddedConverter.field()
+              + "), but has no field-level @Shredded annotation of its own. This happens when"
+              + " @Convert is declared at the class level (@Converts on the entity), through an"
+              + " orm.xml mapping, or on a field nested inside an @Embeddable or an"
+              + " @ElementCollection of embeddables - none of which the field-level scan looks"
+              + " inside. A @Shredded field nested inside a component or an element collection is"
+              + " not supported: the subject expression, the @Immutable check, the"
+              + " secondary-table check and onPostLoad's field list are all built from the"
+              + " entity's own top-level declared fields. Move the field - @Shredded, @Convert and"
+              + " all - onto the entity itself.");
+    }
   }
 
   /**
