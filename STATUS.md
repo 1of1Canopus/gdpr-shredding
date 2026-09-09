@@ -6,6 +6,13 @@ Re-verification (2026-09-09): Cipher's `## Re-verification (96713f9)` pass found
 and 4 LOW findings against the first review's fix. All ten closed by Isis; see the CHANGELOG's
 "Fixed (re-verification at `96713f9`)" entry and QUESTIONS.md #16.
 
+Third pass (2026-09-09): Cipher's `## Third pass (8095d2c)` pass found the read bracket was a
+permission, not a proof - 4 HIGH (C-17/C-18/C-19/C-20), 3 MEDIUM (C-21/C-22/C-23), 2 LOW (C-24/C-25).
+All nine closed by Isis; see the CHANGELOG's "Fixed (third pass at `8095d2c`)" entry and
+QUESTIONS.md #17-#18 for the two items where the prescribed shape was adjusted (C-20's coarse
+startup check ships without its own dedicated probe; C-21's probe was rewritten to assert the true,
+documented - not the literally-named - outcome).
+
 Branch `feat/shredding-core`. `main` holds the plan commit only.
 Full `./mvnw -B clean verify` green with Docker up.
 
@@ -27,15 +34,16 @@ Full `./mvnw -B clean verify` green with Docker up.
 | 12 | CI green-locally / red-on-CI bug found and fixed (see below) | done |
 | 13 | Cipher's first PR review (2026-09-08): 2 HIGH, 8 MEDIUM, 10 LOW/INFO, all closed | done |
 | 14 | Cipher's re-verification (2026-09-09): 3 HIGH (CIPHER-11/12/14), 3 MEDIUM (CIPHER-13/15/16), 4 LOW (L11-L14), all closed | done |
+| 15 | Cipher's third pass (2026-09-09): 4 HIGH (C-17/18/19/20), 3 MEDIUM (C-21/22/23), 2 LOW (C-24/25), all closed | done |
 
 ## Tests
 
 | Module | Tests | Notes |
 |---|---|---|
 | `gdpr-shredding-core` | 77 | includes the CIPHER-01/02/03/04/05/10/15 probes and the Testcontainers PostgreSQL suite |
-| `gdpr-shredding-spring-boot-starter` | 40 | includes `ShreddingIntegrationTest` (real Hibernate/Testcontainers coverage of the event listener, the context stack and the auto-configuration bean graph - now also CIPHER-11/12/13/14/16's `Doc`/`Blob`/`BlobSeq` fixtures) and `CipherProbeSpelTest`'s L12 probe |
+| `gdpr-shredding-spring-boot-starter` | 50 | includes `ShreddingIntegrationTest` (real Hibernate/Testcontainers coverage of the event listener, the context stack and the auto-configuration bean graph), `CipherProbeSpelTest`'s L12 probe, and the third pass's `CipherProbeReadScopeTest` (C-17/18/22/23), `CipherProbeReverseScanTest` (C-19, isolated context), `CipherProbeMatrixTest`/`CipherProbeMatrix2Test` (the read-path and `@Immutable` sweeps, C-20/21) |
 | `gdpr-shredding-sample` | 17 | includes the CIPHER-01 (moved-blob), QUESTIONS #4 (detached-merge, now wrapped in `ShreddingContext.withReadBracket`), CIPHER-08 (stale-scope), the live-actuator and the log-scan probes |
-| **total** | **134** | |
+| **total** | **144** | |
 
 Nothing is skipped and nothing is `@Disabled`.
 

@@ -17,6 +17,63 @@ All notable changes to this project. The format follows
   licence scan by `groupId` (`excludedGroups`), not by licence name, since
   `com.housedevinci:gdpr-shredding-core` no longer matches the third-party allowlist.
 
+### Fixed (third pass at `8095d2c`)
+
+Cipher's third-pass review (`docs/SECURITY-REVIEW-feat-shredding-core.md`, `## Third pass
+(8095d2c)`), 2026-09-09. Four HIGH, three MEDIUM, two LOW, all closed.
+
+- **C-17 / C-18 (HIGH)** - a repository `@Query` scalar projection, and the Spring Data interface
+  projection shape its own documentation recommends, both reached a `@Shredded` converter with the
+  read bracket open and returned a moved ciphertext: the bracket was an unconditional permission
+  granted by the caller's identity ("inside a repository call"), not a proof that anything would
+  verify it, and a scalar/interface projection triggers no `onPostLoad` at all. `ShreddingContext`'s
+  read bracket now owes a debt instead: `pushReadBracket()` opens a frame, `recordDecoded` files
+  into it, and `popReadBracket()` throws `SHRED-READ-UNVERIFIED` - naming the field, never the
+  plaintext - if anything in the frame was never drained by a verifier, before
+  `ShreddingReadBracketCustomizer`'s proxy hands the repository method's result back to its caller.
+- **C-19 (HIGH)** - `ShreddedModel.scan`'s forward pass only ever looked at field-level `@Shredded`;
+  a column mapped through a class-level `@Convert(attributeName = ...)` (or an `orm.xml` mapping)
+  was fully encrypted by the write path - the entity was in the model via a different, properly
+  annotated field - and completely invisible to read verification, the `@Immutable` check and the
+  second-level-cache refusal. `ShreddedModel.scan` now additionally walks the Hibernate runtime
+  metamodel for every attribute whose resolved JPA converter is a `ShreddedConverter`, by whatever
+  route, and refuses startup on any with no matching field-level `@Shredded` entry, naming the
+  entity and attribute.
+- **C-20 (HIGH)** - a repository bound to a second, hand-built `EntityManagerFactory` with no
+  `ShreddingIntegrator` registered against it got the read bracket same as any other, and nothing
+  ever verified its decrypts (no `onPostLoad` listener exists on that session at all). Closed
+  primarily by C-17/C-18's frame accounting: a decrypt on an uninstrumented factory's session is
+  recorded into the bracket's frame and nothing drains it, so the bracket refuses on its own, by
+  construction. `ShreddingReadBracketCustomizer` additionally refuses startup outright when more
+  than one `EntityManagerFactory` bean is present in the context, as defence in depth; see
+  QUESTIONS.md C-20 for why that half ships without its own dedicated integration probe.
+- **C-22 (MEDIUM)** - the bracket's decode-recording map was flat and bracket-wide, not per call:
+  a projection's undrained decode could survive to be mistaken for a later, unrelated repository
+  call's row inside the same transaction. Falls out of C-17's frame accounting: each repository call
+  gets its own frame, checked and discarded when that call's bracket closes, so nothing can leak
+  into a later call's frame.
+- **C-21 (MEDIUM)** - the startup message mandating `@Immutable` on a `@Shredded byte[]` field
+  claimed "nothing shares state and the claim is honest." The opposite is true: `@Immutable` is what
+  stops Hibernate's dirty-checking snapshot from being a deep copy, and that snapshot is exactly what
+  an in-place mutation is compared against - with no copy, the mutation is invisible to Hibernate and
+  silently never persisted. The message, `ShreddedModel`'s javadoc, `README.md`, `docs/index.md` and
+  `SECURITY-NOTES.md` now say so; this is a documentation fix, not a behaviour change (making the
+  mutation persist would mean deep-copying the array again, reopening CIPHER-16). See QUESTIONS.md
+  C-21.
+- **C-23 (MEDIUM)** - `SHRED-READ-UNSCOPED`'s message named only "a scalar, `Tuple` or
+  constructor-expression projection", which is not what a `Stream<T>`-returning repository method or
+  a hand-written DAO's `EntityManager` use actually are; both are refused correctly, just misnamed.
+  The message now names all of the real causes and points to `withReadBracket`, which is now
+  documented in `README.md` and `docs/index.md` ("How the read path verifies") with an example for
+  each of the three ways a read is verified.
+- **C-24 (LOW)** - `ShreddingContext`'s javadoc, on the security-critical class, named
+  `ShreddingReadBracketRepositoryFactoryCustomizer`, a class that does not exist; corrected to
+  `ShreddingReadBracketCustomizer`.
+- **C-25 (LOW)** - `ShreddingReadBracketCustomizer`'s proxy opened a bracket for `toString`,
+  `equals` and `hashCode` too, for no reason (none of them reach a shredded converter); it now skips
+  every `Object` method. The `BeanPostProcessor` now also implements `Ordered`
+  (`Ordered.LOWEST_PRECEDENCE`, documented in a comment).
+
 ### Fixed (re-verification at `96713f9`)
 
 Cipher's re-verification (`docs/SECURITY-REVIEW-feat-shredding-core.md`, `## Re-verification

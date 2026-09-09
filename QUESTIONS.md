@@ -384,3 +384,75 @@ An ENISA pseudonymisation report is the obvious fourth source, and I have seen i
 this technique. **Odin could not verify a section**, so it is deliberately not in `docs/index.md`:
 an unverified citation is worse than none. Left here so it is not lost. Someone with the report open
 needs to give a title, year and section before it goes into the docs.
+
+## #17 C-20 second half: the coarse multi-`EntityManagerFactory` startup refusal ships without its own integration probe (taken; a deviation, proven)
+
+Cipher's fix text (`## Third pass (8095d2c)`, item 3) offered two shapes for closing C-20's second
+half: "bind the bracket and the startup scan to the instrumented `EntityManagerFactory`; a
+repository bound to a non-instrumented EMF is refused at startup (`SHRED-EMF-UNINSTRUMENTED`) rather
+than bracketed" - or, explicitly, "refuse at startup when more than one `EntityManagerFactory` is
+present and the shredded entities are not all on the instrumented one."
+
+**The primary control does not depend on either shape.** C-17/C-18's frame accounting alone already
+closes the demonstrated attack: a decrypt reached through `ShreddingContext.withReadBracket(...)`
+against a second, hand-built `EntityManagerFactory` (the exact repro in
+`probe_a_second_entity_manager_factory_decrypts_a_moved_ciphertext`) is recorded into the bracket's
+frame, nothing on that uninstrumented session's Hibernate event registry ever drains it, and
+`popReadBracket()` refuses on its own, by construction, with no knowledge of factories at all. This
+is verified and green.
+
+**The finer-grained shape ("bind the bracket to the factory it belongs to") was not attempted.**
+There is no stable, version-independent public API from a Spring Data JPA repository *bean* back to
+the `EntityManagerFactory` it is bound to in this Spring Data generation - the repository is a
+`java.lang.reflect.Proxy` wrapping Spring Data's own internal fragments, and reaching into it via
+reflection to find an `EntityManager` field would be fragile across even a minor Spring Data
+version, which is worse for a security control than not having it.
+
+**The coarser shape ("refuse at startup when more than one `EntityManagerFactory` is present") is
+implemented, in `ShreddingReadBracketCustomizer.afterSingletonsInstantiated()`, but I could not
+build a dedicated integration test for it, and I am recording why rather than shipping an untested
+claim of "closed."** I wrote one (`CipherProbeSecondEmfStartupTest`, registering a second
+`@Bean LocalContainerEntityManagerFactoryBean` alongside Spring Boot's auto-configured one) and it
+failed for a reason unrelated to this module's own logic:
+
+```
+APPLICATION FAILED TO START
+A component required a bean named 'entityManagerFactory' that could not be found.
+```
+
+Spring Boot's own `HibernateJpaConfiguration.entityManagerFactory()` bean method is
+`@ConditionalOnMissingBean({LocalContainerEntityManagerFactoryBean.class,
+EntityManagerFactory.class})`. Registering *any* second bean of either type - the ordinary way a
+Spring application declares one - suppresses the auto-configured (and therefore instrumented)
+factory entirely, rather than letting both coexist. The exact shape this check is written to catch
+- an instrumented default plus a second, additional factory - cannot be constructed through ordinary
+Spring Boot auto-configuration at all; building it properly means excluding
+`HibernateJpaAutoConfiguration` and hand-rolling both factories (including manually re-applying the
+`HibernatePropertiesCustomizer` that carries `ShreddingIntegrator` to the one meant to be
+"instrumented"), which is a materially larger, riskier change than this remediation pass's scope,
+and itself a second, un-reviewed piece of Hibernate wiring to get wrong.
+
+**Disposition.** The check stays in production code as a cheap, sound safety rail - it does no harm
+and catches the case squarely if it ever arises - but it is not independently probe-verified, and
+`CipherProbeSecondEmfStartupTest.java` was deleted rather than committed failing or skipped. C-20 is
+reported closed on the strength of the frame-accounting fix alone, which is the one that is proven.
+
+## #18 C-21: the probe's name promises the mutation persists; the documented fix is that it must not (taken; the probe rewritten to assert the true, permanent behaviour)
+
+The handed-over probe, `probe_an_in_place_mutation_of_an_immutable_byte_array_is_persisted`,
+asserted `reloaded[0]).isEqualTo((byte) 99)` - that an in-place mutation of a `@Shredded byte[]`
+field **does** survive a flush. Cipher's own fix list for C-21 is documentation only: "Document the
+in-place-mutation trap ... and correct the 'nothing shares state and the claim is honest' sentence."
+No change to `ShreddedModel`, the converter or the entity mapping is prescribed, and none would be
+sound - making the mutation actually persist means Hibernate deep-copying the converted array again
+to build its dirty-checking snapshot, which is exactly the second, out-of-bracket converter call
+that fails an `IDENTITY`-strategy insert (CIPHER-16, the reason `@Immutable` is required at all).
+Fixing the documentation and making this probe pass as literally written are mutually exclusive.
+
+**Taken: the documentation is corrected (the startup message in `ShreddedModel`, `README.md`,
+`docs/index.md`, `SECURITY-NOTES.md`), and the probe is rewritten to assert the true, permanent
+behaviour** - `reloaded[0]).isEqualTo((byte) 1)`, i.e. the mutation is confirmed lost - which is what
+the corrected documentation now says happens and is expected to keep happening. The probe's name is
+kept (Cipher's own review text names it, and renaming a probe without instruction is not this pass's
+call to make); its body and its assertion are not what a first read of the name suggests, and the
+javadoc on the test method says so.
