@@ -94,6 +94,7 @@
     <dependency-check.version>13.0.0</dependency-check.version>
     <central-publishing.version>0.11.0</central-publishing.version>
     <maven-gpg.version>3.2.8</maven-gpg.version>
+    <build-helper-plugin.version>3.6.1</build-helper-plugin.version>
     <jacoco.minimum.line>0.80</jacoco.minimum.line>
     <!-- The sample's smoke gate (L2): proves the end-to-end test actually exercises the sample
          application, not a quality bar for a reference app the way 80% is for the library. -->
@@ -417,6 +418,52 @@
             </configuration>
             <executions>
               <execution><goals><goal>check</goal></goals></execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
+    <profile>
+      <!--
+        Dollar's standing convention (fourth pass, 2026-09-09): a hand-off probe from Cipher's
+        review lives in the repo, in src/test-pending/java of the module it belongs to - never in
+        the session scratchpad, which is invisible to git and to the next person who opens this
+        repo. The default build (`./mvnw verify`, no profile) never compiles or runs anything under
+        test-pending: it does not exist as a test source root at all unless this profile is active,
+        so a probe committed there red cannot fail CI or count toward the coverage gate before it
+        has a fix.
+
+          ./mvnw -Pprobes-pending test      compiles and runs whatever is under test-pending too
+
+        Workflow: Cipher commits a new probe under <module>/src/test-pending/java/... (failing,
+        proving the finding). The engineering agent (Isis) reproduces it with this profile, fixes
+        the production code, confirms it green, then moves the file into src/test/java (an
+        ordinary `git mv`) so it is compiled and run by the default build from then on -
+        src/test-pending/java is a staging area, never a permanent home for a green probe.
+
+        build-helper-maven-plugin's add-test-source is the standard, minimal way to add a source
+        root conditionally: it does not fail if the directory does not exist (nothing to add), and
+        it adds nothing to the default build's source roots when this profile is not active.
+      -->
+      <id>probes-pending</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>build-helper-maven-plugin</artifactId>
+            <version>${build-helper-plugin.version}</version>
+            <executions>
+              <execution>
+                <id>add-pending-probes</id>
+                <phase>generate-test-sources</phase>
+                <goals><goal>add-test-source</goal></goals>
+                <configuration>
+                  <sources>
+                    <source>src/test-pending/java</source>
+                  </sources>
+                </configuration>
+              </execution>
             </executions>
           </plugin>
         </plugins>

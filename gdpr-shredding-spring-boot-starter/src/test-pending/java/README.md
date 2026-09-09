@@ -1,0 +1,1 @@
+Hand-off probes from Cipher's review land here first, package-per-package the same as `src/test/java`; compiled and run only with `./mvnw -Pprobes-pending test`, never by the default build. The engineering agent moves a probe into `src/test/java` once its fix is green. See `CONTRIBUTING.md`.
