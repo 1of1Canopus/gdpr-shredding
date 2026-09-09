@@ -1583,3 +1583,325 @@ rename it.
 
 Probe sources for C-26, C-27 and C-29 are `CipherProbeFrameTest`, `CipherProbeEmbeddableScanTest` and
 the `…autoconfigure.embed` fixture package, handed to Isis with this review.
+
+---
+
+## Fifth pass (2f72449): NOT MERGEABLE
+
+Cipher, 2026-09-09. Branch `feat/shredding-core`, HEAD `2f72449`, draft PR #1.
+Two HIGH findings are open, so the no-allowance rule gives exactly one verdict.
+
+### Build
+
+`./mvnw clean verify`, exit 0, Docker up, Testcontainers Postgres pinned by digest. No skipped tests.
+
+| Module | Tests | Failures | Skipped | JaCoCo LINE (from `jacoco.csv`) | Gate |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `gdpr-shredding-core` | 77 | 0 | 0 | 84.54 % (979 / 1158) | 80 % |
+| `gdpr-shredding-spring-boot-starter` | 58 | 0 | 0 | 85.45 % (752 / 880) | 80 % |
+| `gdpr-shredding-sample` | 17 | 0 | 0 | 66.32 % (63 / 95) | 30 % |
+| **Total** | **152** | **0** | **0** | | |
+
+Every existing `CipherProbe*` test ran unchanged and green: 39 in the starter, the core's
+`CipherProbeAadTest`, `CipherProbeBlindIndexTest`, `CipherProbeFormatTest`, `CipherProbeErasureTest`,
+`CipherProbeFieldCipherTest`, `CipherProbeJdbcTest`, and the sample's `CipherProbeActuatorEndToEndTest`.
+
+**Probe diff against `c065cc8`.** No probe method was removed and none was narrowed. Two were changed:
+`probe_an_in_place_mutation_of_an_immutable_byte_array_is_persisted` was renamed to
+`..._is_silently_discarded` (C-31, body unchanged), and
+`probe_a_second_row_in_the_same_result_set_is_never_verified` was moved from `Doc` to `Widget` and its
+assertion tightened from `isNotBlank()` to `isEqualTo(ErrorCodes.SUBJECT_MISMATCH)` (C-30). Both are
+strengthenings. Eight probe methods were added.
+
+### The nine from the fourth pass
+
+| # | Verified | How |
+| --- | --- | --- |
+| C-26 | closed | `probe_a_moved_ciphertext_in_a_second_row_of_one_result_set` and `probe_two_rows_of_two_subjects_read_in_one_query` green; the multiset re-key and the per-row re-read are in `ShreddingContext.FrameKey` / `ShreddingEventListener.onPostLoad`. Attacked further below. |
+| C-26 mirror | closed | The legitimate two-subject read no longer refuses (F6, asserting each row's own value, not merely "no exception"). |
+| C-27 | closed, with the deviation accepted | `refuseLoad` evicts. I attacked the eviction from the one angle the dropped rollback-only mark leaves open — an instance already referenced elsewhere in the session — and it held (C-36 below, not reproduced). |
+| C-29 | closed, and deeper than asked | `probe_a_shredded_field_inside_an_embeddable` and `..._element_collection_of_embeddables` green. I added two levels of nesting and an `@ElementCollection` of *basic* values: both refused at startup (`SHRED-CONFIG-001`, naming `DeepVault.outer.inner.token` and `TagBag.tags[]`). One recursion path is still not walked — C-37. |
+| C-30 | closed | Rewritten on `Widget`, asserts `SHRED-SUBJECT-MISMATCH`. |
+| C-31 | closed | Renamed. |
+| C-32 | **not closed** | The `try`/`finally` on `Throwable` does not survive the one `Error` the fix's own javadoc names. C-39/C-40/C-41. |
+
+### New findings
+
+| # | Sev | Owner | What |
+| --- | --- | --- | --- |
+| C-33 | HIGH | **DESIGN STOP (Thor)** | A transaction that writes a shredded entity and completes inside an open read bracket erases that bracket's debt, and an unverified decrypt is returned. |
+| C-39 | HIGH | **DESIGN STOP (Thor)** | A `StackOverflowError` inside nested read brackets leaves frames on the thread; the next call on that pooled thread decrypts unverified. |
+| C-40 | HIGH | **DESIGN STOP (Thor)** | The same for the read-scope stack: a caller's vouched-for `(tenant, subject)` survives onto the next call. |
+| C-41 | MEDIUM | **DESIGN STOP (Thor)** | The same for the write-scope stack: the next write encrypts under the previous subject. |
+| C-34 | MEDIUM | **DESIGN STOP (Thor)** | A ciphertext swapped between two rows of the *same* subject is undetected and displayed. `SECURITY-NOTES.md` claims "moved between rows" is stopped. |
+| C-35 | LOW | **DESIGN STOP (Thor)** | The per-row re-read is one extra `SELECT` per loaded row: 200 rows cost 200 extra by-id queries, caller-controlled. |
+| C-37 | LOW | correction (Isis) | The reverse scan never walks `PluralAttributeMapping.getIndexDescriptor()`: a `ShreddedConverter` on a map key starts up unrefused. |
+| C-38 | LOW | correction (Isis) | A composite-id `@Shredded` entity starts up and is then unreadable. It must be refused at boot. |
+
+C-33, C-39, C-40 and C-41 are one design stop, not four: they are the same question — who owns
+`ShreddingContext`'s thread-local state and what is allowed to clear it — and prescribing four
+separate patches for it is what produced rounds two to four on this module.
+
+---
+
+#### C-33 — HIGH — a transaction completing inside a read bracket erases its debt
+
+**Repro.** `CipherProbeFifthPassTest.probe_a_transaction_committing_inside_a_read_bracket_does_not_erase_its_debt`
+(`src/test-pending`). Output:
+
+```
+P1 clearAll vs open bracket -> RETURNED [P1-CLEARALL-SECRET]
+```
+
+`ShreddingEventListener.registerTransactionBoundaryClear` registers `ShreddingContext.clearAll()` as
+an after-completion callback on every insert and update of a shredded entity, and `clearAll()` does
+`READ_FRAMES.remove()` — it drops the *whole* frame stack for the thread, including frames belonging
+to brackets that are still open and whose owner will still call `popReadBracket()`. `popFrame()` then
+returns `null` and `popReadBracket()` passes silently.
+
+`ShreddingReadBracketCustomizer` is a `BeanPostProcessor` at `LOWEST_PRECEDENCE`, so it runs last and
+its proxy wraps the transactional proxy: for every repository call that is not already inside a
+caller's transaction, the transaction begins and commits *inside* the bracket. The bracket is the
+outer layer, not the inner one its own javadoc claims.
+
+This is `CipherProbeFrameTest` F3's shape — an unverified projection decode inside `withReadBracket`
+that nothing drains, which F3 asserts must be refused with `SHRED-READ-UNVERIFIED` — with one
+addition: a write in the same transaction. F3 stays green; the probe above returns the plaintext.
+
+This is the control from C-17, C-18 and C-20, and it is switchable off by any write. It also removes
+the only thing standing between the read path and a read-committed TOCTOU: `onPostLoad`'s re-read is
+a *second* statement, so under PostgreSQL's default `READ COMMITTED` it can see bytes that are not
+the bytes the converter decrypted. Today that is fail-closed — the drain key is built from the
+re-read's header and the record key from the decrypted bytes' header, so they miss each other and the
+frame stays dirty — but that safety is exactly the accounting C-33 wipes out.
+
+**Property that must hold.** A read bracket that is still open survives every transaction completion
+on its thread; a bracket abandoned by a thread that will never pop it does not survive the request.
+
+**Paths it must cover.** `ShreddingReadBracketCustomizer.Bracket#invoke`; `withReadBracket`; `withRead`;
+the `AfterCompletionCallback` registered from `onPreInsert`/`onPreUpdate`; nested brackets; and thread
+reuse — servlet pool, virtual threads, `@Async`, and a `Stream`-returning repository method.
+
+---
+
+#### C-39 / C-40 / C-41 — HIGH, HIGH, MEDIUM — thread-local state survives a `StackOverflowError`
+
+**Repro.** `CipherProbeBracketUnwindTest`, three probes, 200 attempts each on a fresh 256 KB-stack
+thread. Stable across runs:
+
+```
+UNWIND read bracket -> leaked on  10/200 unwinds
+UNWIND read scope   -> leaked on  35/200 unwinds
+UNWIND write scope  -> leaked on  13/200 unwinds
+```
+
+(In isolation, with the JIT differently warmed: 26/40, 33–36/40, 39/40.)
+
+C-32's fix is `try`/`finally` with a `threw` flag. A `finally` block does not survive a
+`StackOverflowError`: it has to *call* `discardReadBracket()` / `pop()`, and at the depths where the
+stack is already exhausted that call throws a second `StackOverflowError` which replaces the first and
+skips the cleanup. `ShreddingReadBracketCustomizer.Bracket#invoke`'s `catch (Throwable)` has the same
+weakness for the same reason. The shape that produces it is nested brackets — a recursive repository
+traversal, one bracket per level, all still open when the stack runs out — which is ordinary code, and
+it is the "deep object graph" case C-32's javadoc names.
+
+What each leak costs on a pooled thread:
+
+- **C-39, a leaked frame.** `ShreddedConverter` sees `inReadBracket()` true, treats the decrypt as
+  "inside a managed entity load", defers verification to an `onPostLoad` that will never run for a
+  projection, and returns the plaintext where it should have thrown `SHRED-READ-UNSCOPED`.
+- **C-40, a leaked read scope.** Worse: `withRead` takes a caller-supplied `(tenant, subject)` on
+  trust — it is a vouch, not an authentication. A leaked one turns the next call's projection over
+  that subject's rows from a refusal into a decrypt-and-return.
+- **C-41, a leaked write scope.** `ShreddingContext.require` hands a converter the stale scope
+  instead of throwing `SHRED-CONTEXT-001`, so the next write encrypts under the previous subject's
+  key and the row lands in the wrong subject's erasure scope. The transaction-completion `clearAll()`
+  backstop covers the listener path when a transaction exists and completes on this thread; it does
+  not cover `ShreddingContext.with(...)`, which is public API and is what the erasure endpoint uses.
+
+**Property that must hold.** No `ShreddingContext` thread-local entry outlives the call that created
+it, on any completion path, including an `Error` raised at a depth where no further method call can be
+made.
+
+**Paths it must cover.** The same list as C-33, plus `ShreddingContext.with` and `ShreddingContext.push`
+/`pop` as called from `onPreInsert` / `onPreUpdate`.
+
+---
+
+#### C-34 — MEDIUM — a ciphertext swapped between two rows of one subject is displayed
+
+**Repro.** `CipherProbeFifthPassTest.probe_a_ciphertext_swapped_between_two_rows_of_one_subject_is_detected`.
+Two `Widget` rows of one owner, row A's `name` column copied over row B's:
+
+```
+P2 same-subject row swap -> RETURNED [ROW-A-VALUE, ROW-A-VALUE]
+```
+
+The AAD and the stored header bind `(tenant, subject, entity, field)` and no row identity, and
+`onPostLoad`'s per-row re-read compares the row's stored header against the row's *resolved subject
+and tenant* only. Two rows of the same subject therefore have interchangeable ciphertexts: both
+headers match, and the multiset drains a count of two cleanly. Row B displays row A's value as its
+own, with no error anywhere and nothing in any log.
+
+Erasure scope is unaffected — it is the same subject's key — so this is an integrity failure, not a
+confidentiality one. But `SECURITY-NOTES.md`'s threat table says *"A ciphertext moved between rows,
+subjects or tenants displayed on read … the row's stored header is checked against the row"*, and
+`docs/index.md` says the same of `SHRED-SUBJECT-MISMATCH`. Between subjects and between tenants: true.
+Between rows: not true. Under the no-allowance rule the gap between the claim and the code closes one
+way or the other, and which way is a design decision, not a patch.
+
+**Property that must hold.** Either a stored value verifies against the row it was read from, or the
+documentation states plainly that intra-subject row integrity is out of scope and the threat table
+stops claiming "between rows".
+
+**Paths it must cover.** If the answer is to bind row identity: the AAD, the header format, `onPostLoad`,
+`refuseIfSubjectMoved`, `withRead`, and the erasure path — and note that the branch is unreleased, so
+no compatibility with the current format is owed.
+
+---
+
+#### C-35 — LOW — one extra query per loaded row
+
+**Repro.** `CipherProbeFifthPassTest.probe_a_multi_row_read_does_not_issue_one_extra_query_per_row`,
+counting `Connection.prepareStatement` on the application's own `DataSource` (not timings, not
+PostgreSQL's asynchronous statistics collector):
+
+```
+P3 per-row re-read cost -> 200 rows, 401 statements prepared,
+                           200 of them a per-row shredded-column re-read
+```
+
+`onPostLoad` calls `readStoredShreddedColumns` once per loaded row of every shredded entity. A page of
+N rows costs N+1 round trips instead of 1, and the multiplier is whatever page size the caller asks
+for. It is on the read path of every shredded entity, unconditionally.
+
+**Property that must hold.** Verifying a result set costs a number of round trips bounded independently
+of the number of rows in it.
+
+**Paths it must cover.** `onPostLoad` for a list, a page, a lazy collection load and a nested eager
+association; `refuseIfSubjectMoved` on a batched flush.
+
+---
+
+#### C-37 — LOW — correction (Isis) — the reverse scan does not walk a collection's index
+
+**Repro.** `CipherProbeScanDepthTest.probe_a_shredded_map_key_in_an_element_collection_is_refused_at_startup`,
+fixture `…autoconfigure.mapkey.KeyedNotes` (`@ElementCollection Map<String,String>` with
+`@Convert(attributeName = "key", converter = NoteKeyConverter.class)`):
+
+```
+SCAN-DEPTH mapkey -> STARTED (nothing refused it)
+```
+
+`ShreddedModel.scanAttribute` handles a `PluralAttributeMapping` by walking `getElementDescriptor()`
+only. `getIndexDescriptor()` — the map key, and the list index of an `@OrderColumn` — is never walked,
+so a `ShreddedConverter` reached that way is neither modelled by the forward field scan nor refused by
+the reverse one. It is not a leak: the first write fails closed with `SHRED-CONTEXT-001`
+(`no shredding context while writing KeyedNotes.notesKey`), and a read would leave the frame dirty. It
+is the startup contract not holding — the application finds out in production instead of at boot.
+
+**Fix.** In `ShreddedModel.scanAttribute`, in the `PluralAttributeMapping` branch, also
+`scanAttribute(entityName, path + "[key]", plural.getIndexDescriptor(), known)` when the index
+descriptor is non-null. Probe named above; move it from `src/test-pending` to `src/test` when green.
+
+---
+
+#### C-38 — LOW — correction (Isis) — a composite-id shredded entity starts and is then unreadable
+
+**Repro.** `CipherProbeCompositeIdTest`, fixture `…autoconfigure.composite.Ticket` (`@IdClass`):
+
+```
+COMPOSITE untampered read -> REFUSED SHRED-READ-UNVERIFIED
+COMPOSITE read            -> REFUSED SHRED-READ-UNVERIFIED
+```
+
+The first line is a row this application wrote itself, with nothing tampered. Both `onPostLoad` and
+`refuseIfSubjectMoved` return early when `getIdentifierColumnNames().length != 1`, so `onPostLoad`
+never drains, the frame stays dirty, and every read of a composite-id shredded row that carries a
+stored value is refused. Writes go the same way, because `save`'s merge has to read first. The mapping
+is fail-closed and unusable.
+
+That is the right outcome and the wrong time. The startup scan already refuses a `@Shredded` entity
+whose fields span a `@SecondaryTable`, for exactly this reason ("cannot be checked that way and is
+refused rather than silently skipped"). A composite identifier is the same class of unsupported
+mapping and belongs in the same check.
+
+**Fix.** In `ShreddedModel.from`, for every entity with at least one `@Shredded` field, refuse at
+startup when the entity's identifier maps to more than one column, with a message naming the entity and
+saying that the update-time subject-immutability check and the load-time per-row re-read both bind a
+single-column id. Probe: `probe_a_composite_id_shredded_entity_is_refused_at_startup`, which asserts
+the read succeeds — it will never run once the context correctly refuses to start, which is the point;
+rewrite it as a startup-refusal probe in the shape of `CipherProbeScanDepthTest` when fixing.
+
+---
+
+### What I attacked and did not reproduce
+
+- **C-36, eviction versus an instance referenced elsewhere in the session.** `refuseLoad` evicts the
+  refused entity, but eviction removes the session's own entry, not a Java reference another managed
+  instance already holds. I built `…autoconfigure.assoc.Holder`, a non-shredded entity with an eager
+  `@ManyToOne Widget`, loaded it so the tampered `Widget` hydrated inside the same query, caught the
+  refusal, and went back for the `Holder` three ways in the same session. All three refused:
+  `first=[REFUSED SHRED-SUBJECT-MISMATCH] second=[REFUSED SHRED-READ-UNSCOPED]
+  third=[REFUSED SHRED-SUBJECT-MISMATCH] commit=[UnexpectedRollbackException]`. Hibernate does not
+  leave the `Holder` in the persistence context when a load aborts, so there is no surviving reference
+  to reach. Closed with no code change. `CipherProbeEvictionTest` is green and is worth keeping as a
+  positive control.
+- **The `READ COMMITTED` TOCTOU on the per-row re-read.** The re-read runs through
+  `session.doReturningWork`, on the session's own connection, inside the same transaction — but as a
+  second statement, so under PostgreSQL's default isolation it can see bytes the converter did not
+  decrypt. It is fail-closed by construction: the record key comes from the decrypted bytes' header and
+  the drain key from the re-read's header, so a substitution between the two leaves the frame dirty and
+  `popReadBracket()` refuses. That argument depends entirely on the frame accounting, which is what
+  C-33 disables. Not a separate finding; a reason C-33 is HIGH.
+- **A row whose id the entity does not expose.** `onPostLoad` takes the id from `PostLoadEvent.getId()`,
+  never from a getter, so there is no entity-shape bypass. The only id shape that escapes is the
+  composite one, which is C-38.
+- **Embeddable recursion depth.** Two levels of `@Embeddable`, and an `@ElementCollection` of basic
+  values with the converter on the element itself: both refused at startup with the right message and
+  the right path (`DeepVault.outer.inner.token`, `TagBag.tags[]`). C-29's recursion is sound; only the
+  index descriptor is missing (C-37).
+- **The multiset drain with two rows sharing `(entity, field, tenant, subject)` where one is tampered.**
+  Correct: the tampered row's own re-read names a different subject from the row's resolved subject and
+  refuses, whichever order `PostLoad` fires in, and the clean row drains its own count. The only case
+  the per-row re-read cannot separate is when the two rows genuinely share a subject — C-34.
+
+### Rulings
+
+**QUESTIONS #19 — C-27's dropped rollback-only mark: accepted as taken, no code change.**
+Isis's evidence is correct and I reproduced it independently without meaning to: my own C-36 probe,
+which contains no `markRollbackOnly` call and touches no production code, ends with
+`commit=[UnexpectedRollbackException]` purely because Spring's read-only advice on a repository method
+marked the participating transaction rollback-only when the refusal escaped it. Marking rollback-only
+and "catch the refusal and continue in this transaction" are genuinely mutually exclusive, and my fix
+text asked for both. Eviction alone closes the leak C-27 demonstrates; I attacked the gap the deviation
+leaves — an instance already referenced elsewhere in the session — and it held (C-36). The deviation
+stands.
+
+**QUESTIONS #20 — the composite-identifier residual: rejected as a residual, reclassified as C-38.**
+It is not "undemonstrated rather than proven safe". It is demonstrated: a composite-id `@Shredded`
+entity cannot be read at all, including rows it wrote itself and nobody touched. That is fail-closed,
+which is why it is LOW and not HIGH, but a mapping this module cannot support must be refused at
+startup like the `@SecondaryTable` split already is, not discovered on the first read in production.
+Correction for Isis, above. Once it is in, #20's write-path half stops being a residual too: the entity
+cannot exist.
+
+### Verdict
+
+**NOT MERGEABLE.** C-33, C-39 and C-40 are HIGH. C-33 turns off the module's central read-path control
+whenever a shredded write commits inside a bracket, which is the ordinary shape of an untransacted
+repository call. C-39/C-40/C-41 leave the same control's thread-local state on a pooled thread after an
+`Error`, which is the case C-32 was opened for and did not close.
+
+Six of the eight findings are one design stop each for Thor, and the first four of those are one
+design stop together: **who owns `ShreddingContext`'s thread-local state, and what is allowed to clear
+it.** Do not patch C-33, C-39, C-40 and C-41 separately — a `finally` cannot be fixed with another
+`finally`, and a backstop that clears the whole thread cannot be made safe by clearing slightly less.
+Thor writes one page; I review it before any code.
+
+Two are corrections for Isis and can land in parallel: C-37 and C-38.
+
+Probe sources are committed under `gdpr-shredding-spring-boot-starter/src/test-pending/java`, with the
+fixtures they need in `…autoconfigure.assoc`, `…autoconfigure.composite`, `…autoconfigure.elemcoll`,
+`…autoconfigure.mapkey` and `…autoconfigure.nested`. Run them with `./mvnw -Pprobes-pending test`;
+they do not affect the default build, which is still 152 tests, 0 failures, 84.54 % / 85.45 % / 66.32 %.
