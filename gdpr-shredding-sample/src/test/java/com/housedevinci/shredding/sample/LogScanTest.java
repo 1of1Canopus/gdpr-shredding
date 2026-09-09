@@ -88,6 +88,15 @@ class LogScanTest {
       // expected: the subject is erased
     }
 
+    // L14: a logging misconfiguration that captured nothing at all would otherwise read as a pass
+    // for the two doesNotContain assertions below - they are vacuously true over an empty
+    // capture. Assert the capture actually observed something this flow is known to log first:
+    // ShreddingStartupCheck's own start-up line, benign and always emitted once per context.
+    assertThat(output.getAll())
+        .as("the output capture observed nothing at all - it is not proving anything below")
+        .isNotEmpty()
+        .contains("shredded field(s)");
+
     assertThat(output.getAll())
         .as("the application log must never contain a shredded field's plaintext value")
         .doesNotContain(EMAIL)
