@@ -8,6 +8,7 @@ import com.housedevinci.shredding.domain.ErrorCodes;
 import com.housedevinci.shredding.domain.KeyDestroyedException;
 import com.housedevinci.shredding.domain.KeyState;
 import com.housedevinci.shredding.domain.RandomSource;
+import com.housedevinci.shredding.domain.RowId;
 import com.housedevinci.shredding.domain.ShreddingException;
 import com.housedevinci.shredding.domain.SubjectId;
 import com.housedevinci.shredding.domain.TenantId;
@@ -62,7 +63,12 @@ public final class FieldCipher {
    * @return the bytes to store in the {@code bytea} column
    */
   public byte[] encrypt(
-      TenantId tenant, SubjectId subject, String entity, String field, byte[] plaintext) {
+      TenantId tenant,
+      SubjectId subject,
+      RowId rowId,
+      String entity,
+      String field,
+      byte[] plaintext) {
     var current = keys.currentForWrite(tenant, subject);
     refuseUnusable(tenant, subject, current.state());
 
@@ -92,7 +98,7 @@ public final class FieldCipher {
     try {
       byte[] aad =
           Aad.forValue(
-              tenant, subject, entity, field, key.version(), EncryptedValue.ALG_AES_256_GCM);
+              tenant, subject, rowId, entity, field, key.version(), EncryptedValue.ALG_AES_256_GCM);
       var sealed = Aes256Gcm.encrypt(material, random.nonce(), plaintext, aad);
       cache.put(tenant, subject, key.version(), material);
       return new EncryptedValue(
@@ -101,6 +107,7 @@ public final class FieldCipher {
               key.version(),
               tenant,
               subject,
+              rowId,
               sealed.nonce(),
               sealed.ciphertext())
           .encode();
@@ -143,7 +150,9 @@ public final class FieldCipher {
     }
 
     try {
-      byte[] aad = Aad.forValue(tenant, subject, entity, field, value.keyVersion(), value.algId());
+      byte[] aad =
+          Aad.forValue(
+              tenant, subject, value.rowId(), entity, field, value.keyVersion(), value.algId());
       return Optional.of(Aes256Gcm.decrypt(material, value.nonce(), value.ciphertext(), aad));
     } finally {
       Aes256Gcm.wipe(material);

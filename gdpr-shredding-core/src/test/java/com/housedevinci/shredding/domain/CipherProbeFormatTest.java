@@ -73,6 +73,7 @@ class CipherProbeFormatTest {
             3,
             TenantId.of("acme"),
             SubjectId.of("s-1"),
+            RowId.ofIdentifier(1L),
             new byte[12],
             new byte[20])
         .encode();

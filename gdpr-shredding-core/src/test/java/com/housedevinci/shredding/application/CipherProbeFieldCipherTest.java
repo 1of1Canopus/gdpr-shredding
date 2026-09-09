@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.housedevinci.shredding.adapter.memory.InMemoryKeyProvider;
+import com.housedevinci.shredding.domain.RowId;
 import com.housedevinci.shredding.domain.EncryptedValue;
 import com.housedevinci.shredding.domain.ErasedValuePolicy;
 import com.housedevinci.shredding.domain.ErrorCodes;
@@ -22,6 +23,9 @@ import org.junit.jupiter.api.Test;
 
 /** Cipher probes on the value path: AAD binding, key-store outage, tenant isolation, key limits. */
 class CipherProbeFieldCipherTest {
+
+  /** Design §3: every stored value is bound to a row; these probes use one fixed row. */
+  private static final RowId ROW = RowId.ofIdentifier(1L);
 
   private static final TenantId A = TenantId.of("tenant-a");
   private static final TenantId B = TenantId.of("tenant-b");
@@ -48,7 +52,7 @@ class CipherProbeFieldCipherTest {
    */
   @Test
   void probe_ciphertext_moved_between_rows_still_decrypts() {
-    byte[] stored = cipher.encrypt(A, SUBJECT, "Customer", "email", PLAINTEXT);
+    byte[] stored = cipher.encrypt(A, SUBJECT, ROW, "Customer", "email", PLAINTEXT);
 
     // same tenant and subject, different field: the row it was moved into
     assertThatThrownBy(
@@ -74,8 +78,8 @@ class CipherProbeFieldCipherTest {
    */
   @Test
   void probe_tenant_b_decrypts_tenant_a_value_for_the_same_subject_id() {
-    byte[] storedForA = cipher.encrypt(A, SUBJECT, "Customer", "email", PLAINTEXT);
-    byte[] storedForB = cipher.encrypt(B, SUBJECT, "Customer", "email", PLAINTEXT);
+    byte[] storedForA = cipher.encrypt(A, SUBJECT, ROW, "Customer", "email", PLAINTEXT);
+    byte[] storedForB = cipher.encrypt(B, SUBJECT, ROW, "Customer", "email", PLAINTEXT);
 
     assertThat(storedForA).isNotEqualTo(storedForB);
     assertThat(EncryptedValue.decode(storedForA).tenant()).isEqualTo(A);
@@ -89,6 +93,7 @@ class CipherProbeFieldCipherTest {
                 a.keyVersion(),
                 B,
                 a.subject(),
+                a.rowId(),
                 a.nonce(),
                 a.ciphertext())
             .encode();
@@ -155,7 +160,7 @@ class CipherProbeFieldCipherTest {
             RandomSource.secure(),
             FieldCipher.DEFAULT_MAX_ENCRYPTIONS_PER_KEY);
 
-    byte[] storedForA = isolatedCipher.encrypt(A, SUBJECT, "Customer", "email", PLAINTEXT);
+    byte[] storedForA = isolatedCipher.encrypt(A, SUBJECT, ROW, "Customer", "email", PLAINTEXT);
     var a = EncryptedValue.decode(storedForA);
     byte[] relabelledForB =
         new EncryptedValue(
@@ -164,6 +169,7 @@ class CipherProbeFieldCipherTest {
                 a.keyVersion(),
                 B,
                 a.subject(),
+                a.rowId(),
                 a.nonce(),
                 a.ciphertext())
             .encode();
@@ -194,7 +200,7 @@ class CipherProbeFieldCipherTest {
    */
   @Test
   void probe_key_store_outage_reads_as_erased() {
-    byte[] stored = cipher.encrypt(A, SUBJECT, "Customer", "email", PLAINTEXT);
+    byte[] stored = cipher.encrypt(A, SUBJECT, ROW, "Customer", "email", PLAINTEXT);
     cache.evictSubject(A, SUBJECT);
     keys.setAvailable(false);
 
@@ -210,7 +216,7 @@ class CipherProbeFieldCipherTest {
   /** And a genuinely destroyed key does read as erased, under whichever policy is configured. */
   @Test
   void a_destroyed_key_reads_as_erased_under_the_configured_policy() {
-    byte[] stored = cipher.encrypt(A, SUBJECT, "Customer", "email", PLAINTEXT);
+    byte[] stored = cipher.encrypt(A, SUBJECT, ROW, "Customer", "email", PLAINTEXT);
     keys.destroy(A, SUBJECT);
     cache.evictSubject(A, SUBJECT);
 
@@ -228,10 +234,10 @@ class CipherProbeFieldCipherTest {
   void probe_encryption_passes_the_per_key_2_32_limit() {
     var small = new FieldCipher(keys, cache, RandomSource.secure(), 3);
 
-    byte[] first = small.encrypt(A, SUBJECT, "Customer", "email", PLAINTEXT);
-    small.encrypt(A, SUBJECT, "Customer", "email", PLAINTEXT);
-    small.encrypt(A, SUBJECT, "Customer", "email", PLAINTEXT);
-    byte[] afterLimit = small.encrypt(A, SUBJECT, "Customer", "email", PLAINTEXT);
+    byte[] first = small.encrypt(A, SUBJECT, ROW, "Customer", "email", PLAINTEXT);
+    small.encrypt(A, SUBJECT, ROW, "Customer", "email", PLAINTEXT);
+    small.encrypt(A, SUBJECT, ROW, "Customer", "email", PLAINTEXT);
+    byte[] afterLimit = small.encrypt(A, SUBJECT, ROW, "Customer", "email", PLAINTEXT);
 
     assertThat(EncryptedValue.decode(first).keyVersion()).isEqualTo(1);
     assertThat(EncryptedValue.decode(afterLimit).keyVersion()).isEqualTo(2);
@@ -256,10 +262,10 @@ class CipherProbeFieldCipherTest {
 
   @Test
   void a_write_for_a_destroying_subject_is_refused() {
-    cipher.encrypt(A, SUBJECT, "Customer", "email", PLAINTEXT);
+    cipher.encrypt(A, SUBJECT, ROW, "Customer", "email", PLAINTEXT);
     keys.markDestroying(A, SUBJECT);
 
-    assertThatThrownBy(() -> cipher.encrypt(A, SUBJECT, "Customer", "email", PLAINTEXT))
+    assertThatThrownBy(() -> cipher.encrypt(A, SUBJECT, ROW, "Customer", "email", PLAINTEXT))
         .isInstanceOf(ShreddingException.class)
         .extracting(e -> ((ShreddingException) e).code())
         .isEqualTo(ErrorCodes.ERASED);
@@ -267,7 +273,7 @@ class CipherProbeFieldCipherTest {
 
   @Test
   void a_cached_key_does_not_outrank_the_row_state() {
-    byte[] stored = cipher.encrypt(A, SUBJECT, "Customer", "email", PLAINTEXT);
+    byte[] stored = cipher.encrypt(A, SUBJECT, ROW, "Customer", "email", PLAINTEXT);
     assertThat(cipher.decrypt("Customer", "email", stored, ErasedValuePolicy.SENTINEL)).isPresent();
 
     // the key is now cached; the row says DESTROYING

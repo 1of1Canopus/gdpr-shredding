@@ -8,7 +8,7 @@ import java.nio.charset.StandardCharsets;
  * <p>Canonical and <em>length-prefixed</em>, module B's {@code ag1|<len>:<value>} form:
  *
  * <pre>
- * sh1|&lt;len&gt;:format|&lt;len&gt;:alg|&lt;len&gt;:tenant|&lt;len&gt;:subject|&lt;len&gt;:entity|&lt;len&gt;:field|&lt;len&gt;:keyVersion
+ * sh1|&lt;len&gt;:format|&lt;len&gt;:alg|&lt;len&gt;:tenant|&lt;len&gt;:subject|&lt;len&gt;:rowId|&lt;len&gt;:entity|&lt;len&gt;:field|&lt;len&gt;:keyVersion
  * </pre>
  *
  * Plain concatenation would let {@code entity="Custom"} with {@code field="erEmail"} produce the
@@ -24,19 +24,40 @@ public final class Aad {
   /** Format tag; also the first component of the erasure-log and blind-index domain strings. */
   public static final String VERSION = "sh1";
 
-  /** Version of the AAD layout itself, so a future layout is a different authenticated string. */
-  static final String LAYOUT = "1";
+  /**
+   * Version of the AAD layout itself, so a future layout is a different authenticated string.
+   * Bumped to {@code 2} with the row id (design §3): a v1 AAD and a v2 AAD differ even when every
+   * other component is identical, so a v1 ciphertext cannot authenticate under a v2 read and the
+   * refusal is structural rather than a version check somebody could forget.
+   */
+  static final String LAYOUT = "2";
 
   private Aad() {}
 
-  /** Binds a stored value to its tenant, subject, entity, field, key version and algorithm. */
+  /**
+   * Binds a stored value to its tenant, subject, <strong>row</strong>, entity, field, key version
+   * and algorithm.
+   *
+   * <p>The row id (design §3, C-34, Cipher item 7) is the component that stops a ciphertext being
+   * moved between two rows of the same subject. It is the identifier's canonical column encoding,
+   * hex-rendered here so the AAD stays a well-formed, length-prefixed text - never {@code
+   * Object.toString()} of the identifier, which cannot tell a {@code Long 1} from a {@code String
+   * "1"}.
+   */
   public static byte[] forValue(
-      TenantId tenant, SubjectId subject, String entity, String field, int keyVersion, byte algId) {
+      TenantId tenant,
+      SubjectId subject,
+      RowId rowId,
+      String entity,
+      String field,
+      int keyVersion,
+      byte algId) {
     var sb = new StringBuilder(VERSION);
     append(sb, LAYOUT);
     append(sb, Byte.toString(algId));
     append(sb, tenant.value());
     append(sb, subject.value());
+    append(sb, hex(rowId.bytes()));
     append(sb, entity);
     append(sb, field);
     append(sb, Integer.toString(keyVersion));
@@ -55,6 +76,14 @@ public final class Aad {
     append(sb, subject.value());
     append(sb, Integer.toString(keyVersion));
     return sb.toString().getBytes(StandardCharsets.UTF_8);
+  }
+
+  private static String hex(byte[] value) {
+    var sb = new StringBuilder(value.length * 2);
+    for (byte b : value) {
+      sb.append(Character.forDigit((b >> 4) & 0xf, 16)).append(Character.forDigit(b & 0xf, 16));
+    }
+    return sb.toString();
   }
 
   private static void append(StringBuilder sb, String value) {

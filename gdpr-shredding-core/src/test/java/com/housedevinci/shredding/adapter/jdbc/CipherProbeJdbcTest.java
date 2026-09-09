@@ -8,6 +8,7 @@ import com.housedevinci.shredding.application.ErasureChainVerifier;
 import com.housedevinci.shredding.application.ErasureRequest;
 import com.housedevinci.shredding.application.ErasureService;
 import com.housedevinci.shredding.application.FieldCipher;
+import com.housedevinci.shredding.domain.RowId;
 import com.housedevinci.shredding.domain.BlindIndexColumn;
 import com.housedevinci.shredding.domain.ErasedValuePolicy;
 import com.housedevinci.shredding.domain.ErasureChain;
@@ -43,6 +44,9 @@ import org.testcontainers.utility.DockerImageName;
 /** Cipher probes that need a real PostgreSQL: the erasure transaction, the race, the index. */
 @Testcontainers
 class CipherProbeJdbcTest {
+
+  /** Design §3: every stored value is bound to a row; these probes use one fixed row. */
+  private static final RowId ROW = RowId.ofIdentifier(1L);
 
   // Pinned by digest, the same image module B uses.
   private static final PostgreSQLContainer<?> POSTGRES =
@@ -195,7 +199,7 @@ class CipherProbeJdbcTest {
   @Test
   void probe_crash_between_key_destruction_and_the_erasure_record() {
     SubjectId subject = SubjectId.of("s-crash");
-    cipher.encrypt(TENANT, subject, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
+    cipher.encrypt(TENANT, subject, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
     var store = store(List.of());
 
     assertThatThrownBy(
@@ -221,7 +225,7 @@ class CipherProbeJdbcTest {
   @Test
   void probe_concurrent_write_encrypts_under_a_destroying_key() throws Exception {
     SubjectId subject = SubjectId.of("s-race");
-    cipher.encrypt(TENANT, subject, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
+    cipher.encrypt(TENANT, subject, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
     var store = store(List.of());
     var erasureHolds = new CountDownLatch(1);
     var writerTried = new CountDownLatch(1);
@@ -235,6 +239,7 @@ class CipherProbeJdbcTest {
                 cipher.encrypt(
                     TENANT,
                     subject,
+                    ROW,
                     "Customer",
                     "email",
                     "later@b.c".getBytes(StandardCharsets.UTF_8));
@@ -313,6 +318,7 @@ class CipherProbeJdbcTest {
                 cipher.encrypt(
                     TENANT,
                     subject,
+                    ROW,
                     "Customer",
                     "email",
                     "first@b.c".getBytes(StandardCharsets.UTF_8));
@@ -382,7 +388,7 @@ class CipherProbeJdbcTest {
     SubjectId subject = SubjectId.of("s-index");
     byte[] blob =
         cipher.encrypt(
-            TENANT, subject, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
+            TENANT, subject, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
     byte[] index =
         new com.housedevinci.shredding.domain.BlindIndex(SECRET, 64)
             .compute(TENANT, "Customer", "email", "a@b.c");
@@ -457,7 +463,7 @@ class CipherProbeJdbcTest {
             1,
             2);
     SubjectId subject = SubjectId.of("s-nanos");
-    cipher.encrypt(TENANT, subject, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
+    cipher.encrypt(TENANT, subject, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
 
     var written =
         service.erase(new ErasureRequest(TENANT, subject, "dpo", "art 17")).records().get(0);
@@ -476,7 +482,7 @@ class CipherProbeJdbcTest {
     var service = service(store);
     for (int i = 1; i <= 3; i++) {
       SubjectId s = SubjectId.of("s-chain-" + i);
-      cipher.encrypt(TENANT, s, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
+      cipher.encrypt(TENANT, s, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
       service.erase(new ErasureRequest(TENANT, s, "dpo", "art 17"));
     }
 
@@ -491,7 +497,7 @@ class CipherProbeJdbcTest {
   void the_erasure_log_refuses_update_delete_and_truncate() throws Exception {
     var store = store(List.of());
     SubjectId s = SubjectId.of("s-append-only");
-    cipher.encrypt(TENANT, s, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
+    cipher.encrypt(TENANT, s, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
     service(store).erase(new ErasureRequest(TENANT, s, "dpo", "art 17"));
 
     try (Connection c = dataSource.getConnection();
@@ -604,7 +610,7 @@ class CipherProbeJdbcTest {
   void an_unkeyed_instance_is_refused_against_a_keyed_trail() {
     var store = store(List.of());
     SubjectId s = SubjectId.of("s-mode");
-    cipher.encrypt(TENANT, s, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
+    cipher.encrypt(TENANT, s, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
     service(store).erase(new ErasureRequest(TENANT, s, "dpo", "art 17"));
 
     assertThatThrownBy(() -> new JdbcErasureStore(dataSource, ErasureChain.unkeyed(), List.of()))
@@ -617,8 +623,8 @@ class CipherProbeJdbcTest {
   void a_wrapped_key_row_cannot_be_swapped_between_subjects() throws Exception {
     SubjectId a = SubjectId.of("s-swap-a");
     SubjectId b = SubjectId.of("s-swap-b");
-    cipher.encrypt(TENANT, a, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
-    cipher.encrypt(TENANT, b, "Customer", "email", "b@b.c".getBytes(StandardCharsets.UTF_8));
+    cipher.encrypt(TENANT, a, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
+    cipher.encrypt(TENANT, b, ROW, "Customer", "email", "b@b.c".getBytes(StandardCharsets.UTF_8));
 
     try (Connection c = dataSource.getConnection();
         var ps =
