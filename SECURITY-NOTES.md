@@ -75,11 +75,13 @@ what this process happened to load:
   with a second query - one round trip, and only when a `@Shredded` field is actually dirty - and
   compares the header's subject and tenant against the value about to be written. A disagreement is
   `SHRED-SUBJECT-IMMUTABLE`, refused before anything is re-encrypted.
-- **On read**, `ShreddedConverter` records what each field's header actually said the instant it is
-  decoded (`ShreddingContext.Decoded`), and `onPostLoad` - once the whole entity is hydrated -
-  resolves the row's true subject and tenant the same way the write path does, and compares. A
-  disagreement is `SHRED-SUBJECT-MISMATCH`, thrown from `onPostLoad`, which aborts the load: the
-  entity is never returned to the caller that asked for it.
+- **On read**, `onPostLoad` - once the whole entity is hydrated - independently re-reads the row's
+  own stored shredded columns by id (fourth pass, C-26; see below for why this replaced the earlier
+  "trust what the converter recorded" design), resolves the row's true subject and tenant the same
+  way the write path does, and compares. A disagreement is `SHRED-SUBJECT-MISMATCH`, thrown from
+  `onPostLoad`, which aborts the load: the entity is never returned to the caller that asked for it,
+  and the refused instance is evicted from the persistence context so a second read in the same
+  transaction cannot serve it from the first-level cache instead (C-27, below).
 
 **Why the read side is not "checked before the key store is touched" the way CIPHER-01's fix text
 asks for.** A JPA `AttributeConverter` is handed nothing but the column bytes: no entity, no
@@ -107,11 +109,49 @@ frame currently on top of the stack, not a flat map; `popReadBracket()` closes t
 `SHRED-READ-UNVERIFIED` if anything in it was never drained - after the value was computed, but
 before `ShreddingReadBracketCustomizer`'s proxy hands the repository method's result back to its
 caller. The bracket now owes a debt rather than granting a permission: every scenario above is
-refused rather than returned. The `join-fetch` scenario this note used to list as a residual is
-narrower than the frame accounting closes on its own (two rows of the same entity type, still
-inside one bracket, are each drained by their own `onPostLoad` call before the next one's decode is
-recorded - Hibernate fires `PostLoadEvent` per row, not once per query) and is no longer a known
-gap.
+refused rather than returned.
+
+**This note used to claim the multi-row case above was closed. It was not - that was C-26, the
+fourth pass's own finding, one level down from the third pass's fix.** Hibernate ORM 7.4 defers
+every row's `PostLoadEvent` until the *whole* `JdbcValues` result set has been hydrated: for a
+two-row query, both rows' converters run (and record) before either row's `onPostLoad` fires. The
+third-pass frame recorded a decode keyed only by `entityName + "." + fieldName`, with no row
+identity - so the second row's converter silently overwrote the first row's entry, and whichever
+row's `onPostLoad` happened to drain first was verified on behalf of both. This was simultaneously a
+leak (a ciphertext moved into a second row was returned, because the surviving entry happened to be
+the honest first row's) and a false refusal (two genuine subjects in one `findAll()` could throw,
+because the surviving entry belonged to the *other* row). `repository.findAll(Sort)` reaches it
+directly; no join or nesting is required.
+
+**The fix does not try to give the frame a row identity it cannot have** - `ShreddedConverter` is
+still handed nothing but the column bytes, no session, no row. Instead `onPostLoad` independently
+re-reads the row's own currently stored shredded columns by id - the same `SELECT ... WHERE id = ?`,
+public header only, no key material, that `refuseIfSubjectMoved` already runs on the write path -
+and compares those headers against the row's true subject and tenant. That comparison needs nothing
+from the frame to be correct, so it cannot be fooled by which row's converter happened to run last.
+The frame itself is reduced to what it can honestly do: `ShreddingContext.recordDecoded` keys a
+*multiset* by `(entity, field, tenant, subject)` - the tenant and subject the header itself named at
+decode time, since a row id is unavailable - and increments a count rather than overwriting a map
+entry, so N legitimate rows sharing one subject can each record and later drain their own count.
+`onPostLoad` drains the exact key its own fresh, per-row re-read names; `popReadBracket()` still
+refuses when anything is left over, which is what keeps C-17/C-18/C-20 closed.
+
+Probes: `CipherProbeFrameTest.probe_a_moved_ciphertext_in_a_second_row_of_one_result_set` (the leak),
+`probe_two_rows_of_two_subjects_read_in_one_query` (the false-refusal mirror, strengthened per
+Dollar's instruction to assert each row decrypts to its own value, not merely "no exception"), and
+every third-pass C-17/C-18/C-20/C-22 probe, still green.
+
+**A row refused by `onPostLoad` used to stay in the persistence context (C-27).** The exception
+aborts the load in progress, but Hibernate had already registered the fully hydrated - decrypted -
+entity in the session's first-level cache before `onPostLoad` ran. A second read of the same row's
+id in the same transaction was a cache hit: no SQL, no converter, no `PostLoad`, nothing to refuse.
+`refuseLoad` now evicts the instance before the exception leaves the method, so a retry is forced
+back through a real reload and this same check every time. Cipher's fix text also asked for the
+transaction to be marked rollback-only; that half was tried and reverted, with the reasoning and the
+evidence in QUESTIONS.md #19 - `SimpleJpaRepository.findById`'s own `@Transactional` already does
+the equivalent the moment its own call is the one that refuses, entirely independent of anything
+this module does, and marking it explicitly here made every probe that catches the refusal and
+keeps going fail on `UnexpectedRollbackException` instead of exercising the property being tested.
 
 **What is still a residual.** `ShreddingReadBracketCustomizer` additionally refuses startup outright
 when more than one `EntityManagerFactory` bean exists in the application context, on the reasoning
@@ -122,6 +162,40 @@ integration test: registering a second `EntityManagerFactory`-typed bean the ord
 trips Spring Boot's own `@ConditionalOnMissingBean` on its auto-configured (and therefore
 instrumented) factory, suppressing it entirely rather than letting both coexist. See QUESTIONS.md
 C-20.
+
+### A `@Shredded` field inside an `@Embeddable` or an `@ElementCollection` is not supported (C-29)
+
+The forward field scan (`ShreddedModel.allFields`) walks an entity class and its superclasses only -
+never into an `@Embedded` component's own class, and never into the element type of an
+`@ElementCollection`. The reverse metamodel scan (`refuseUnmodelledShreddedConverters`) used to stop
+at the same boundary: it inspected an entity persister's own top-level `BasicValuedModelPart`
+attributes only, so a `@Shredded` field declared inside either shape was invisible in *both*
+directions - fully encrypted on write (whichever field's converter happened to put the entity in the
+model pushed the write scope for the whole state array), and never checked on read at all, because
+it is not in the `fields` list `onPostLoad`, the `@Immutable` check and the secondary-table check
+are all built from.
+
+Fixed by recursing: `EmbeddableValuedModelPart` (an `@Embedded` component, or an `@ElementCollection`
+of embeddables via its `PluralAttributeMapping`'s element descriptor) is walked one level deeper
+instead of skipped. The fix does not try to make either shape work - a `@Shredded` field nested
+inside a component or a collection is refused at startup, naming its dotted path (for example
+`Vault.secrets.token`, or `VaultWithNotes.notes[].token`), the same way a class-level `@Convert` was
+already refused. Move the field - `@Shredded`, `@Convert` and all - onto the entity itself.
+
+Probes: `CipherProbeEmbeddableScanTest.probe_a_shredded_field_inside_an_embeddable` (Cipher's own,
+`@Embedded`) and `probe_a_shredded_field_inside_an_element_collection_of_embeddables` (Dollar's
+mandated companion, `@ElementCollection` of an `@Embeddable`, in its own package so it cannot
+accidentally exercise the first fixture's violation instead of its own).
+
+### A `@Shredded` field must not be mapped `@Basic(fetch = LAZY)` (documented, not reproduced)
+
+Lazy fetching of a basic attribute is inert in Hibernate without bytecode enhancement, and none of
+this module's three POMs configure an enhancement plugin, so there is no path here to attack it
+today. In an application that does enable enhancement, the column would be fetched on first getter
+access - for an entity handed back from a repository call, that is *after* the read bracket has
+already closed, so the converter would see `ShreddingContext.inReadBracket() == false` and refuse
+with `SHRED-READ-UNSCOPED`: reasoned to be fail-closed, not reproduced under a real enhanced build.
+Documented as a residual rather than left silent: a `@Shredded` field must not be mapped lazily.
 
 ### `@Immutable` on a `@Shredded byte[]` field silently discards an in-place mutation (C-21)
 Every `@Shredded byte[]` field must carry `@org.hibernate.annotations.Immutable` (CIPHER-16): without
@@ -135,8 +209,10 @@ flush and is never seen as dirty: no exception, no log line, no `UPDATE`. This i
 engineer away - doing so means deep-copying the array again, which reopens CIPHER-16 - it is the
 permanent, documented cost of the annotation the module requires. The only way to change a
 `@Shredded byte[]` field once `@Immutable` is present is to assign it a whole new array
-(`setPayload(newArray)`), never to mutate the one already there. `probe_an_in_place_mutation_of_an_immutable_byte_array_is_persisted`
-(`CipherProbeMatrixTest`) asserts the trap is real, not that it has been fixed.
+(`setPayload(newArray)`), never to mutate the one already there. `probe_an_in_place_mutation_of_an_immutable_byte_array_is_silently_discarded`
+(`CipherProbeMatrixTest`, renamed from `..._is_persisted` at C-31 - the old name promised the
+opposite of what the assertion has always checked) asserts the trap is real, not that it has been
+fixed.
 
 ### Erased subjects are tombstoned, and the tombstone holds no key material
 `shredding_erased_subject` records `(tenant, subject, erased_at)` and nothing else. There is no key

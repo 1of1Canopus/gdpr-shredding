@@ -44,7 +44,10 @@ public class CustomerEmailConverter extends ShreddedStringConverter {
 
 The startup scan cross-checks every `@Shredded` field against the `@Convert` that maps it and
 refuses to start if the names disagree. Base classes ship for `String`, `byte[]`, `LocalDate`,
-`BigDecimal` and JSON-as-`String`.
+`BigDecimal` and JSON-as-`String`. A `@Shredded` field must be a direct attribute of the entity: not
+inside an `@Embeddable`, not inside an `@ElementCollection` - both are refused at startup (C-29) -
+and not mapped `@Basic(fetch = LAZY)` (undocumented lazily by Hibernate's own bytecode-enhancement
+requirement, which this module does not configure and has not tested against).
 
 > **`ShreddedBytesConverter` (the `byte[]` base class) needs `@Immutable` on the field.** Hibernate
 > treats `byte[]` as mutable and deep-copies the *converted* value - calling the converter a second
@@ -247,7 +250,9 @@ Cluster-wide invalidation ships in Pro alongside the KMS adapters.
 - a `@Shredded` field with no `@Convert`, or one whose converter names another entity or field;
 - a column mapped by a `ShreddedConverter` with no matching field-level `@Shredded` - a class-level
   `@Convert(attributeName = ...)` or an `orm.xml` mapping, which put the column in the write path but
-  not in the read verification, the `@Immutable` check or the second-level-cache refusal (C-19);
+  not in the read verification, the `@Immutable` check or the second-level-cache refusal (C-19), or a
+  field nested inside an `@Embeddable` or an `@ElementCollection` of embeddables, which the forward
+  scan cannot see either - not supported at all; move the field onto the entity itself (C-29);
 - more than one `EntityManagerFactory` bean in the application context, once Spring Data JPA is on
   the classpath (C-20);
 - a `@Shredded` entity that is `@Cacheable`/`@Cache`, unless `shredding.allow-second-level-cache=true`;

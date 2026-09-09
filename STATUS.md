@@ -13,6 +13,19 @@ QUESTIONS.md #17-#18 for the two items where the prescribed shape was adjusted (
 startup check ships without its own dedicated probe; C-21's probe was rewritten to assert the true,
 documented - not the literally-named - outcome).
 
+Fourth pass (2026-09-09): Cipher's `## Fourth pass (0ba0f6f)` pass found the third pass's per-bracket
+frame was still keyed by `entity.field` with no row identity - a leak and a false-refusal mirror on
+any multi-row query - 2 HIGH (C-26 + its mirror, C-27), 1 MEDIUM (C-29), 3 LOW (C-30/C-31/C-32). All
+closed by Isis; see the CHANGELOG's "Fixed (fourth pass at `0ba0f6f`)" entry and QUESTIONS.md #19-#20
+for the two items where the prescribed shape was adjusted (C-27's transaction is evicted from but not
+also marked rollback-only - Spring's own `@Transactional` on `findById` already does the equivalent
+and marking it explicitly broke every probe that catches the refusal and continues; the read-side
+per-row re-read shares the write path's existing, undemonstrated composite-identifier residual). A
+Maven profile, `probes-pending`, and `src/test-pending/java` in `gdpr-shredding-core` and
+`gdpr-shredding-spring-boot-starter` are new this pass (Dollar's standing convention): a future
+hand-off probe is committed to the repo, not the session scratchpad, and compiled/run only with
+`-Pprobes-pending` until it is green and moved into `src/test/java`. See `CONTRIBUTING.md`.
+
 Branch `feat/shredding-core`. `main` holds the plan commit only.
 Full `./mvnw -B clean verify` green with Docker up.
 
@@ -35,15 +48,16 @@ Full `./mvnw -B clean verify` green with Docker up.
 | 13 | Cipher's first PR review (2026-09-08): 2 HIGH, 8 MEDIUM, 10 LOW/INFO, all closed | done |
 | 14 | Cipher's re-verification (2026-09-09): 3 HIGH (CIPHER-11/12/14), 3 MEDIUM (CIPHER-13/15/16), 4 LOW (L11-L14), all closed | done |
 | 15 | Cipher's third pass (2026-09-09): 4 HIGH (C-17/18/19/20), 3 MEDIUM (C-21/22/23), 2 LOW (C-24/25), all closed | done |
+| 16 | Cipher's fourth pass (2026-09-09): 2 HIGH (C-26+mirror/C-27), 1 MEDIUM (C-29), 3 LOW (C-30/31/32), all closed | done |
 
 ## Tests
 
 | Module | Tests | Notes |
 |---|---|---|
 | `gdpr-shredding-core` | 77 | includes the CIPHER-01/02/03/04/05/10/15 probes and the Testcontainers PostgreSQL suite |
-| `gdpr-shredding-spring-boot-starter` | 50 | includes `ShreddingIntegrationTest` (real Hibernate/Testcontainers coverage of the event listener, the context stack and the auto-configuration bean graph), `CipherProbeSpelTest`'s L12 probe, and the third pass's `CipherProbeReadScopeTest` (C-17/18/22/23), `CipherProbeReverseScanTest` (C-19, isolated context), `CipherProbeMatrixTest`/`CipherProbeMatrix2Test` (the read-path and `@Immutable` sweeps, C-20/21) |
+| `gdpr-shredding-spring-boot-starter` | 58 | includes `ShreddingIntegrationTest` (real Hibernate/Testcontainers coverage of the event listener, the context stack and the auto-configuration bean graph), `CipherProbeSpelTest`'s L12 probe, the third pass's `CipherProbeReadScopeTest` (C-17/18/22/23/C-30), `CipherProbeReverseScanTest` (C-19, isolated context), `CipherProbeMatrixTest`/`CipherProbeMatrix2Test` (the read-path and `@Immutable` sweeps, C-20/21/C-31), and the fourth pass's `CipherProbeFrameTest` (C-26/C-27, six probes) and `CipherProbeEmbeddableScanTest` (C-29, two probes: `@Embedded` and `@ElementCollection`) |
 | `gdpr-shredding-sample` | 17 | includes the CIPHER-01 (moved-blob), QUESTIONS #4 (detached-merge, now wrapped in `ShreddingContext.withReadBracket`), CIPHER-08 (stale-scope), the live-actuator and the log-scan probes |
-| **total** | **144** | |
+| **total** | **152** | |
 
 Nothing is skipped and nothing is `@Disabled`.
 
@@ -52,7 +66,7 @@ Nothing is skipped and nothing is `@Disabled`.
 | Module | Covered / Total | % | Gate |
 |---|---|---|---|
 | `gdpr-shredding-core` | 979 / 1158 | 84.5% | 80% |
-| `gdpr-shredding-spring-boot-starter` | 654 / 768 | 85.2% | 80% |
+| `gdpr-shredding-spring-boot-starter` | 752 / 880 | 85.5% | 80% |
 | `gdpr-shredding-sample` | 63 / 95 | 66.3% | 30% smoke gate (L2) |
 
 The JaCoCo executions moved from `gdpr-shredding-core`'s own POM to the parent's
@@ -110,6 +124,27 @@ first draft, RED was demonstrated by removing the control and re-running (eviden
   `SECURITY-NOTES.md` did not yet exist to state the residual.
 - `probe_concurrent_write_encrypts_under_a_destroying_key`: failed against the implementation as
   designed - see below.
+
+## Cipher's fourth-pass probes (0ba0f6f)
+
+Eight probes, all green, all RED before their fix (proven by reverting to the third-pass code and
+re-running, not assumed):
+
+| Probe | Where | State |
+|---|---|---|
+| `probe_a_moved_ciphertext_in_a_second_row_of_one_result_set` (C-26, the leak) | starter `CipherProbeFrameTest` | green |
+| `probe_a_refused_row_is_returned_on_the_retry_from_the_persistence_context` (C-27) | starter `CipherProbeFrameTest` | green |
+| `probe_a_nested_repository_call_does_not_absolve_the_outer_frames_debt` (regression guard) | starter `CipherProbeFrameTest` | green |
+| `probe_empty_results_are_not_refused` (regression guard) | starter `CipherProbeFrameTest` | green |
+| `probe_a_read_only_manual_flush_transaction_still_refuses_a_moved_ciphertext` (regression guard) | starter `CipherProbeFrameTest` | green |
+| `probe_two_rows_of_two_subjects_read_in_one_query` (C-26, the false-refusal mirror; strengthened per Dollar's instruction to assert each row's own value, not just "no exception") | starter `CipherProbeFrameTest` | green |
+| `probe_a_shredded_field_inside_an_embeddable` (C-29, `@Embedded`) | starter `CipherProbeEmbeddableScanTest` | green |
+| `probe_a_shredded_field_inside_an_element_collection_of_embeddables` (C-29, `@ElementCollection`; Dollar's mandated companion) | starter `CipherProbeEmbeddableScanTest` | green |
+
+Plus the LOW fixes with no new probe of their own: C-30 rewrote an existing probe on a
+single-shredded-field fixture asserting the exact code (`CipherProbeReadScopeTest`); C-31 renamed a
+probe (`CipherProbeMatrixTest`); C-32 is exercised by every probe above that reaches a mismatch or a
+refusal, since `withReadBracket` is the mechanism every one of them goes through.
 
 ## The CI-only failure, 2026-09-08 (run 34240131889, HEAD `8f3e0fb`)
 

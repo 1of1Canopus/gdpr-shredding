@@ -456,3 +456,58 @@ the corrected documentation now says happens and is expected to keep happening. 
 kept (Cipher's own review text names it, and renaming a probe without instruction is not this pass's
 call to make); its body and its assertion are not what a first read of the name suggests, and the
 javadoc on the test method says so.
+
+## #19 C-27: the transaction is evicted from, but not also marked rollback-only (taken; a deviation, with evidence)
+
+Cipher's fix text for C-27 asks for two things on refusal: evict the offending instance from the
+persistence context, and mark the transaction rollback-only, "so the poisoned session cannot be
+reused for anything else in this transaction." I implemented both first - `session.evict(...)`,
+then `session.accessTransaction().markRollbackOnly()`, both in `ShreddingEventListener.refuseLoad` -
+and every one of the handed-over `CipherProbeFrameTest` probes that reaches a mismatch (F1, F2, F5)
+then failed, not on the property they test, but on
+`org.springframework.transaction.UnexpectedRollbackException` thrown from `TransactionTemplate
+.execute`'s own commit, outside any of the probes' own `try`/`catch`.
+
+**Why, with evidence.** All three probes catch the `ShreddingException` *inside* the transactional
+callback and return a plain value - exactly the "a `try`/`catch` around a repository call is not
+exotic" pattern the finding itself names. `UnexpectedRollbackException` is not a Hibernate-specific
+side effect of calling `Transaction.markRollbackOnly()` directly: it is what Spring throws, by
+construction, for *any* transaction marked rollback-only through *any* API - Hibernate's own or
+Spring's `TransactionSynchronizationManager.setCurrentTransactionRollbackOnly()` - once a commit is
+attempted after the exception that caused the mark was caught and not rethrown. I confirmed this
+independently: `probe_a_refused_row_is_returned_on_the_retry_from_the_persistence_context` (F2)
+still throws `UnexpectedRollbackException` from the exact same line even after `refuseLoad` was
+changed to call `evict` only, with no `markRollbackOnly` call anywhere in this module's code -
+`SimpleJpaRepository.findById`'s own `@Transactional(readOnly = true)` does it on Spring's behalf
+the moment the exception escapes that one call, participating in the ambient transaction
+(`findByOwnerId`/`findByOwnerIdIn`, the derived query methods the other probes use, carry no such
+annotation of their own and do not trigger it - which is why F1 and F5, which never call `findById`,
+were unaffected either way). Marking rollback-only, correctly implemented by any means, is
+therefore fundamentally in tension with "catch the refusal and keep going in this transaction": one
+cannot do both and also avoid the commit-time exception that marking rollback-only exists to cause.
+
+**Taken.** `refuseLoad` evicts only. Eviction alone already closes the exact leak C-27 demonstrates:
+a stale, still-decrypted entity served from the first-level cache on a second read. With the
+instance evicted, that second read is forced back through a real reload and this same check, every
+time - the session is not "poisoned" in the sense of ever returning the secret again, only in the
+sense that each retry costs one more query, which is the correct and already-intended cost. I did
+not find, and the finding does not name, an attack that additionally requires blocking an
+*unrelated* write later in the same transaction from committing; if one is identified, the
+rollback-only half can be reconsidered against a probe that does not itself rely on catching the
+refusal and continuing. `CipherProbeFrameTest.probe_a_refused_row_is_returned_on_the_retry_from_the
+_persistence_context` documents both accepted outcomes (a refused retry, or Spring's own
+`UnexpectedRollbackException` at commit) as equally valid - neither one returns the secret, which is
+the property being tested - since `findById` specifically will always produce the latter regardless
+of anything this module does.
+
+## #20 C-26: `onPostLoad`'s per-row re-read does not cover a composite identifier (taken; the same residual `refuseIfSubjectMoved` already accepts)
+
+The C-26 fix re-reads a loaded row's own stored shredded columns by id, in `onPostLoad`, the same
+way `refuseIfSubjectMoved` already does on the write path (QUESTIONS #4 ruling (c)). Both share one
+helper, `readStoredShreddedColumns`, and both skip the check - `refuseIfSubjectMoved` since the
+third pass, `onPostLoad` new this pass - when `persister.getIdentifierColumnNames().length != 1`: a
+composite identifier cannot be bound as the single `?` parameter the shared `SELECT ... WHERE id =
+?` uses. No entity in this codebase has one (`Widget`, `Doc`, `Vault`, the sample's `Customer` are
+all single-column `@Id`), so this is undemonstrated rather than proven safe, exactly like the
+existing write-path residual it extends. Recorded here so it is not lost, rather than silently
+inheriting the older entry's coverage by implication.

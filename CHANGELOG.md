@@ -6,6 +6,58 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed (fourth pass at `0ba0f6f`)
+
+Cipher's fourth-pass review (`docs/SECURITY-REVIEW-feat-shredding-core.md`, `## Fourth pass
+(0ba0f6f)`), 2026-09-09. Two HIGH, one MEDIUM, three LOW, all closed; one INFO documented.
+
+- **C-26 (HIGH, and its false-refusal mirror)** - the read bracket's frame keyed a decode by
+  `entityName + "." + fieldName` alone, with no row identity. Hibernate ORM 7.4 defers every row's
+  `PostLoad` callback until the whole result set is hydrated, so a second row's converter silently
+  overwrote the first row's entry: `repository.findAll(Sort)` over two rows of one entity either
+  returned a moved ciphertext (the surviving entry happened to belong to the honest row) or refused
+  two entirely legitimate rows (the surviving entry belonged to the *other* subject). Fixed by
+  having `onPostLoad` independently re-read each loaded row's own stored shredded columns by id -
+  the same `SELECT ... WHERE id = ?`, header only, that `refuseIfSubjectMoved` already runs on the
+  write path - rather than trusting anything the converter recorded; the frame itself becomes a
+  multiset keyed by `(entity, field, tenant, subject)`, incremented on record and drained by the
+  exact key a fresh per-row re-read names, so N legitimate rows of one subject can each record and
+  drain their own count. `ShreddingContext.recordDecoded`/`takeDecoded` are now
+  `recordDecoded`/`drainDecoded`, taking the entity and field separately plus the header's tenant
+  and subject; `ShreddingContext.Decoded` is removed. New probes:
+  `probe_a_moved_ciphertext_in_a_second_row_of_one_result_set`,
+  `probe_two_rows_of_two_subjects_read_in_one_query` (`CipherProbeFrameTest`).
+- **C-27 (HIGH)** - a row refused by `onPostLoad` had already been registered, fully hydrated, in
+  the session's first-level cache; a second read of the same id in the same transaction was a cache
+  hit that returned the intact, decrypted entity with no converter and no `PostLoad` involved.
+  `ShreddingEventListener.refuseLoad` now evicts the refused instance from the persistence context
+  before the exception leaves the method, forcing a retry back through a real reload and this same
+  check. Cipher's fix text also asked for the transaction to be marked rollback-only; that half was
+  tried and reverted - see QUESTIONS.md #19 for why, with evidence. New probe:
+  `probe_a_refused_row_is_returned_on_the_retry_from_the_persistence_context`.
+- **C-29 (MEDIUM)** - the reverse metamodel scan (`refuseUnmodelledShreddedConverters`) inspected an
+  entity persister's own top-level `BasicValuedModelPart` attributes only; a `@Shredded` field
+  declared inside an `@Embeddable` or an `@ElementCollection` of embeddables - invisible to the
+  forward field scan too - was fully encrypted on write and never checked on read at all. The scan
+  now recurses into `EmbeddableValuedModelPart` and a `PluralAttributeMapping`'s element descriptor,
+  refusing startup on any nested `ShreddedConverter`, naming its dotted path. New probes:
+  `probe_a_shredded_field_inside_an_embeddable` (Cipher's own), and Dollar's mandated companion
+  `probe_a_shredded_field_inside_an_element_collection_of_embeddables` (`CipherProbeEmbeddableScanTest`).
+- **C-30 (LOW)** - `probe_a_second_row_in_the_same_result_set_is_never_verified` asserted only
+  `isNotBlank()` on a two-shredded-field fixture (`Doc`), which let the wrong field's collision
+  throw first and never actually exercised the moved field. Rewritten on `Widget` (one shredded
+  field) asserting the specific `SHRED-SUBJECT-MISMATCH` code (`CipherProbeReadScopeTest`).
+- **C-31 (LOW)** - `probe_an_in_place_mutation_of_an_immutable_byte_array_is_persisted` renamed to
+  `..._is_silently_discarded`: the assertion always checked the mutation is lost (correct, per the
+  third pass's C-21 ruling), the name promised the opposite (`CipherProbeMatrixTest`).
+- **C-32 (LOW)** - `ShreddingContext.withReadBracket` caught `RuntimeException` only; an `Error`
+  unwound past both `discardReadBracket()` and `popReadBracket()`, leaving the frame on a pooled
+  thread. Rewritten with `try`/`finally` and an explicit "did the frame already close?" flag, so
+  every path - normal return, any `Throwable` - closes the frame exactly once.
+- **INFO** - documented that a `@Shredded` field must not be mapped `@Basic(fetch = LAZY)`
+  (`docs/index.md`, `SECURITY-NOTES.md`): inert without Hibernate bytecode enhancement, which this
+  module does not configure or test against.
+
 ### Changed
 - **Licensing:** the free core switches from Apache-2.0 to the Functional Source License, Version
   1.1, ALv2 Future License (FSL-1.1-ALv2) - free to use, not as a base for a competing product,
