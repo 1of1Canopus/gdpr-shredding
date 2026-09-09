@@ -9,13 +9,16 @@ import com.housedevinci.shredding.jpa.ShreddedConverter;
 import jakarta.persistence.Cacheable;
 import jakarta.persistence.Convert;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EntityManagerFactory;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * What the application declares: every {@code @Shredded} field, every {@code @BlindIndex} column,
@@ -101,7 +104,7 @@ public final class ShreddedModel {
    * @param allowSecondLevelCache the escape hatch for {@code @Cacheable} entities (control 12)
    */
   public static ShreddedModel scan(Collection<Class<?>> entities, boolean allowSecondLevelCache) {
-    return scan(entities, allowSecondLevelCache, Map.of());
+    return scan(entities, allowSecondLevelCache, Map.of(), null);
   }
 
   /**
@@ -114,11 +117,40 @@ public final class ShreddedModel {
    *     unless a type opts out) caches <em>every</em> entity regardless of any annotation, and the
    *     query cache is control 12's second half ("Query cache likewise"), which nothing in the
    *     module looked at before this.
+   *     <p>No reverse metamodel check (C-19): callers that have no real {@code
+   *     EntityManagerFactory} to walk - this module's own unit tests among them - get the
+   *     field-level scan only. Prefer the four-argument overload when a real factory is available.
    */
   public static ShreddedModel scan(
       Collection<Class<?>> entities,
       boolean allowSecondLevelCache,
       Map<String, Object> emfProperties) {
+    return scan(entities, allowSecondLevelCache, emfProperties, null);
+  }
+
+  /**
+   * @param entities the persistence unit's entity classes
+   * @param allowSecondLevelCache the escape hatch for {@code @Cacheable} entities (control 12)
+   * @param emfProperties the {@code EntityManagerFactory}'s resolved properties, so a global {@code
+   *     jakarta.persistence.sharedCache.mode} or {@code hibernate.cache.use_query_cache} setting is
+   *     caught even when no entity carries {@code @Cacheable} or {@code @Cache} at all (CIPHER-09)
+   * @param entityManagerFactory C-19: the reverse check. {@code null} skips it (the three-argument
+   *     overload's callers have no real factory to walk). The forward scan below only ever looks
+   *     for {@code @Shredded} on a <em>field</em>; a column mapped through a class-level
+   *     {@code @Convert(attributeName = ...)} or an {@code orm.xml} mapping is fully encrypted by
+   *     the write path (whichever properly-annotated field put the entity in the model pushed the
+   *     write scope for the whole state array) and completely unchecked on read - {@code
+   *     onPostLoad} never drains it because it is not in {@code fields}, and neither the
+   *     {@code @Immutable} check nor the second-level-cache refusal ever sees it. The reverse check
+   *     walks the Hibernate metamodel for every attribute whose JPA converter is a {@link
+   *     ShreddedConverter}, by whatever route it got there, and refuses startup on any that has no
+   *     matching field-level {@code @Shredded} entry.
+   */
+  public static ShreddedModel scan(
+      Collection<Class<?>> entities,
+      boolean allowSecondLevelCache,
+      Map<String, Object> emfProperties,
+      EntityManagerFactory entityManagerFactory) {
     var shredded = new ArrayList<ShreddedField>();
     var indexes = new ArrayList<BlindIndexField>();
     String sharedCacheMode =
@@ -167,9 +199,15 @@ public final class ShreddedModel {
                   + " treats byte[] as mutable and deep-copies the *converted* value to build its"
                   + " dirty-checking snapshot, which calls the converter a second time outside the"
                   + " write bracket and fails an IDENTITY-strategy insert with SHRED-CONTEXT-001."
-                  + " Add @Immutable to the field: ShreddedBytesConverter already returns a fresh"
-                  + " array from toBytes/fromBytes, so nothing shares state and the claim is"
-                  + " honest.");
+                  + " Add @Immutable to the field - but know what it costs (C-21, README.md,"
+                  + " docs/index.md): @Immutable is what stops that second, out-of-bracket deep"
+                  + " copy, and the deep copy it stops is also what Hibernate's dirty checking"
+                  + " compares the live array against. With no snapshot copy, an in-place mutation"
+                  + " of the array this field holds (b.getPayload()[0] = x) is compared against"
+                  + " itself and is never seen as dirty: no exception, no log line, no UPDATE. The"
+                  + " only way to change a @Shredded byte[] field once @Immutable is present is to"
+                  + " assign it a whole new array (setPayload(newArray)), never to mutate the one"
+                  + " already there.");
         }
         var shreddedField =
             new ShreddedField(
@@ -245,7 +283,80 @@ public final class ShreddedModel {
         refuseGeneratedRendering(type, entityName);
       }
     }
+
+    if (entityManagerFactory != null) {
+      var known = new HashSet<String>();
+      for (var field : shredded) {
+        known.add(field.entityName() + "." + field.fieldName());
+      }
+      refuseUnmodelledShreddedConverters(entityManagerFactory, known);
+    }
+
     return new ShreddedModel(shredded, indexes);
+  }
+
+  /**
+   * C-19. Walks the Hibernate runtime metamodel - not the field scan above - for every attribute
+   * whose resolved JPA converter is a {@link ShreddedConverter}, however it got there (field-level
+   * {@code @Convert}, a class-level {@code @Convert(attributeName = ...)}, an {@code orm.xml}
+   * mapping). Any such attribute with no matching entry in {@code known} is a column that is fully
+   * encrypted and completely unverified: refused here, at startup, naming the entity and attribute,
+   * rather than left for CIPHER's own {@code Ledger.secret} repro to find on a live row.
+   */
+  private static void refuseUnmodelledShreddedConverters(
+      EntityManagerFactory entityManagerFactory, Set<String> known) {
+    var sessionFactory =
+        entityManagerFactory.unwrap(org.hibernate.engine.spi.SessionFactoryImplementor.class);
+    var mappingMetamodel = sessionFactory.getMappingMetamodel();
+    mappingMetamodel.forEachEntityDescriptor(
+        persister -> {
+          // Hibernate's own persister entity name is the fully qualified class name unless
+          // @Entity(name=...) overrides it; the model above always keys on the simple name (or the
+          // @Entity name), the same convention ShreddingEventListener.entityName() uses on the
+          // write path - matched here so the two never disagree about which entity a key names.
+          String entityName = simpleEntityName(persister.getEntityName());
+          persister
+              .getAttributeMappings()
+              .forEach(
+                  attributeMapping -> {
+                    if (!(attributeMapping
+                        instanceof org.hibernate.metamodel.mapping.BasicValuedModelPart basic)) {
+                      return;
+                    }
+                    var converter = basic.getSingleJdbcMapping().getValueConverter();
+                    if (!(converter
+                        instanceof
+                        org.hibernate.type.descriptor.converter.spi.JpaAttributeConverter<?, ?>
+                            jpaConverter)) {
+                      return;
+                    }
+                    Object bean = jpaConverter.getConverterBean().getBeanInstance();
+                    if (!(bean instanceof ShreddedConverter<?> shreddedConverter)) {
+                      return;
+                    }
+                    String attributeName = attributeMapping.getAttributeName();
+                    String key = entityName + "." + attributeName;
+                    if (!known.contains(key)) {
+                      throw config(
+                          "the attribute "
+                              + key
+                              + " is mapped by "
+                              + shreddedConverter.getClass().getName()
+                              + " (a ShreddedConverter for "
+                              + shreddedConverter.entity()
+                              + "."
+                              + shreddedConverter.field()
+                              + "), but has no field-level @Shredded annotation of its own. This"
+                              + " happens when @Convert is declared at the class level (@Converts"
+                              + " on the entity) or through an orm.xml mapping instead of on the"
+                              + " field: the column is fully encrypted by the write path but"
+                              + " invisible to this module's read verification, the @Immutable"
+                              + " check and the second-level-cache refusal, all of which only ever"
+                              + " look at field-level @Shredded. Move @Convert onto the field,"
+                              + " beside @Shredded.");
+                    }
+                  });
+        });
   }
 
   /**
@@ -391,6 +502,12 @@ public final class ShreddedModel {
       }
     }
     return false;
+  }
+
+  /** Strips a Hibernate persister's fully qualified default entity name to its simple name. */
+  private static String simpleEntityName(String persisterEntityName) {
+    int dot = persisterEntityName.lastIndexOf('.');
+    return dot < 0 ? persisterEntityName : persisterEntityName.substring(dot + 1);
   }
 
   static String entityName(Class<?> type) {

@@ -130,8 +130,14 @@ public class ShreddingAutoConfiguration {
       EntityManagerFactory entityManagerFactory, ShreddingProperties properties) {
     var entities = new ArrayList<Class<?>>();
     entityManagerFactory.getMetamodel().getEntities().forEach(e -> entities.add(e.getJavaType()));
+    // C-19: entityManagerFactory is handed through so the reverse check can walk the metamodel for
+    // every attribute a ShreddedConverter actually maps, not only the ones a field-level @Shredded
+    // annotation names.
     return ShreddedModel.scan(
-        entities, properties.isAllowSecondLevelCache(), entityManagerFactory.getProperties());
+        entities,
+        properties.isAllowSecondLevelCache(),
+        entityManagerFactory.getProperties(),
+        entityManagerFactory);
   }
 
   @Bean
