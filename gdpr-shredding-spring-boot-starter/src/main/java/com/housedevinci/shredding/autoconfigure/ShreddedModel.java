@@ -410,6 +410,13 @@ public final class ShreddedModel {
       // embeddable-valued (an @ElementCollection of an @Embeddable) - either way it is one more
       // ModelPart to walk the same way, just one segment deeper.
       scanAttribute(entityName, path + "[]", plural.getElementDescriptor(), known);
+      // C-37: the index descriptor - a @Convert on a map key, or an @OrderColumn's list index - is
+      // a separate ModelPart from the element descriptor above and was never walked, so a
+      // ShreddedConverter reached that way was modelled by neither the forward field scan nor this
+      // reverse one.
+      if (plural.getIndexDescriptor() != null) {
+        scanAttribute(entityName, path + "[key]", plural.getIndexDescriptor(), known);
+      }
     }
   }
 

@@ -18,8 +18,8 @@ import java.util.List;
 /**
  * Cipher fifth pass: an {@code @ElementCollection} of <em>basic</em> values carrying the shredded
  * converter directly, not of {@code @Embeddable}s. {@code VaultWithNotes} covers the embeddable
- * shape; here {@code PluralAttributeMapping.getElementDescriptor()} is itself the
- * {@code BasicValuedModelPart} that holds the converter.
+ * shape; here {@code PluralAttributeMapping.getElementDescriptor()} is itself the {@code
+ * BasicValuedModelPart} that holds the converter.
  */
 @Entity
 @Table(name = "tag_bag")

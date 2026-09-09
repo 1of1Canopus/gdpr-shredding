@@ -6,6 +6,36 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed (fifth pass at `2f72449`)
+
+Cipher's fifth-pass review (`docs/SECURITY-REVIEW-feat-shredding-core.md`, `## Fifth pass
+(2f72449)`), 2026-09-09. Two of Isis's own two LOW-severity corrections closed; the four HIGH/MEDIUM
+findings (C-33/C-34/C-39/C-40/C-41) and the one LOW (C-35) in that pass are one design stop -
+`ShreddingContext`'s thread-local ownership and clearing rules - out of scope for this pass and left
+for Thor's design.
+
+- **C-37 (LOW)** - the reverse metamodel scan's `PluralAttributeMapping` branch walked
+  `getElementDescriptor()` only; `getIndexDescriptor()` - a `@Convert` on a map key, or an
+  `@OrderColumn`'s list index - was never walked, so a `ShreddedConverter` reached that way was
+  modelled by neither the forward field scan nor the reverse one and started up unrefused (the first
+  write then failed closed with `SHRED-CONTEXT-001`, but only in production, not at boot). Fixed:
+  `ShreddedModel.scanAttribute` now also walks the index descriptor when non-null. New probe:
+  `CipherProbeScanDepthTest.probe_a_shredded_map_key_in_an_element_collection_is_refused_at_startup`
+  (the class's other two probes, covering two-level `@Embeddable` nesting and an `@ElementCollection`
+  of basic values, were already green - C-29's recursion is sound).
+- **C-38 (LOW)** - a `@Shredded` entity with a composite identifier (`@IdClass`/`@EmbeddedId`)
+  started up and was then unreadable: both `onPostLoad` and `refuseIfSubjectMoved` return early when
+  `getIdentifierColumnNames().length != 1`, so every read of a row carrying a stored shredded value -
+  including rows the application wrote itself and nobody touched - was refused with
+  `SHRED-READ-UNVERIFIED`. Fail-closed, but discovered on the first read in production instead of at
+  boot. Fixed: `ShreddedModel.scan` now refuses at startup, naming the entity, the same as the
+  existing `@SecondaryTable` refusal. New probes in `CipherProbeCompositeIdTest`
+  (`probe_a_composite_id_shredded_entity_is_refused_at_startup`,
+  `probe_a_moved_ciphertext_in_a_composite_id_entity_is_never_displayed` - rewritten, per Cipher's
+  fix text, to build its own context in the shape of `CipherProbeScanDepthTest` rather than share a
+  class-level `@SpringBootTest` context that can no longer come up). QUESTIONS.md #20 reclassified to
+  this finding and closed.
+
 ### Fixed (fourth pass at `0ba0f6f`)
 
 Cipher's fourth-pass review (`docs/SECURITY-REVIEW-feat-shredding-core.md`, `## Fourth pass

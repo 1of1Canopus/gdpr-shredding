@@ -511,3 +511,15 @@ composite identifier cannot be bound as the single `?` parameter the shared `SEL
 all single-column `@Id`), so this is undemonstrated rather than proven safe, exactly like the
 existing write-path residual it extends. Recorded here so it is not lost, rather than silently
 inheriting the older entry's coverage by implication.
+
+**Ruling (Cipher, fifth pass at `2f72449`): rejected as a residual, reclassified as C-38, closed.**
+Not "undemonstrated rather than proven safe" - demonstrated: a composite-id `@Shredded` entity
+cannot be read at all, including rows it wrote itself and nobody touched. Fail-closed, which is why
+it is LOW and not HIGH, but a mapping this module cannot support must be refused at startup like the
+`@SecondaryTable` split already is, not discovered on the first read in production. Fixed by Isis:
+`ShreddedModel.scan` refuses at startup for any entity with a `@Shredded` field whose identifier maps
+to more than one column. Once that refusal is in place, this entry's write-path half (`
+refuseIfSubjectMoved`'s own composite-id skip) stops being a residual too, because the entity cannot
+exist. See CHANGELOG's "Fixed (fifth pass at `2f72449`)" entry, C-38, and
+`SECURITY-NOTES.md`'s "A `@Shredded` entity with a composite identifier is refused at startup, not on
+the first read (C-38)".

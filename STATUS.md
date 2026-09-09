@@ -26,6 +26,15 @@ Maven profile, `probes-pending`, and `src/test-pending/java` in `gdpr-shredding-
 hand-off probe is committed to the repo, not the session scratchpad, and compiled/run only with
 `-Pprobes-pending` until it is green and moved into `src/test/java`. See `CONTRIBUTING.md`.
 
+Fifth pass (2026-09-09): Cipher's `## Fifth pass (2f72449)` pass found two HIGH, one MEDIUM and one
+LOW that are one design stop - who owns `ShreddingContext`'s thread-local state and what is allowed
+to clear it (C-33/C-34/C-35/C-39/C-40/C-41) - left for Thor, not touched here. Isis's own two LOW
+corrections from the same pass, C-37 (the reverse metamodel scan never walked a plural attribute's
+index/map-key descriptor) and C-38 (a composite-id `@Shredded` entity started up and was then
+unreadable instead of being refused at boot, like the `@SecondaryTable` split), both closed; see the
+CHANGELOG's "Fixed (fifth pass at `2f72449`)" entry and QUESTIONS.md #20 (reclassified to C-38,
+closed).
+
 Branch `feat/shredding-core`. `main` holds the plan commit only.
 Full `./mvnw -B clean verify` green with Docker up.
 
@@ -49,15 +58,16 @@ Full `./mvnw -B clean verify` green with Docker up.
 | 14 | Cipher's re-verification (2026-09-09): 3 HIGH (CIPHER-11/12/14), 3 MEDIUM (CIPHER-13/15/16), 4 LOW (L11-L14), all closed | done |
 | 15 | Cipher's third pass (2026-09-09): 4 HIGH (C-17/18/19/20), 3 MEDIUM (C-21/22/23), 2 LOW (C-24/25), all closed | done |
 | 16 | Cipher's fourth pass (2026-09-09): 2 HIGH (C-26+mirror/C-27), 1 MEDIUM (C-29), 3 LOW (C-30/31/32), all closed | done |
+| 17 | Cipher's fifth pass (2026-09-09), Isis's two corrections only: 2 LOW (C-37/C-38), both closed. The pass's HIGH/MEDIUM findings (C-33/34/39/40/41) are a design stop - `ShreddingContext`'s thread-local ownership - out of scope, left for Thor | done |
 
 ## Tests
 
 | Module | Tests | Notes |
 |---|---|---|
 | `gdpr-shredding-core` | 77 | includes the CIPHER-01/02/03/04/05/10/15 probes and the Testcontainers PostgreSQL suite |
-| `gdpr-shredding-spring-boot-starter` | 58 | includes `ShreddingIntegrationTest` (real Hibernate/Testcontainers coverage of the event listener, the context stack and the auto-configuration bean graph), `CipherProbeSpelTest`'s L12 probe, the third pass's `CipherProbeReadScopeTest` (C-17/18/22/23/C-30), `CipherProbeReverseScanTest` (C-19, isolated context), `CipherProbeMatrixTest`/`CipherProbeMatrix2Test` (the read-path and `@Immutable` sweeps, C-20/21/C-31), and the fourth pass's `CipherProbeFrameTest` (C-26/C-27, six probes) and `CipherProbeEmbeddableScanTest` (C-29, two probes: `@Embedded` and `@ElementCollection`) |
+| `gdpr-shredding-spring-boot-starter` | 64 | includes `ShreddingIntegrationTest` (real Hibernate/Testcontainers coverage of the event listener, the context stack and the auto-configuration bean graph), `CipherProbeSpelTest`'s L12 probe, the third pass's `CipherProbeReadScopeTest` (C-17/18/22/23/C-30), `CipherProbeReverseScanTest` (C-19, isolated context), `CipherProbeMatrixTest`/`CipherProbeMatrix2Test` (the read-path and `@Immutable` sweeps, C-20/21/C-31), the fourth pass's `CipherProbeFrameTest` (C-26/C-27, six probes) and `CipherProbeEmbeddableScanTest` (C-29, two probes: `@Embedded` and `@ElementCollection`), and the fifth pass's `CipherProbeScanDepthTest` (C-37, four probes: two levels of `@Embeddable`, an `@ElementCollection` of basic values, and the map-key index descriptor) and `CipherProbeCompositeIdTest` (C-38, two probes) |
 | `gdpr-shredding-sample` | 17 | includes the CIPHER-01 (moved-blob), QUESTIONS #4 (detached-merge, now wrapped in `ShreddingContext.withReadBracket`), CIPHER-08 (stale-scope), the live-actuator and the log-scan probes |
-| **total** | **152** | |
+| **total** | **158** | |
 
 Nothing is skipped and nothing is `@Disabled`.
 
@@ -66,7 +76,7 @@ Nothing is skipped and nothing is `@Disabled`.
 | Module | Covered / Total | % | Gate |
 |---|---|---|---|
 | `gdpr-shredding-core` | 979 / 1158 | 84.5% | 80% |
-| `gdpr-shredding-spring-boot-starter` | 752 / 880 | 85.5% | 80% |
+| `gdpr-shredding-spring-boot-starter` | 770 / 899 | 85.7% | 80% |
 | `gdpr-shredding-sample` | 63 / 95 | 66.3% | 30% smoke gate (L2) |
 
 The JaCoCo executions moved from `gdpr-shredding-core`'s own POM to the parent's

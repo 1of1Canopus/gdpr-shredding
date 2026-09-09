@@ -25,8 +25,8 @@ import org.testcontainers.utility.DockerImageName;
 
 /**
  * Cipher fifth pass: how deep C-29's reverse metamodel scan actually goes. {@code
- * CipherProbeEmbeddableScanTest} covers one level of {@code @Embedded} and an {@code
- * @ElementCollection} of {@code @Embeddable}s. These three go one step past each of those.
+ * CipherProbeEmbeddableScanTest} covers one level of {@code @Embedded} and an
+ * {@code @ElementCollection} of {@code @Embeddable}s. These three go one step past each of those.
  */
 @Testcontainers
 class CipherProbeScanDepthTest {
@@ -103,8 +103,7 @@ class CipherProbeScanDepthTest {
       String write;
       Long id = null;
       try {
-        id =
-            tx.execute(s -> repo.save(new KeyedNotes(owner, "MAPKEY-SECRET", "value")).getId());
+        id = tx.execute(s -> repo.save(new KeyedNotes(owner, "MAPKEY-SECRET", "value")).getId());
         write = "WROTE";
       } catch (RuntimeException e) {
         write = "WRITE-REFUSED " + code(e);
@@ -115,7 +114,8 @@ class CipherProbeScanDepthTest {
         try {
           read =
               "READ "
-                  + tx.execute(s -> repo.findById(theId).map(n -> n.getNotes().toString()).orElse("<none>"));
+                  + tx.execute(
+                      s -> repo.findById(theId).map(n -> n.getNotes().toString()).orElse("<none>"));
         } catch (RuntimeException e) {
           read = "READ-REFUSED " + code(e);
         }

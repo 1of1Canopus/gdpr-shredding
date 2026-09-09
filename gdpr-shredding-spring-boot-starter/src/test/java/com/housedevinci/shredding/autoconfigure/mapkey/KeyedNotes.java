@@ -16,11 +16,12 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Cipher fifth pass: the shredded converter on the <em>map key</em> of an {@code
- * @ElementCollection}. {@code ShreddedModel.scanAttribute} handles a {@code PluralAttributeMapping}
- * by walking {@code getElementDescriptor()} only; {@code getIndexDescriptor()} - the map key, and
- * the list index of an {@code @OrderColumn} - is never walked, so a {@code ShreddedConverter}
- * reached this way is neither modelled by the forward field scan nor refused by the reverse one.
+ * Cipher fifth pass: the shredded converter on the <em>map key</em> of an
+ * {@code @ElementCollection}. {@code ShreddedModel.scanAttribute} handles a {@code
+ * PluralAttributeMapping} by walking {@code getElementDescriptor()} only; {@code
+ * getIndexDescriptor()} - the map key, and the list index of an {@code @OrderColumn} - is never
+ * walked, so a {@code ShreddedConverter} reached this way is neither modelled by the forward field
+ * scan nor refused by the reverse one.
  */
 @Entity
 @Table(name = "keyed_notes")

@@ -187,6 +187,35 @@ Probes: `CipherProbeEmbeddableScanTest.probe_a_shredded_field_inside_an_embeddab
 mandated companion, `@ElementCollection` of an `@Embeddable`, in its own package so it cannot
 accidentally exercise the first fixture's violation instead of its own).
 
+### A `@Shredded` converter on a plural attribute's index/map-key is refused, not silently unmodelled (C-37)
+
+C-29's recursion into `PluralAttributeMapping` walked `getElementDescriptor()` only. The index
+descriptor - the map key of an `@ElementCollection Map<K, V>`, or the position of an
+`@OrderColumn`-backed list - is a separate `ModelPart` and was never walked, so a `ShreddedConverter`
+reached through a map-key `@Convert(attributeName = "key", ...)` was modelled by neither the forward
+field scan nor the reverse one and started up unrefused. It was not a leak - the first write failed
+closed with `SHRED-CONTEXT-001`, and a read left the frame undrained - but the startup contract did
+not hold: the application found out in production instead of at boot. Fixed by walking
+`getIndexDescriptor()` too when non-null, refused the same way as the element shape.
+
+Probe: `CipherProbeScanDepthTest.probe_a_shredded_map_key_in_an_element_collection_is_refused_at_startup`.
+
+### A `@Shredded` entity with a composite identifier is refused at startup, not on the first read (C-38)
+
+`onPostLoad` and `refuseIfSubjectMoved` both return early when `getIdentifierColumnNames().length !=
+1` - the load-time per-row re-read and the update-time subject-immutability check are both built
+around a single-column id. Before this fix, a `@Shredded` entity with a composite identifier
+(`@IdClass` or `@EmbeddedId`) started up and was then unusable: every read of a row carrying a stored
+shredded value was refused with `SHRED-READ-UNVERIFIED`, including rows the application wrote itself
+and nobody touched, because `onPostLoad` never drains the frame; writes go the same way, because
+`save`'s merge has to read first. Fail-closed, but discovered in production rather than at boot - the
+same class of unsupported mapping as the `@SecondaryTable` split just above, which already refuses at
+startup for the analogous reason. Fixed: `ShreddedModel.scan` now refuses at startup for any entity
+with at least one `@Shredded` field whose identifier maps to more than one column, naming the entity.
+
+Probes: `CipherProbeCompositeIdTest.probe_a_composite_id_shredded_entity_is_refused_at_startup` and
+`probe_a_moved_ciphertext_in_a_composite_id_entity_is_never_displayed`.
+
 ### A `@Shredded` field must not be mapped `@Basic(fetch = LAZY)` (documented, not reproduced)
 
 Lazy fetching of a basic attribute is inert in Hibernate without bytecode enhancement, and none of
