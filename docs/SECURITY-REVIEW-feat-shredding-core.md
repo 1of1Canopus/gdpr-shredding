@@ -3080,3 +3080,276 @@ first thing that needs a connection. A skipped or flaky probe is never a passing
 Re-verification when they are in: `CipherProbeTenthPassTest` green in the default build with its
 five methods promoted out of `test-pending`, the whole default build green twice, `-Pprobes-pending`
 with nothing red, and a fresh-clone run of `CipherProbeCompositeIdTest` under parallel load.
+
+---
+
+## Eleventh pass (704f23b, 2026-09-10): MERGE WITH FIXES
+
+**Verdict: MERGE WITH FIXES.** No HIGH. S-22, S-23, S-24 are closed — verified in the code and by
+probes I wrote myself, not on the promoted ones alone — and addendum 4 is the best piece of work in
+this module: `ColumnRef` reproduces Hibernate's quoting instead of imposing one, `ColumnRefs` is
+genuinely the only construction site, and the independent Hibernate-rendered residual earns its
+keep. I proved that last one in the field rather than against the decoy: a legacy table whose
+subject column is the reserved word `user`, mapped unquoted, still turns the erasure's `WHERE` into
+`WHERE CURRENT_USER = ?` — and the residual caught it and rolled the whole transaction back. That
+is exactly what §4.5 was designed for and it is the first time it has fired on an attack it was not
+built against.
+
+Four new findings, none HIGH: **E-1 (MEDIUM)** the residual map silently drops one of two colliding
+entries and the erasure then verifies one blind index with another entity's query — reproduced, an
+erasure recorded `COMPLETE` with the index alive; **E-2 (LOW)** the unquoted-reserved-word mapping
+above is not refused at startup, so every erasure of that entity refuses for ever with a message
+that blames a trigger; **E-3 (LOW)** S-25 is closed in the starter only — three sample contexts and
+one core probe still race the container; **E-4 (INFO)** the `@BlindIndex` Javadoc still tells users
+their annotation text becomes a SQL identifier, which addendum 4 made false.
+
+### Numbers
+
+| | |
+|---|---|
+| build, HEAD `704f23b` unmodified | `./mvnw -B verify` BUILD SUCCESS, exit 0; Docker up throughout, **0 skipped** |
+| build, with this pass's four green probes | BUILD SUCCESS, exit 0, twice more — three consecutive green runs in this worktree |
+| tests at HEAD | **321** (core 109, starter 195, sample 17), 0 failures, 0 errors, 0 skipped |
+| tests with this pass's probes | **325** (core 109, starter 199, sample 17) |
+| line coverage (jacoco.xml bundle) | core **85.64 %**, starter **87.58 %**, sample **63.22 %**; gate 80 % on core and the starter, met |
+| probes diffed against `9e4e337` | 134 probe methods then, **151** now; the two names that disappear are S-22's and S-24's tenth-pass probes, both renamed in place after the behaviour they assert became "boots and clears" instead of "must not silently miss". **No assertion narrowed, none removed** — I read both renames line by line |
+| the 20 required names | all present under `src/test`, all green in the default build, all three runs |
+| `src/test-pending` | no `.java` anywhere at HEAD (the core tree holds only the staging-area README, which is the convention's own documentation and stays). This pass adds two red probes back into `gdpr-shredding-spring-boot-starter/src/test-pending/java` |
+| `-Pprobes-pending` after this pass | `CipherProbeEleventhPassPendingTest`, 2 methods, **both red** (E-1, E-2) |
+
+### S-22, S-23, S-24, S-25 re-verified
+
+- **S-22 — closed.** `ColumnRef` is JDK-only, refuses a `"` in the parsed text, a control character,
+  over 63 bytes and a non-identifier unquoted expression, and — correctly — does *not* constrain
+  case, because an unquoted upper-case name is an ordinary mapping PostgreSQL folds. `ColumnRefs` is
+  the one construction site: I grepped every `.sql()` interpolation in both modules and every one of
+  them is a `ColumnRef` or a `TableRef` built from a persister. The static `Identifier.toIdentifier`
+  is used, never the helper, and the round trip asserts both renderings. `subjectColumn`/
+  `tenantColumn` are lookup keys matched case-sensitively with no second pass, and the case-only
+  twin rule refuses the ambiguous mapping rather than guessing.
+- **S-23 — closed.** `refuseIfInheritedFromAnotherEntity` runs before the converter check, fires on
+  a `@Shredded` field whose declaring class is a different `@Entity`, names inheritance, and points
+  at `@MappedSuperclass`. A `@MappedSuperclass` field is untouched, which is the right boundary.
+- **S-24 — closed by construction**, which is better than the refusal I asked for: the `@Shredded`
+  column resolves by property name and a quoted column simply works.
+- **S-25 — closed in the starter, not in the repository.** See E-3.
+
+### The attacks, and what each returned
+
+| attack | result |
+|---|---|
+| reserved word `user`, mapped **quoted** (`@Column(name = "\"user\"")`) | boots, erases, index cleared. Green. |
+| reserved word `user`, mapped **unquoted**, physical column created as `"user"` | Hibernate cannot INSERT such a column at all (an INSERT column list is a `ColId` position — `syntax error at or near "user"`), so the row can only exist if another system wrote it. With the row written by raw SQL, the erasure is **refused**, `SHRED-ERASURE-004`, by the independent read-back; no key destroyed, no record appended. Fail-closed — and E-2. |
+| `"Owner"` quoted beside an unmapped legacy `owner` | victim cleared, bystander untouched (`probe_a_quoted_mixed_case_column_boots_and_is_addressed_quoted`). Re-read, not taken on the name. |
+| `owner` and `"owner"` twins (same text, different quoting) | both land in `matches`, refused by the "resolves to more than one property" rule before any SQL. Not reachable past startup. |
+| `globally_quoted_identifiers=true` | boots, erases, cleared. |
+| `globally_quoted_identifiers=true` + `..._skip_column_definitions=true` | boots, erases, cleared — the expressions arrive unquoted and the module reproduces that. |
+| `auto_quote_keyword=true` on a `user` column | boots, round-trips, cleared. |
+| `_x` and `x$y` column names, unquoted, table pre-created | boots, erases, cleared (`probe_underscore_and_dollar_column_names_are_addressed_as_the_mapping_addresses_them`). |
+| `@ColumnTransformer` that only rewrites the **write** | refused at startup naming `@ColumnTransformer`. The existing change-4 fixture sets both halves, so a predicate built on the read alone would have passed it; this one pins the write half (`probe_a_write_only_column_transformer_is_refused_at_startup`). |
+| residual under a concurrent insert of a **same-subject** row | refuses, `SHRED-ERASURE-004`, key intact — already pinned by Thor's `probe_a_row_inserted_for_the_subject_after_the_clear_refuses_the_erasure`. Must not miss: it does not. |
+| residual under a concurrent insert of **another subject's** row | completes; the bystander's index is untouched (`probe_a_concurrent_insert_for_another_subject_does_not_refuse_the_erasure`). Must not false-refuse: it does not. |
+| stateless-session hazards | `HibernateBlindIndexResidual.count` never calls `beginTransaction`, `getTransaction`, `commit` or `flush`; the session is opened on the caller's connection and closed in try-with-resources. Both hazards are written into the class Javadoc, and both are pinned by probes (`probe_the_independence_check_never_commits_the_erasures_transaction`, `probe_the_independence_check_cannot_flush_pending_writes`, `probe_the_independence_check_takes_no_second_connection`). I re-read the class for any path that begins or commits: there is none. |
+
+### E-1 (MEDIUM) Two entities on one table share one independent read-back, and the erasure then verifies one blind index with the other's query
+
+**What breaks.** `HibernateBlindIndexResidual` keys its residual queries on `Key(TableRef table,
+ColumnRef column)` — the table and the index column, deliberately not the subject and tenant columns
+— and builds them into a `LinkedHashMap` with `built.put(...)`, then `Map.copyOf`. Two entities
+mapped to the same table that index the same physical column produce the same key. The second `put`
+overwrites the first, `Map.copyOf` says nothing, and there is no log line and no refusal. From then
+on the erasure verifies **both** blind-index columns with the surviving entity's HQL — which matches
+on the *other* entity's subject property. The one check that exists to catch a mis-addressed erasure
+is silently pointed at the wrong column, for one of the two.
+
+**Repro.** `CipherProbeEleventhPassPendingTest.probe_two_entities_on_one_table_do_not_share_one_independent_read_back`
+(`src/test-pending`, RED). `DupA` and `DupB` both map `dup_note`, `DupA` matching on `owner_a`,
+`DupB` on `owner_b`, both indexing `email_idx`. The erasure's own statements are mis-addressed the
+way `CipherProbeReadBackIndependenceTest`'s decoy does it, so neither `UPDATE` clears anything and
+neither same-text read-back disagrees. Two subjects, one in each column; both erasures must refuse.
+One of them returns:
+
+```
+COMPLETED     — and select count(*) from dup_note where owner_a = ? and email_idx is not null → 1
+```
+
+**Severity: MEDIUM**, not HIGH. The consequence is S-13's and S-20's — a blind index over erased
+plaintext surviving an erasure recorded as complete — but reaching it needs the erasure's own
+addressing to be wrong as well; with correct addressing both `UPDATE`s still clear. This is the last
+line of defence failing silently, not an independent bypass. It is not INFO either: the whole point
+of §4.5 is that the erasure's own statements cannot be trusted to check themselves.
+
+**Correction (Isis).** In `HibernateBlindIndexResidual`'s constructor, capture the return of
+`built.put(key, residual)` and, when it is non-null and not equal to the new value, refuse at
+startup (`ErrorCodes.CONFIG`) naming both entities, the shared table and the shared column, and
+saying that one independent read-back cannot verify two subject columns. Test:
+`probe_two_entities_on_one_table_do_not_share_one_independent_read_back`, promoted to `src/test`
+with its assertion changed to a startup refusal if you take the refusal route (either shape closes
+it; a refusal is the honest one, since two entities over one table with different subject columns is
+a mapping this module has not been shown to erase correctly). **Rejected alternative:** widening the
+key to the whole `BlindIndexColumn`. It would make the lookup miss precisely when the erasure's
+columns are wrong — which is when the check matters — and turn a mis-address into "no entity mapping
+is registered", the wrong message for the right problem. Keep the narrow key; refuse the collision.
+
+### E-2 (LOW) An unquoted column whose name PostgreSQL reserves boots, and every erasure of that entity refuses for ever, blaming a trigger
+
+**What breaks.** `@Column(name = "user")`, unquoted, against a physical column created as `"user"`
+(which is the same column, since the letters are lower case). The round trip holds — `user` parses
+unquoted and renders `user` — so startup accepts it. Hibernate's own SQL is alias-qualified
+(`n1_0.user`, where PostgreSQL's grammar allows a keyword after the dot) and works. This module's
+statements are unqualified, and a bare `user` in a `WHERE` is `CURRENT_USER`. The `UPDATE` clears
+nothing, the same-text read-back agrees with it, and the independent read-back refuses the whole
+transaction — correctly. The erasure is safe. It is also impossible: every erasure of that entity
+fails with `SHRED-ERASURE-004`, whose message says "something outside this module — a trigger, a
+rule, a rewriting view — is repopulating the column", and the mapping that actually caused it is
+never named. An Article 17 request that cannot be executed, diagnosed as a database trigger.
+
+The design stop's own property is "every identifier this module interpolates addresses exactly the
+column Hibernate's mapping addresses, **or startup refuses, naming the mapping**". Here it does
+neither.
+
+**Repro.** `CipherProbeEleventhPassPendingTest.probe_an_unquoted_reserved_word_column_is_refused_at_startup_naming_the_mapping`
+(RED: the context starts). The green counterpart, which pins the fail-closed net and stays green
+after the fix, is
+`CipherProbeEleventhPassTest.probe_an_unquoted_reserved_word_subject_column_never_reports_a_completion_it_did_not_do`.
+
+**Correction (Isis).** In `ColumnRefs.of`, after the round trip, refuse an **unquoted** `ColumnRef`
+whose text folds to one of PostgreSQL's *reserved* key words (both reserved classes of the
+PostgreSQL key-word appendix — the ones that cannot be a bare `ColId`), naming `Entity.property`,
+the column, and telling the developer to quote it in the mapping (`@Column(name = "\"user\"")`).
+This cannot break a working application: Hibernate itself cannot write such a column unquoted — I
+reproduced `ERROR: syntax error at or near "user"` from its own `INSERT` — so any application in
+this state is already broken for writes. **Do not** use `Dialect.getKeywords()`: it carries
+non-reserved words too, and refusing a column named `value` or `name` would be a false refusal on a
+mapping that works perfectly.
+
+### E-3 (LOW) S-25 is closed in the starter only
+
+The closure note scopes the fix to "all 33 files under `gdpr-shredding-spring-boot-starter/src/test`
+and `src/test-pending`". My tenth-pass correction said *every* probe application. Four container
+declarations outside the starter still carry Testcontainers' default startup timeout —
+`gdpr-shredding-sample`'s `SampleEndToEndTest`, `CipherProbeActuatorEndToEndTest` and `LogScanTest`,
+and `gdpr-shredding-core`'s `CipherProbeJdbcTest` — and the three sample contexts bootstrap
+Hibernate with **no pinned dialect** at all, which is the exact shape of the flake ("Unable to
+determine Dialect" is dialect resolution failing to obtain a bootstrap connection). One of the three
+is a `CipherProbe*`.
+
+**Repro.**
+```
+for f in $(grep -rl "new PostgreSQLContainer" --include=*.java */src/test); do
+  grep -q withStartupTimeout $f || echo "$f"; done
+grep -L "hibernate.dialect" gdpr-shredding-sample/src/test/java/com/housedevinci/shredding/sample/*.java
+```
+
+**Correction (Isis).** Add `.withStartupTimeout(Duration.ofMinutes(2))` to those four containers,
+and pin `spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect` in the
+three sample test contexts (`@DynamicPropertySource` or `@SpringBootTest(properties = ...)`; the
+sample's shipped `application.yml` stays as it is — a production application resolving its own
+dialect is correct). This one has no JUnit probe: it is a property of the build's own sources, and
+the grep above is the check.
+
+### E-4 (INFO) The `@BlindIndex` Javadoc still tells users their annotation text becomes a SQL identifier
+
+`com.housedevinci.shredding.api.BlindIndex`, the module's public API: *"`subjectColumn()` and
+`tenantColumn()` name columns, not properties; they become SQL identifiers, so they are validated at
+startup against a narrow pattern."* Addendum 4 made both halves false — they are lookup keys,
+matched case-sensitively against the mapping and then thrown away, they never reach SQL, and there
+is no pattern any more. A user who reads this will fold a name to fit a pattern that no longer
+exists, and the case-sensitive match will then refuse them. `TableRef`'s field comment carries the
+same stale claim from the other side: *"the same pattern `BlindIndexColumn` validates its columns
+against"* — `BlindIndexColumn` validates no columns at all now.
+
+**Correction (Isis).** Rewrite both, in the words `BlindIndexColumn`'s own class Javadoc already
+uses. No test.
+
+### Rulings
+
+**The three deviations recorded in QUESTIONS S-22 — all three accepted.**
+
+1. *The `@ColumnTransformer` predicate.* Accepted, and it is the right predicate, not a compromise:
+   `getCustomReadExpression()` really is non-null for every column in 7.4 (Hibernate stores the
+   templated `{@}.col`), so the designed "refuse when either is non-null" would have refused every
+   application. Comparing the read against this column's own plain template and the write against a
+   bare `?` catches both halves — I verified the write half specifically, with a transformer that
+   leaves the read plain, and it is refused. Finding the design wrong at the keyboard and correcting
+   it with evidence is what I want to see.
+2. *Pinning `PhysicalNamingStrategyStandardImpl` in the unquoted-upper-case probe.* Accepted. Spring
+   Boot's default strategy lower-cases an explicit `@Column(name = "OWNER_ID")`, so under the
+   default that probe would pin nothing. Pinning Hibernate's own standard strategy is the only way
+   to exercise the shape, the probe says so in a comment at the point of the pin, and every other
+   probe in the suite runs under Spring Boot's default, so the default is not left untested.
+3. *One probe not red-first.* Accepted. `probe_a_column_name_containing_a_quote_character_is_refused`
+   pins `ColumnRefs.parse`, a unit that did not exist before the change; a unit test for new code
+   cannot be red against prior behaviour, and it stands in for nothing — the behavioural quoting
+   probes exist separately and nine of the seventeen were red on `606ef97`.
+
+**The same-text `verifyCleared` queries kept beside the independent one — keep, do not delete.**
+I asked for this to be decided, and the answer is keep, for a reason this pass produced rather than
+inherited: **E-1 shows the independent read-back can itself be silently mis-built.** A control whose
+whole justification is "the erasure's own statements cannot check themselves" must not become the
+new single point of failure. The cost is one indexed `COUNT` per (erasure, column), measured at
+1.3–4.2 ms after the first; erasure is rare and human-initiated. The cross-tenant `IS DISTINCT FROM`
+WARN also stays: it is the only place a row moved between tenants by a bulk update is ever visible,
+and it is a WARN, so it cannot block another tenant's erasure.
+
+### Fix list
+
+| # | severity | who | item |
+|---|---|---|---|
+| E-1 | **MEDIUM** | Isis | `HibernateBlindIndexResidual` constructor: refuse at startup when two blind indexes collide on `Key(table, column)`, naming both entities. Probe `probe_two_entities_on_one_table_do_not_share_one_independent_read_back` green and promoted |
+| E-2 | LOW | Isis | `ColumnRefs.of`: refuse an unquoted `ColumnRef` whose text is a PostgreSQL *reserved* key word, naming `Entity.property` and telling the developer to quote it. Not `Dialect.getKeywords()`. Probe `probe_an_unquoted_reserved_word_column_is_refused_at_startup_naming_the_mapping` green and promoted; keep the green counterpart in `CipherProbeEleventhPassTest` |
+| E-3 | LOW | Isis | S-25 across the repository: startup timeout on the four containers outside the starter, pinned dialect in the three sample test contexts. Repro is the grep above |
+| E-4 | INFO | Isis | `BlindIndex` Javadoc and `TableRef`'s pattern comment: the annotation text is a lookup key, not an identifier, and there is no pattern |
+
+Re-verification: the two red probes green in the default build after promotion, `-Pprobes-pending`
+with nothing red, the grep in E-3 returning nothing, and two consecutive full green runs.
+
+### For Souhaile, in plain words
+
+Module C encrypts the personal fields you mark, one key per person, and an erasure destroys that
+person's key. The row stays; the fields become unreadable. Regulators call this pseudonymisation
+with key destruction, not deletion, and the module's own documents say so rather than claiming more.
+
+This pass was about one thing: making sure that when the module says "erased", it erased the right
+row. Three times in this review an erasure had reported success while quietly missing its target,
+each time because the module wrote a column's name into a SQL statement slightly differently from
+the way the database understood it. The fix built since my last pass is the right one: the module no
+longer writes column names itself at all — it copies them, character for character, from what
+Hibernate uses, refuses to start if it cannot reproduce one exactly, and after every erasure it asks
+a second, independently built question — "is anything still there?" — and rolls the whole thing back
+if the answer is yes. I attacked that from eleven directions this pass, including a legacy table
+with a column named `user`, and in the one case where the statement still went wrong the second
+question caught it and refused. Nothing was lost.
+
+What is left is not a hole in the erasure, it is a hole in the safety net: if an application maps two
+different entities onto one database table and indexes the same column from both, the module keeps
+only one of the two second questions and asks it about the wrong column. It has to notice that
+collision and refuse to start. The other three items are smaller: a mapping style that makes every
+erasure of that table fail for ever with a misleading message instead of failing at startup with a
+clear one; three test containers that can still fail for load reasons; and a paragraph of
+documentation that tells users something that stopped being true.
+
+The residuals you keep after all four are fixed, unchanged from earlier passes: other servers can
+still hold a decrypted key in memory for up to sixty seconds after an erasure; backups keep the row
+until your retention window expires, and the erasure record prints that date; and `@Shredded` does
+not work on inherited entity fields or inside embeddables, which the docs now say plainly.
+
+### Pre-public checklist (before this repository is made public)
+
+1. **Move the internal documents** to `15-regulated-spring/internal/gdpr-shredding/`: `SPEC.md`,
+   `STATUS.md`, `QUESTIONS.md`, `docs/SECURITY-REVIEW-feat-shredding-core.md`, `docs/plans/`,
+   `RELEASING.md`. `agent-guard` is the worked example, and STATUS.md's own banner already says so.
+2. **Roles, not names.** 47 test classes are named `CipherProbe*`, 23 main-source files carry
+   "Cipher"/"Thor"/"Isis"/"Odin" in Javadoc, and `CHANGELOG.md` (70 mentions), `SECURITY-NOTES.md`
+   (34), `docs/index.md` (3), `CONTRIBUTING.md`, `gdpr-shredding-sample/README.md` and
+   `.githooks/commit-msg` name agents. Rename to the role — "the security review", "the adversarial
+   review's probe suite" — everywhere that stays public. This is the largest item and it is
+   mechanical; do not let it be done by hand at the last minute.
+3. **README.md** is clean of names already, and its claims are the sanctioned wording (QUESTIONS
+   #11). Re-read it once against the final feature set.
+4. **Licence**: `LICENSE` is FSL-1.1-ALv2 and `NOTICE` names it correctly with the ALv2 conversion.
+   Present, no action.
+5. **Post-merge item, not a blocker:** collapse the 33+4 per-class PostgreSQL containers onto one
+   reused singleton with a schema per test class (QUESTIONS S-25, deferred by Thor with a reason I
+   accept). Open it as an issue on merge so it is not lost; E-3 removes the current symptom, not the
+   container churn that will produce the next one.
