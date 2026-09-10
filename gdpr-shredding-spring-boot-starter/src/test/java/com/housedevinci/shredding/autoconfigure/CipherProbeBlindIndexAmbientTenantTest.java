@@ -204,7 +204,8 @@ class CipherProbeBlindIndexAmbientTenantTest {
             .orElseThrow()
             .column();
 
-    assertThat(column.tenantColumn()).isEqualTo("tenant_id");
+    assertThat(column.tenantColumn())
+        .isEqualTo(com.housedevinci.shredding.domain.ColumnRef.unquoted("tenant_id"));
     assertThat(column.tenantProperty()).contains("tenantId");
     assertThat(model.blindIndexColumns()).contains(column);
   }

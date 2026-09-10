@@ -272,25 +272,32 @@ class CipherProbeStartupTest {
         .hasMessageContaining("is a record");
   }
 
+  /**
+   * Design addendum 4, §4.3. A model scanned without an {@code EntityManagerFactory} knows what the
+   * annotations <em>said</em> - the two lookup keys - and nothing about which columns those name,
+   * because a column is only ever read off Hibernate's mapping. Asking such a model for the columns
+   * an erasure would address is refused, not answered from the annotation text: that answer is
+   * exactly the one S-22 shipped.
+   */
   @Test
   void the_model_reports_fields_entities_and_blind_index_columns() {
     var model = ShreddedModel.scan(List.of(Customer.class), false);
 
     assertThat(model.fieldCount()).isEqualTo(1);
     assertThat(model.entityCount()).isEqualTo(1);
-    assertThat(model.blindIndexColumns())
+    assertThat(model.blindIndexFields())
         .singleElement()
         .satisfies(
-            c -> {
-              // Change 9 (§3.9b): a model scanned without an EntityManagerFactory keeps the
-              // provisional, annotation-derived table. The persister's own qualified table
-              // replaces it wherever a statement is built.
-              assertThat(c.table())
-                  .isEqualTo(com.housedevinci.shredding.domain.TableRef.of("customer"));
-              assertThat(c.column()).isEqualTo("email_bidx");
-              assertThat(c.subjectColumn()).isEqualTo("customer_id");
-              assertThat(c.tenantColumn()).isEqualTo("tenant_id");
+            f -> {
+              assertThat(f.entityName()).isEqualTo("Customer");
+              assertThat(f.fieldName()).isEqualTo("emailBidx");
+              assertThat(f.subjectColumnKey()).isEqualTo("customer_id");
+              assertThat(f.tenantColumnKey()).isEqualTo("tenant_id");
+              assertThat(f.resolvedColumn()).isEmpty();
             });
+    assertThatThrownBy(model::blindIndexColumns)
+        .isInstanceOf(ShreddingException.class)
+        .hasMessageContaining("never resolved against Hibernate's mapping");
   }
 
   @Test

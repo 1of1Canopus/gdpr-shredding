@@ -223,7 +223,8 @@ class CipherProbeBlindIndexSubjectColumnTest {
             .orElseThrow()
             .column();
 
-    assertThat(column.subjectColumn()).isEqualTo("customer_ref");
+    assertThat(column.subjectColumn())
+        .isEqualTo(com.housedevinci.shredding.domain.ColumnRef.unquoted("customer_ref"));
     assertThat(column.subjectProperty()).contains("customerRef");
     assertThat(model.blindIndexColumns()).contains(column);
   }
