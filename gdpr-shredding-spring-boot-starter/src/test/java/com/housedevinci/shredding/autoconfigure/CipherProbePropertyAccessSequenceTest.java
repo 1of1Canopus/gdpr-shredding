@@ -20,7 +20,8 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Cipher sixth pass, design item 14's insert half - QUESTIONS #25.
+ * Cipher sixth pass, design item 14's insert half - QUESTIONS #25; renamed per S-12 (Cipher seventh
+ * pass) to what this class actually asserts.
  *
  * <p>This probe originally demonstrated S-1 (a batched {@code INSERT} silently skipping the
  * insert-side post-hoc header check) through {@code PropSeqWidget}, an
@@ -34,17 +35,21 @@ import org.testcontainers.utility.DockerImageName;
  * treatment every other mapping this module cannot protect gets (composite id,
  * {@code @SecondaryTable} split, {@code byte[]} without {@code @Immutable}). Once S-5 lands, this
  * fixture's {@code @SpringBootTest} context can no longer come up at all - refused before a single
- * row is ever written, batched or not - so what this probe demonstrates today is the startup
- * refusal itself, in the same shape as {@code CipherProbeCompositeIdTest} (C-38) and {@code
- * CipherProbePropertyAccessTest} (S-5's own probe, on a different fixture).
+ * row is ever written, batched or not - so what this class asserts today, and the reason for its
+ * name, is the startup refusal of a property-access mapping <em>under batching configuration</em>
+ * specifically (the original S-1 fixture's own {@code hibernate.jdbc.batch_size} / {@code
+ * order_inserts} properties, kept so a future batching-specific regression in the startup scan
+ * still has a fixture to catch it on) - not S-1's batched-write property itself, which this file no
+ * longer tests. It is in the same shape as {@code CipherProbeCompositeIdTest} (C-38) and {@code
+ * CipherProbePropertyAccessTest} (S-5's own probe, on a different fixture, without batching).
  *
  * <p>S-1's property - no row of a {@code @Shredded} entity commits whose stored header is not bound
  * to the scope it was written under, at any {@code hibernate.jdbc.batch_size} - is independently
- * carried in the default build by {@code BatchedWriteVerificationTest}'s seventeen probes, none of
- * which needs a mapping S-5 refuses to demonstrate it.
+ * carried in the default build by {@code BatchedWriteVerificationTest}'s seventeen probes (see that
+ * class's own javadoc), none of which needs a mapping S-5 refuses to demonstrate it.
  */
 @Testcontainers
-class CipherProbeBatchedInsertCheckTest {
+class CipherProbePropertyAccessSequenceTest {
 
   @Container
   static final PostgreSQLContainer<?> POSTGRES =

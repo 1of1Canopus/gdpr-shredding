@@ -6,6 +6,15 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Changed (seventh pass at `e2c2bdd`, S-12: renamed a probe to what it tests)
+
+**INFO.** `CipherProbeBatchedInsertCheckTest` was rewritten per QUESTIONS #25 from S-1's batched
+fail-open into S-5's startup refusal, and was left with a name for a property it no longer exercises
+- the next reader would believe S-1 is covered by it. Renamed to
+`CipherProbePropertyAccessSequenceTest` (what it now asserts: a property-access mapping is refused
+at startup under a batching configuration); `BatchedWriteVerificationTest`'s class javadoc now names
+itself as the file that carries S-1's property in the default build.
+
 ### Fixed (seventh pass at `e2c2bdd`, S-8: `closeRegion` discarded an inner region's undrained decode in silence)
 
 **MEDIUM.** `unwindTo` popped every region above the one being closed without ever looking at its

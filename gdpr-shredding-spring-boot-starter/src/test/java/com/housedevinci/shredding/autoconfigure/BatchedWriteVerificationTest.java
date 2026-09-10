@@ -59,6 +59,12 @@ import org.testcontainers.utility.DockerImageName;
  * prepared on the application's own {@code DataSource}, and the settlement statement has a shape no
  * other statement in this module has - {@code SELECT "id", ... FROM "table" WHERE "id" IN (...)}. A
  * path is covered when a settlement statement naming that table ran before the commit.
+ *
+ * <p><strong>S-12 (Cipher seventh pass).</strong> S-1's original probe, {@code
+ * CipherProbeBatchedInsertCheckTest}, was rewritten per QUESTIONS #25 into what is now {@code
+ * CipherProbePropertyAccessSequenceTest} - a startup-refusal assertion, once S-5 made its
+ * property-access fixture unstartable - and no longer exercises batching or the insert check by
+ * name. This class is what carries S-1's property in the default build.
  */
 @SpringBootTest(classes = BatchedWriteVerificationTest.BatchApp.class)
 @Testcontainers
