@@ -2652,3 +2652,249 @@ probe.
 
 Re-verification when all eight are in: every probe named above green, plus the whole default build
 and `-Pprobes-pending` with nothing red.
+
+---
+
+## Ninth pass (4a95ba5): NOT MERGEABLE
+
+**Verdict: NOT MERGEABLE.** One HIGH, reproduced: **S-20**. Design addendum 3 bound one of the two
+axes of a blind index to the row it sits in. The other axis - `subjectColumn` - was left exactly as
+S-13 found the tenant axis: never resolved, never read at write time, never compared with the
+subject the data key is derived under, and matched by the erasure's `WHERE` all the same. An entity
+whose `@Shredded(subject = ...)` evaluates to something other than the value in `subjectColumn`
+writes an index no erasure can reach; the key dies, the ciphertext dies, the chained record says
+`COMPLETE`, and `HMAC(secret, tenant | entity | field | plaintext)` stays in the table. That is
+S-13's consequence, word for word, one column over.
+
+Everything else on this pass is in good order. Addendum 3 as built matches all seven changes,
+including the two load-bearing ones, and the deviations Thor recorded are both correct. The five
+attacks I was asked to run found one further defect (S-21, MEDIUM) and cleared three surfaces:
+two indexes on one entity erase together, an `@ElementCollection` carrying a `@Shredded` value and
+its index is refused at startup naming the path, and a row moved between tenants by native SQL
+refuses its own read with `SHRED-SUBJECT-MISMATCH` and gets an honest zero plus a WARN from the
+erasure. S-14 to S-19 and S-11 are closed and re-verified; S-18's doc-only closure is accepted.
+
+### Numbers
+
+| | |
+|---|---|
+| build | `./mvnw -B clean verify` BUILD SUCCESS, exit 0, Docker up throughout |
+| tests, default build | **262** green (core 92, starter 153, sample 17); 0 failures, 0 errors, 0 skipped |
+| line coverage (jacoco.csv) | core **84.8 %** (1072/1264), starter **87.9 %** (1414/1608); gate 80 % |
+| branch coverage | core 60.7 % (283/466), starter 72.1 % (521/723) |
+| CI | run `34473052597`, head `4a95ba5`, **success**, 3m08s; annotations are Error Prone warnings only, unchanged from the eighth pass |
+| `-Pprobes-pending` before this pass | **empty** - both `src/test-pending/java` trees hold a `README.md` and nothing else |
+| `-Pprobes-pending` after this pass | core 92 green, starter 161, **3 red**: `CipherProbeBlindIndexSubjectColumnTest` (both methods, S-20) and `CipherProbeNinthPassBlindIndexTest.probe_a_default_schema_is_supported_or_refused_by_its_real_reason` (S-21). My other five probe methods are green - they are verifications, not findings |
+| probes diffed against `c6009aa` | 100 probe methods then, **110** now. Three names disappear, all three accounted for below; **no assertion narrowed anywhere** |
+
+**The three removed names.** `probe_a_displaced_settlement_listener_is_not_detected_after_boot` is
+S-11's, rewritten and renamed under my own eighth-pass ruling
+(`CipherProbeEarlierIntegratorWipesHibernateDefaultsTest`, green, in `src/test`) - accepted.
+`probe_a_blind_index_under_the_ambient_tenant_survives_that_subjects_erasure` and
+`probe_the_index_bytes_are_the_hmac_of_the_plaintext` are the two halves of my own S-13 repro, and
+Thor's recorded deviation is right: change 4 makes `Note`'s shape *unwritable*, so the original
+assertion - that the erasure clears the index - is unbuildable on that fixture, exactly the `#25`
+situation. The property is not retired with it: `OwnedNote` in the same file is the same
+application shape declared correctly, and
+`probe_the_declared_shape_erases_key_ciphertext_and_index_together` asserts the clearing, the
+derivation under the row's own tenant column value, and that no index bytes survive **under any
+tenant value the row ever carried**. Accepted as a rewrite.
+
+### Addendum 3 as built, against the seven changes
+
+| change | built | verdict |
+|---|---|---|
+| 1 - column, not property | `ShreddedModel.resolveTenantColumns`/`resolveTenantProperty`, case-insensitive, unquoting, exactly one basic `String` property on the entity's primary table, not a formula, not the identifier, not itself `@Shredded`; five probes | **correct**, and the camel-case regression probe boots, which is the point of the change |
+| 2 - one resolution, one object | `BlindIndexColumn.tenantProperty()`, resolved once at startup, `JdbcErasureStore` constructed from `model.blindIndexColumns()`, startup refuses an unresolved one | **correct**; the write reads the property and the erasure reads the column off one record |
+| 3 - null, blank, non-`String` at write | `ShreddingEventListener.rowTenant`, `SHRED-UNVERIFIED-WRITE`, naming entity, index field and column | **correct**, and `TenantId`'s own validation refuses rather than normalises, so a case- or whitespace-variant tenant column cannot silently produce an index the erasure's exact `=` would miss |
+| 4 - refuse when field tenant ≠ column value | `writeBlindIndexes`, before the derivation, naming both values, the field and the column | **correct, and load-bearing**: it is what makes the three-way equality hold by construction |
+| 5 - verify inside the erasure transaction | `JdbcErasureStore.verifyCleared`: residual for this (tenant, subject) refuses with `SHRED-ERASURE-004` and rolls back key destruction and record with it; the same subject under another tenant value is a WARN with the count | **correct**; I saw the WARN fire on the bulk-move probe below |
+| 6 - clean break | nothing tries the old keying | **correct** |
+| 7 - state the residual | `SECURITY-NOTES.md` beside the blind-index control, plus the through-Hibernate move refused by subject immutability | **correct**, and the residual is narrower than I thought: a tenant move *through* Hibernate is refused, so the bulk update outside Hibernate really is the only path |
+
+The limit of change 5, stated so nobody reads more into it than it does: `verifyCleared`'s residual
+query uses the same `WHERE` as the `UPDATE` it checks. It proves the `UPDATE` did what its row
+count claimed against a table that may have grown a trigger; it cannot prove the `WHERE` addressed
+the right rows. That is precisely the gap S-20 and S-21 live in.
+
+### The five attacks
+
+1. **A row whose tenant column is updated by native SQL, then read.**
+   `CipherProbeNinthPassTenantMoveTest`, both methods green. The read is refused -
+   `SHRED-SUBJECT-MISMATCH`, the header says `org-b`, the row says `org-c`, no plaintext crosses.
+   The erasure for `org-b` reports `blindIndexColumnsCleared() = 0` - an honest zero, not a claim -
+   and change 5's WARN names the count and the table. The residual is real and it is documented and
+   it is visible at the one moment someone can act on it. Nothing further to fix.
+2. **Two blind indexes on one entity over different `of` fields.**
+   `probe_two_blind_indexes_on_one_entity_are_both_erased`, green: both written under the row's
+   tenant column value, both cleared by one request, `blindIndexColumnsCleared() = 2`.
+3. **An `@ElementCollection` whose element carries a `@Shredded` value and its `@BlindIndex`.**
+   `probe_a_blind_index_inside_an_element_collection_is_refused_at_startup`, green: `SHRED-CONFIG-001`
+   naming `TaggedNote.tags[].value` and telling the developer to move the field onto the entity.
+   C-19's reverse metamodel scan walks plural attributes, so the shape cannot boot.
+4. **`verifyCleared` when the index table is in another schema (K1).** Found S-21, below.
+5. **The `OwnedNote` vs `Note` deviation - is any writable shape left where the index can outlive
+   the key?** Yes: S-20. Not on the tenant axis - change 4 closes that one by construction - but on
+   the subject axis, which addendum 3 never touched.
+
+### S-20 (HIGH) A blind index whose `subjectColumn` is not the shredded subject survives its subject's erasure
+
+`CipherProbeBlindIndexSubjectColumnTest.probe_a_blind_index_whose_subject_column_is_not_the_shredded_subject_survives_erasure`
+and `probe_the_surviving_index_is_the_hmac_of_the_erased_plaintext` (`src/test-pending/java`, both RED
+on `4a95ba5`).
+
+*Where.* `@BlindIndex.subjectColumn()` is validated as a SQL identifier in `BlindIndexColumn` and
+then interpolated into `JdbcErasureStore.clearBlindIndexes`' `WHERE` and both of `verifyCleared`'s
+queries. That is every use of it in the module: `grep subjectColumn` over `src/main` returns the
+annotation, the record, and three SQL fragments. It is never resolved to a property, never read out
+of the state array, and never compared with `Scope.subject()` - the subject the data key, the AAD
+and the erasure request are all keyed on.
+
+*Repro.* `SplitNote` (fixture, `blindindexsubject`): `@Shredded(subject = "#{customerRef}", tenant =
+"#{tenantId}")` on `email`, `@BlindIndex(of = "email", subjectColumn = "owner_id", tenantColumn =
+"tenant_id")`. Write one row with `ownerId = "owner-…"` and `customerRef = "subject-…"`; the write
+is accepted, the index is written. `erase(org-b, subject-…)` then reports **`COMPLETE`** with
+`blindIndexColumnsCleared() = 0`, and `select email_idx from split_note` still returns
+`[89, 118, 30, -75, 74, 66, -92, 69]`, which the second probe recomputes as
+`blindIndex.compute(TenantId.of("org-b"), "SplitNote", "email", "victim@example.test")`.
+
+*Why it is HIGH.* It is S-13 with the columns swapped, and S-13 was HIGH: the surviving value is a
+stable cross-row correlator for an erased subject and, for a low-entropy plaintext such as an email
+address, a confirmation oracle for anyone holding `shredding.blind-index.hmac-secret`. The erasure
+proof says it succeeded. It is fail-*open*: nothing at startup, nothing at the write and nothing in
+the erasure says a word, because `verifyCleared`'s residual query is keyed on the same
+`subjectColumn` that missed.
+
+*How an application reaches it without trying.* `@Shredded(subject = "#{customer.externalId}")`
+with `subjectColumn = "customer_id"` - the subject is the customer's external reference, the column
+is the foreign key - is the ordinary shape of an entity whose subject lives one association away. A
+`subjectColumn` typo that happens to name another existing column (`"id"`) is accepted just as
+silently, and a `subjectColumn` naming no column at all is not caught until an erasure fails with a
+raw `SQLException` at runtime, which is the failure mode change 1 exists to prevent on the other
+axis.
+
+**Fix (Thor): addendum 3, change 8 - bind the subject axis exactly as changes 1, 2, 3 and 4 bound
+the tenant axis.** This is not a new mechanism and it is not a design stop: it is the mechanism
+already built, applied to the second column of the same `WHERE`.
+
+- `ShreddedModel`: resolve `subjectColumn` to a property through the persister's own column
+  mapping, with `resolveTenantProperty`'s rules verbatim - exactly one match, basic, `String`,
+  primary table, not a formula, not itself `@Shredded`, not inside a component - refusing with
+  `SHRED-CONFIG-001` naming entity, index field, `subjectColumn` and what was found. The identifier
+  case is the one difference worth allowing: the subject column *may* be the entity's identifier,
+  since an application may legitimately use the id as the subject; if it is, the write path must
+  read the id rather than the state array, and if that is awkward, refuse it explicitly and say so.
+- `BlindIndexColumn`: `subjectProperty`, an `Optional<String>` beside `subjectColumn`, resolved
+  once, on the same record, read by the write path and the erasure path. Change 2's test extends to
+  it.
+- `ShreddingEventListener.writeBlindIndexes`: refuse with `SHRED-UNVERIFIED-WRITE` when
+  `state[subjectProperty]` is null, blank or not a `String`, and refuse when it is not equal to
+  `scope.subject().value()`, naming both values, the field and the column - the same message shape
+  change 4 already uses for the tenant.
+- Acceptance set: both probes above green (as a clearing or as a refusal, whichever the shape
+  allows - state which in the addendum), plus `CipherProbeBlindIndexAmbientTenantTest` and
+  `CipherProbeBlindIndexTenantColumnTest` unchanged and green, plus one startup probe per refusal
+  branch, plus my three green ninth-pass probes promoted out of `test-pending`.
+- Record it in `docs/plans/read-path-design.md` as change 8 of addendum 3, with the invariant
+  stated in one line: *for a row to be erasable by one request, the tenant and subject its data key
+  was derived under, the tenant and subject its index was derived under, and the values in its
+  `tenantColumn` and `subjectColumn` are one pair.*
+
+### S-21 (MEDIUM) The module addresses the entity's own table with an unqualified identifier, and one incidental check refuses every schema-qualified deployment with the wrong reason
+
+`CipherProbeNinthPassBlindIndexTest.probe_a_default_schema_is_supported_or_refused_by_its_real_reason`
+(`src/test-pending/java`, RED) and `probe_a_blind_index_in_another_schema_is_erased_or_refused_at_startup`
+(green - it is refused, which is why this is MEDIUM and not HIGH).
+
+Every statement this module builds for a user table interpolates an unqualified name:
+`JdbcErasureStore.clearBlindIndexes` and `verifyCleared` use `BlindIndexColumn.table()`,
+`ShreddingEventListener.readStoredShreddedColumns` and the `IDENTITY` rebind use
+`ShreddedField.tableName()`, and all of those come from `ShreddedModel.tableName(Class)`, which
+reads `@Table(name = ...)` and **ignores `schema`**. Which table those statements actually hit is
+therefore decided by the runtime connection's `search_path`, not by the mapping Hibernate uses.
+
+Three consequences, in order:
+
+- **`@Table(schema = "app2")` is refused at startup** - `SHRED-CONFIG-001`, "which is mapped by
+  `SchemaNote.tenantId` onto the table `app2.schema_note`, not onto `schema_note` … A tenant column
+  on a secondary table cannot be matched by that statement." Fail-closed, and by accident: the only
+  thing that noticed is change 1's primary-table comparison, which exists for `@SecondaryTable`.
+- **`spring.jpa.properties.hibernate.default_schema` makes every `@BlindIndex` mapping in the
+  application unusable**, with the same message, for a mapping that has no secondary table
+  anywhere. Reproduced with `default_schema=public` on the existing `blindindexambient` fixtures.
+  That property is how a large share of enterprise deployments name their schema; the developer who
+  hits this is sent looking for a `@SecondaryTable` that does not exist.
+- **An entity with `@Shredded` and no `@BlindIndex` is not checked at all**, because that
+  comparison only runs per blind index. Its subject-immutability check then reads whatever
+  `search_path` resolves, and `refuseIfSubjectMoved` **fails open** on a miss:
+  `readStoredShreddedColumns` returns `null` for "row not found" and the caller does `if (stored ==
+  null) return;`. A wrongly-addressed `SELECT` that finds nothing is indistinguishable from a
+  concurrently deleted row, and the control is skipped in silence. I did not build a live shadow-
+  table repro - with `IDENTITY` ids the rebind `UPDATE` fails first, so the reachable window is
+  assigned or sequence ids plus a same-named table earlier in `search_path` - so that third
+  consequence is **suspected, not reproduced**, and the attempt is recorded here. The first two are
+  reproduced.
+
+**Fix (Thor).** Either direction closes it; say which in the addendum.
+
+- *Address the qualified table.* Take the table from the persister
+  (`getMappedTableDetails().getTableName()`, the same expression change 1 already compares against)
+  rather than from `@Table(name = ...)`, carry it on `BlindIndexColumn` and `ShreddedField`,
+  validate it as a dot-separated sequence of the existing identifier pattern, and interpolate it
+  whole. `ShreddedModel.tableName(Class)` then has no callers left, which is the point.
+- *Or refuse it accurately and universally.* At startup, for every `@Shredded` entity - not only
+  the indexed ones - refuse a qualified table expression with `SHRED-CONFIG-001` naming the schema,
+  the entity, and the real reason: this module interpolates table names unqualified, so its
+  statements resolve through `search_path` and cannot be shown to address the table Hibernate maps.
+
+**And in either case (Isis), independently:** `refuseIfSubjectMoved` must refuse, not return, when
+`readStoredShreddedColumns` finds no row. Hibernate is issuing an `UPDATE` for a row it believes
+exists; a module that cannot find that row is either racing a delete - in which case the `UPDATE`
+fails with a stale-state error a moment later anyway - or addressing the wrong table. Typed
+refusal, naming the entity and the table it looked in. That is what turns the third consequence
+above from fail-open into fail-closed whatever else is decided, and it is one line plus a message.
+One sentence in `SECURITY-NOTES.md`: this module's own tables (`shredding_*`) are unqualified too,
+deliberately, and are expected on the runtime role's `search_path`.
+
+### S-14 to S-19 and S-11, verified
+
+- **S-14** closed. `unwindTo` does `stack.stream().noneMatch(r -> r.token == token) → return null`
+  before it pops anything; the javadoc states the rule and why. `resetForTests()` is
+  package-private and is used by all four `@AfterEach` blocks. `CipherProbeEighthPassRegionTest`,
+  `CipherProbeRegionEpochTest`, `CipherProbeRegionResidueTest`, `CipherProbeSeventhPassTest` green.
+- **S-15** closed, as ruled. `isCurrent(region, inForce)` = `inForce != NO_ENTRY && region.epoch ==
+  inForce`, one definition, used by `currentRegion()` and by the sweep. The nested case still stops
+  at the caller's live region; the `NO_ENTRY`-in-force case now clears residue.
+- **S-16** closed. `ShreddingStartupCheck.refuseIfLedgerCapBelowOne`, `SHRED-CONFIG-001`, names the
+  property, the value and the default.
+- **S-17** closed. `scale = 1_000 + random.nextInt(1_000)` over 64 random unscaled bits; the
+  javadoc's "of the order of 10^6" is gone and replaced by the reason the scale is bounded.
+- **S-18 — ruling: the doc-only closure is accepted.** I offered two closures and this is the
+  second one, taken honestly. I re-derived the claim rather than taking it: `settle` returns only
+  after removing every debt it started with, and a refusal from inside it propagates out of the
+  `beforeCompletion` callback past the branch, on both paths. The branch is unreachable by
+  construction today. The javadoc now says so, names both paths, says the branch is kept as a belt
+  for the next settlement path, and says it is deliberately not JaCoCo-excluded; `CHANGELOG.md` and
+  QUESTIONS `#27` carry the same correction. I do not require it deleted: an unreachable
+  fail-closed check whose javadoc says it is unreachable costs three lines and catches the day
+  somebody adds a second settlement path. I do not require it made reachable: the only way to do
+  that today is to weaken `settle`.
+- **S-19** closed. Four `@apiNote` blocks on `enterRegion`, `recordDecoded`, `drain` and
+  `pendingKeysFor`, naming the two callers and saying `withReadBracket` is the supported entry.
+- **S-11** closed on my own terms. The probe is
+  `CipherProbeEarlierIntegratorWipesHibernateDefaultsTest`, in `src/test`, green, asserting the
+  documented outcome; the accepted-residual wording is beside control 11 in `SECURITY-NOTES.md` and
+  condensed in the `REGISTERED_TYPES` javadoc.
+
+### Fix list
+
+| # | severity | who | item |
+|---|---|---|---|
+| S-20 | **HIGH** | Thor | addendum 3 change 8: resolve `subjectColumn` to a property at startup, carry it on `BlindIndexColumn`, read it at write time, refuse null/blank/non-`String` and refuse when it is not `scope.subject()`. Same mechanism as changes 1–4, one column over |
+| S-21 | MEDIUM | Thor | address the entity's qualified table, or refuse a qualified one accurately and for every `@Shredded` entity; `ShreddedModel.tableName(Class)` is the wrong source either way |
+| S-21b | MEDIUM | Isis | `refuseIfSubjectMoved` refuses instead of returning when `readStoredShreddedColumns` finds no row; one sentence in `SECURITY-NOTES.md` about `search_path` and the `shredding_*` tables |
+
+Re-verification when both are in: `CipherProbeBlindIndexSubjectColumnTest` and
+`CipherProbeNinthPassBlindIndexTest.probe_a_default_schema_is_supported_or_refused_by_its_real_reason`
+green, my other five ninth-pass probe methods promoted out of `test-pending` and green in the
+default build, the whole default build green, and `-Pprobes-pending` with nothing red.
