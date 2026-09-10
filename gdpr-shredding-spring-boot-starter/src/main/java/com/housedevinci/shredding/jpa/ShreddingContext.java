@@ -292,8 +292,23 @@ public final class ShreddingContext {
     }
   }
 
-  /** One decrypted value waiting for the verifier that will install it. */
-  private record Pending(byte[] plaintext, long ownerToken) {}
+  /**
+   * One decrypted value waiting for the verifier that will install it.
+   *
+   * <p>S-4 (Cipher sixth pass): this used to also carry an {@code ownerToken}, stamped with the
+   * region's own token at record time and compared against the region's own token again at drain
+   * time. Both reads are {@code stack.peek()} of the <em>same</em> {@link Region} object - a {@code
+   * Pending} never moves from the map it was recorded into - so {@code pending.ownerToken() !=
+   * region.token} was unsatisfiable by construction: not a check that failed occasionally, one that
+   * could never fail at all. Removed rather than "fixed", because making it real would mean
+   * distinguishing a region legitimately open for the call in progress from one left on the deque
+   * by an earlier caller that never closed it - the public, unpaired {@link #openRegion()} makes
+   * that state reachable (QUESTIONS #21) - and doing that soundly needs a second piece of
+   * call-scoped state whose own unwind-safety would have to be argued from scratch, the same way
+   * {@link #popWrite(long)}'s javadoc argues it for write scopes. That is a new mechanism, not a
+   * correction, and it is not in this fix: see QUESTIONS.md S-4.
+   */
+  private record Pending(byte[] plaintext) {}
 
   /**
    * A multiset, not a map: one query can legitimately return several rows, and before the row id
@@ -453,21 +468,24 @@ public final class ShreddingContext {
               + " withReadBracket(...).");
     }
     Region region = stack.peek();
-    region
-        .pending
-        .computeIfAbsent(key, k -> new ArrayList<>())
-        .add(new Pending(plaintext, region.token));
+    region.pending.computeIfAbsent(key, k -> new ArrayList<>()).add(new Pending(plaintext));
   }
 
   /**
    * Takes back one decrypted value for {@code key}, if the region currently on top holds one that
    * it itself recorded.
    *
-   * <p><strong>Cipher item 4.</strong> Only under the current region's owner token. An entry whose
-   * token belongs to another region - residue an {@code Error} unwound past, or a decode from
-   * before an erasure - is discarded rather than installed, and the caller refuses the load. That
-   * is what turns D6's "a stale value of the same row" into {@code SHRED-READ-UNVERIFIED}, and it
-   * is what stops post-erasure residue standing in as a false proof that a value is still readable.
+   * <p><strong>S-4 (Cipher sixth pass).</strong> The most recently recorded entry, not the oldest.
+   * Two decodes filed under one key inside one still-open region are always the same row's own
+   * value - the multiset exists for a row hydrated twice inside one region, never for two different
+   * rows - so which of them a caller takes back is only ever a question of which one a stale,
+   * abandoned decode could shadow. Taking the most recent means a fresher decode is never shadowed
+   * by an older one left behind by residue: an entry recorded before the current, legitimate one -
+   * the shape {@code CipherProbeRegionResidueTest} builds from the public, unpaired {@link
+   * #openRegion()} (QUESTIONS #21) - can therefore never be handed back in place of the value this
+   * call itself just decrypted. It can still be handed back <em>instead of nothing</em> when the
+   * current call never recorded one of its own; that residual - an ownerless region still on the
+   * deque authorising a call that opened no region of its own - is not closed here (QUESTIONS S-4).
    */
   public static Optional<byte[]> drain(FrameKey key) {
     Deque<Region> stack = REGIONS.get();
@@ -479,13 +497,9 @@ public final class ShreddingContext {
     if (entries == null || entries.isEmpty()) {
       return Optional.empty();
     }
-    Pending pending = entries.remove(0);
+    Pending pending = entries.remove(entries.size() - 1);
     if (entries.isEmpty()) {
       region.pending.remove(key);
-    }
-    if (pending.ownerToken() != region.token) {
-      // Foreign-token residue: discarded, never installed, and the caller refuses.
-      return Optional.empty();
     }
     return Optional.of(pending.plaintext());
   }

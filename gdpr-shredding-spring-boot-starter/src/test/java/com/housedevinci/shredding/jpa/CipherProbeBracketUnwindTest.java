@@ -24,10 +24,15 @@ import org.junit.jupiter.api.Test;
  *   <li>a leaked region can never hand plaintext to anybody, because the converter no longer
  *       returns plaintext at all - the most a leaked region buys an attacker is a missing loudness,
  *       never a value;
- *   <li>Cipher item 4: a drain happens only under the current region's owner token, so a decode
- *       filed inside a region that an {@code Error} unwound past is never installed by a later,
- *       unrelated call - which is what turns D6's "a stale value of the same row" and post-erasure
- *       residue into {@code SHRED-READ-UNVERIFIED}.
+ *   <li>a drain reads the region currently on top of this thread's stack, so a decode filed inside
+ *       a region an {@code Error} unwound past - popped off that stack, along with everything above
+ *       it, by {@code ShreddingContext.unwindTo} - is never installed by a later, unrelated call:
+ *       there is no region left on the stack to drain it from. (S-4, Cipher sixth pass, corrected
+ *       this: the owner-token comparison this javadoc used to cite was never reachable - a decode
+ *       is always read back from the very region it was recorded into - and has been removed; what
+ *       actually does the work is the region stack itself, exercised below.) What turns D6's "a
+ *       stale value of the same row" and post-erasure residue into {@code SHRED-READ-UNVERIFIED} is
+ *       that a region closes with an unpaid debt when nothing drains a decode it still holds.
  * </ol>
  *
  * <p>The write-scope probe keeps its original, stronger assertion: a leaked write scope <em>is</em>
