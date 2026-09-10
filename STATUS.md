@@ -23,6 +23,13 @@ is promoted out of `src/test-pending` and green, `CipherProbeRegionEpochTest` ad
 at 0/200. The one residual is stated in `SECURITY-NOTES.md` in Cipher's words: **a leaked region
 costs a refusal, never a value.**
 
+**S-7b (blind index tenant binding) — DESIGN STOP TAKEN, no code (Thor, 2026-09-10).**
+`docs/plans/read-path-design.md`, "Design addendum 3", states the property, the general case where
+the `tenantColumn` value differs from the ambient tenant, five options and the recommendation
+(derive under the row's own `tenantColumn` value, with startup and write-time refusals as its
+boundary), and the probe list. Cipher reviews before any code. S-7's own startup refusal is Isis's
+and is not blocked on this.
+
 Sixth pass corrections (2026-09-10): Cipher's `## Sixth pass (75af7ea)` review of the read-path
 redesign found one HIGH design stop (S-1, `hibernate.jdbc.batch_size` silently switches off the
 insert-side post-hoc header check) and five corrections, S-2 to S-6. Thor closed S-1 in a separate

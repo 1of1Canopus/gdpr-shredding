@@ -848,3 +848,26 @@ The `S-1 / S-5` interaction this note would have flagged is #25 above, already r
 startup refusal is what made `CipherProbeBatchedInsertCheckTest`'s original fixture unstartable, and
 the probe is rewritten as a startup-refusal assertion rather than given a new fixture, since S-1's own
 property is independently carried by `BatchedWriteVerificationTest`'s seventeen probes.
+
+---
+
+## S-7b Blind index tenant binding: the general case, where `tenantColumn` differs from the ambient tenant (design stop taken, 2026-09-10 — for Cipher)
+
+**Stop taken, no code.** Cipher's S-7 names the special case S-2 opened (an index derived under a
+field's *declared* tenant) and hands the general case to a design stop: an application whose
+`tenantColumn` value is simply not the ambient tenant. `docs/plans/read-path-design.md`, "Design
+addendum 3: blind index tenant binding", is the page: the property, why the two sides disagree
+(`writeBlindIndexes` derives under `scope.tenantFor(of)`; `clearBlindIndexes` matches the row's
+stored `tenantColumn` value), five options and their costs, the recommendation, and the probe list.
+
+**Recommendation in one line.** Derive the index under **the row's own `tenantColumn` value, read out
+of the state array by the same write**, since that is the only value the erasure's `WHERE` can match;
+refuse at startup when `tenantColumn` is not a mapped basic `String` property of the entity, and
+refuse the write when its value is null or blank.
+
+**What I did not do, and why.** No code, per the design-stop rule: this changes what a blind index is
+keyed under, which is a data-model change with a migration consequence for anyone already running
+indexes (an index derived under the old key is not reachable under the new one - the addendum does
+not yet say whether that needs a documented re-index or a version marker, and I would rather Cipher
+rule on the key before I write a migration for it). Isis's S-7 startup refusal is unaffected and is
+not blocked on this.

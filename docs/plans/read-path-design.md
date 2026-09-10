@@ -644,3 +644,43 @@ its WARN asserted; an inner entry that never restored the epoch refusing its cal
 read bracket, and a raw region opened mid-call refusing that call's later decodes.
 `CipherProbeBracketUnwindTest` unchanged: 0/200 write-scope leaks, 0/200 region drains, no
 plaintext.
+
+## Design addendum 3: blind index tenant binding (2026-09-10)
+
+**Property.** *Every blind index value that exists is reachable and destroyed by the erasure of the
+subject it was derived for.* It is not: `writeBlindIndexes` derives under `scope.tenantFor(of)` - the
+field's declared tenant, else the ambient `TenantSupplier` - while `clearBlindIndexes` reaches the
+row with `UPDATE t SET idx = NULL WHERE tenantColumn = ? AND subjectColumn = ?`, matching the row's
+**stored `tenantColumn` value** against the tenant it was asked for. S-7 is the S-2 special case; the
+general one needs no second tenant expression at all - any application whose tenant column holds
+something else (a company id where the supplier yields a region, a trigger-written column, a row a
+later `UPDATE` moved). The key dies, the ciphertext dies, and
+`HMAC(secret, tenant | entity | field | normalised plaintext)` survives: a
+cross-row correlator for the erased subject and, for a low-entropy value such as an email address, a
+confirmation oracle for anyone with the index secret. The erasure proof reports success.
+
+**What it must be keyed under.** The one value both sides can agree on: *that row's `tenantColumn`
+value, as written by that write*. The write has it in the state array and the erasure matches on it;
+neither the ambient tenant nor a declared expression is visible to the erasure at all.
+
+**Options.** (a) **derive under the row's `tenantColumn` value**, read out of `Object[] state` in
+`onPreInsert`/`onPreUpdate` beside the value being indexed - exact, one array lookup, no schema
+change; needs the column to be a mapped basic property, a startup refusal rather than a runtime
+surprise. (b) **keep today's key, refuse the write when the two disagree** - fail-closed and smaller,
+but it makes a legitimate shape unusable instead of correct. (c) **drop the tenant from the HMAC
+input** - one value would correlate across every tenant: refused. (d) **erase by subject only** -
+erases another tenant's rows for a colliding subject id: refused. (e) **a second column** - correct,
+but a schema change on the user's table.
+
+**Recommendation: (a), with (b)'s refusals as its boundary.** Derive under `state[tenantColumn]`;
+refuse at startup (`SHRED-CONFIG-001`) when `tenantColumn` is not a mapped, basic, `String` property
+of the indexed entity, naming entity, index field and column; refuse the write when its value is null
+or blank, because an index no `WHERE tenantColumn = ?` can match is an index no erasure can destroy.
+S-7's startup refusal stays until this lands, then relaxes: what breaks erasure is disagreement with
+the column, not a declared per-field tenant.
+
+**Probes, RED first.** A `tenantColumn` differing from the ambient tenant: the erasure clears the
+index (today it survives). The S-7 `Folder` shape: cleared, no startup refusal needed. A row a later
+`UPDATE` moves: re-derived under the new value. A null or blank value at write: refused.
+`tenantColumn` unmapped, on an embeddable, non-`String`, or named by column rather than property:
+startup refusal, one probe each. And the proof's cleared-index count non-zero wherever one existed.
