@@ -17,8 +17,10 @@ import java.lang.annotation.Target;
  * <p>An erasure nulls this column for the erased subject. That is not configurable: an index that
  * survives an erasure keeps the erased subject searchable and linkable forever.
  *
- * <p>{@link #subjectColumn()} and {@link #tenantColumn()} name <em>columns</em>, not properties;
- * they become SQL identifiers, so they are validated at startup against a narrow pattern. {@link
+ * <p>{@link #subjectColumn()} and {@link #tenantColumn()} name <em>columns</em>, not properties.
+ * What is written here is a <em>lookup key</em>, matched case-sensitively at startup against the
+ * columns Hibernate's own mapping addresses, and then thrown away (design addendum 4, §4.3): it
+ * never becomes a SQL identifier and there is no pattern it is validated against. {@link
  * #tenantColumn()} is resolved at startup, through the entity's own column mapping, to the single
  * basic {@code String} property of this entity that maps to it - startup is refused if the
  * resolution finds none, finds more than one, finds a non-{@code String} one, or finds it only

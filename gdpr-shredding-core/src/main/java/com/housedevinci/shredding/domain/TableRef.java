@@ -31,8 +31,10 @@ import java.util.regex.Pattern;
 public record TableRef(Optional<String> schema, String name) {
 
   /**
-   * Deliberately narrow, and the same pattern {@link BlindIndexColumn} validates its columns
-   * against: these parts become SQL identifiers, which no bind parameter can carry.
+   * Deliberately narrow: this table's schema and name become SQL identifiers, which no bind
+   * parameter can carry. {@link BlindIndexColumn}'s {@code subjectColumn}/{@code tenantColumn} are
+   * not validated against this or any pattern any more (design addendum 4, §4.3) - they are lookup
+   * keys, matched case-sensitively against Hibernate's own mapping and then thrown away.
    */
   private static final Pattern IDENTIFIER = Pattern.compile("[a-z_][a-z0-9_]{0,62}");
 
