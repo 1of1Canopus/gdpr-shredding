@@ -58,8 +58,18 @@ public final class Placeholders {
 
   /**
    * {@code BigDecimal} columns. S-10: same rule as {@link #LOCAL_DATE} - a value drawn from {@link
-   * SecureRandom} at a scale of the order of 10^6, a precision no application's own {@code
-   * BigDecimal} data plausibly carries, rather than a single fixed literal.
+   * SecureRandom}, a precision no application's own {@code BigDecimal} data plausibly carries,
+   * rather than a single fixed literal.
+   *
+   * <p><strong>S-17 (Cipher eighth pass).</strong> The scale is in the low thousands, not "of the
+   * order of 10^6" as the seventh pass's own fix text said - that prescription was careless. The
+   * unguessability this marker needs comes from the 64 random bits of the unscaled value; the scale
+   * decides only what {@code toString()}/{@code toPlainString()} render, and a refused load is
+   * documented to leave the marker in a detached entity that ordinary application code then copies
+   * around - a DTO round trip, a log line, a JSON body. {@code toString()} at a scale of 10^6 is 29
+   * characters, but {@code toPlainString()} - Jackson with {@code WRITE_BIGDECIMAL_AS_PLAIN}, a
+   * {@code DecimalFormat}, {@code String.format("%f", ...)} - is over a million. A scale in the low
+   * thousands is exactly as implausible for real data and costs nothing to render either way.
    */
   public static final BigDecimal BIG_DECIMAL = randomBigDecimal();
 
@@ -122,13 +132,13 @@ public final class Placeholders {
     return LocalDate.MIN.plusDays(offsetDays);
   }
 
-  /** A random, positive unscaled value at a scale on the order of 10^6. */
+  /** A random, positive unscaled value (64 random bits) at a scale in the low thousands (S-17). */
   private static BigDecimal randomBigDecimal() {
     SecureRandom random = new SecureRandom();
     byte[] raw = new byte[8];
     random.nextBytes(raw);
     java.math.BigInteger unscaled = new java.math.BigInteger(1, raw).or(java.math.BigInteger.ONE);
-    int scale = 1_000_000 + random.nextInt(1_000);
+    int scale = 1_000 + random.nextInt(1_000);
     return new BigDecimal(unscaled, scale);
   }
 }

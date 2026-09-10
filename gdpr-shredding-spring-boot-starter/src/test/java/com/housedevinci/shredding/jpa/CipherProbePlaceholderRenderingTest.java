@@ -14,9 +14,9 @@ import org.junit.jupiter.api.Test;
  * documented to leave the marker in a detached entity and to have it copied around by ordinary
  * application code - a DTO round trip, a log line, a JSON body - and any of those that reaches
  * {@code toPlainString()} (Jackson with {@code WRITE_BIGDECIMAL_AS_PLAIN}, a {@code DecimalFormat},
- * a {@code String.format("%f", ...)}) turns one refused field into a megabyte, and a refused page of
- * two hundred rows into two hundred of them. A scale in the low thousands is just as implausible for
- * real data and costs nothing to render.
+ * a {@code String.format("%f", ...)}) turns one refused field into a megabyte, and a refused page
+ * of two hundred rows into two hundred of them. A scale in the low thousands is just as implausible
+ * for real data and costs nothing to render.
  */
 class CipherProbePlaceholderRenderingTest {
 
