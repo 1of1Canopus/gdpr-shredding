@@ -440,3 +440,29 @@ fresh clone; coverage gates held; nothing skipped.
   even against a badly broken generator. What is tested instead is that the nonce comes from a
   `RandomSource` we control, that a narrow generator is detectable, and that the per-key counter
   refuses and rotates.
+
+## Eighth pass (fa6f477) closures, Isis, 2026-09-10
+
+Seven of the eight-line fix list closed: S-14, S-15 (LOW, `ShreddingContext` region-deque
+correctness), S-16, S-17, S-19 (INFO), S-11 (LOW, ruled accepted residual, no design stop) and S-18
+(INFO - corrected #27's own overclaim rather than build a test for a branch confirmed unreachable by
+construction; QUESTIONS #18 and CHANGELOG both say so now). S-13 (HIGH, blind index under the
+ambient tenant) is Thor's design stop, addendum 3 - not touched here; `BlindIndex`,
+`clearBlindIndexes` and the blind-index derivation were out of bounds for this pass by instruction.
+
+`./mvnw -B clean verify`: BUILD SUCCESS. 247 tests (core 92, starter 138, sample 17), 0 failures, 0
+errors, 0 skipped. Line coverage: core 85.3% (1041/1221), starter 88.5% (1308/1478); gate 80% held.
+`-Pprobes-pending`: 140 starter tests, exactly 1 red - `CipherProbeBlindIndexAmbientTenantTest`
+(S-13), Thor's. Docker up throughout; Testcontainers PostgreSQL pinned by digest; nothing skipped.
+
+Probes closed this pass, moved green from `src/test-pending/java` to `src/test/java`:
+`CipherProbeEighthPassRegionTest` (S-14, S-15), `CipherProbeLedgerCapConfigTest` (S-16),
+`CipherProbePlaceholderRenderingTest` (S-17). `CipherProbeSettlementListenerDisplacedTest` (S-11)
+asserted the wrong outcome for the ruled shape and was rewritten and renamed to
+`CipherProbeEarlierIntegratorWipesHibernateDefaultsTest`, green, moved the same way. S-18 and S-19
+have no probe (S-18: an unreachable branch is what the finding is about; S-19: nothing mechanical
+distinguishes internal SPI from application API until the module says which is which).
+
+Commits: `2b007ea` (S-14, S-15), `dd18a55` (S-16), `3028b4b` (S-17), `ef6d89e` (S-18),
+`6d24cbd` (S-19), `ab74e34` (S-11), `fe181d3` (CHANGELOG/QUESTIONS). Cipher re-verifies; this pass
+is not self-marked closed.
