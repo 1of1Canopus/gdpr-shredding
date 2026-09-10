@@ -48,7 +48,7 @@ template, not by a null check), and Spring Boot's default physical naming strate
 strategy). Both in `QUESTIONS.md` under S-22.
 
 *Full `./mvnw clean verify` (worktree and fresh clone, three consecutive runs each):* BUILD SUCCESS,
-**307 tests** (core 95, starter 195, sample 17), 0 failures, 0 errors, 0 skipped. Line coverage core
+**321 tests** (core 109, starter 195, sample 17), 0 failures, 0 errors, 0 skipped. Line coverage core
 85.6% (1145/1337), starter 87.6% (1594/1820), sample 63.2%; gates 80% / 80% / 30% held. Branch
 coverage core 63.6%, starter 73.1% (no branch gate configured). Cipher re-verifies; not self-marked
 closed.
