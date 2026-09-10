@@ -66,6 +66,10 @@ final class WriteVerification {
    * exceed is refused rather than left to grow without bound - a {@code StatelessSession} import of
    * millions of rows in one transaction is the only realistic way to reach it, and the remedy is a
    * transaction per chunk, not a bigger heap.
+   *
+   * <p>S-16: a {@code static volatile}, shared by every Spring context in the JVM, the same as
+   * {@link com.housedevinci.shredding.jpa.ShreddingRuntime}. {@link ShreddingStartupCheck} refuses
+   * a value below 1 before this is ever set.
    */
   private static volatile int maxOutstanding = 50_000;
 

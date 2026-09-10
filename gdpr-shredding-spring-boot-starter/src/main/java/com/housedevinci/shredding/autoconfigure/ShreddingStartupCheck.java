@@ -50,7 +50,10 @@ public final class ShreddingStartupCheck implements InitializingBean {
   public void afterPropertiesSet() {
     ShreddingRuntime.set(new ShreddingRuntime(cipher, properties.getErasedValue().getPolicy()));
     // #26 (Cipher seventh pass): the write-verification ledger's hard cap, configured once at boot
-    // the same way ShreddingRuntime is.
+    // the same way ShreddingRuntime is. S-16 (Cipher eighth pass): a cap below 1 boots cleanly and
+    // then refuses the application's very first shredded write - checked here, before it is ever
+    // handed to WriteVerification.
+    refuseIfLedgerCapBelowOne();
     WriteVerification.configureMaxOutstanding(
         properties.getWriteVerification().getMaxOutstanding());
     refuseIfVerifierNotRegisteredFirst();
@@ -133,6 +136,27 @@ public final class ShreddingStartupCheck implements InitializingBean {
         model.blindIndexFields().size(),
         properties.getDataKeyCache().getTtl(),
         properties.getErasure().getBackupRetention());
+  }
+
+  /**
+   * S-16 (Cipher eighth pass). {@code shredding.write-verification.max-outstanding} below 1 boots
+   * cleanly and then turns every write of a {@code @Shredded} entity into a refusal: {@code owe}
+   * compares the ledger's size against the cap <em>before</em> adding a genuinely new debt, so a
+   * cap of {@code 0} or negative is already exceeded before the first row. This module's own
+   * definition of done - "misconfiguration fails fast at startup with a message naming the
+   * property" - rules that shape out.
+   */
+  private void refuseIfLedgerCapBelowOne() {
+    int max = properties.getWriteVerification().getMaxOutstanding();
+    if (max < 1) {
+      throw new ShreddingException(
+          ErrorCodes.CONFIG,
+          "shredding.write-verification.max-outstanding is "
+              + max
+              + ", but must be at least 1. A ledger cap below 1 is already exceeded before the"
+              + " first row of any @Shredded entity is written, so every write in the application"
+              + " would be refused with SHRED-UNVERIFIED-WRITE. The default is 50000.");
+    }
   }
 
   /**
