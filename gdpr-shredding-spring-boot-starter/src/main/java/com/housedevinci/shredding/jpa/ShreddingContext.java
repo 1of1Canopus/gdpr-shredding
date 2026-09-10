@@ -63,13 +63,42 @@ public final class ShreddingContext {
   /**
    * Who the row being written belongs to, and which row it is, for the few microseconds in which
    * Hibernate binds it.
+   *
+   * <p><strong>S-2.</strong> {@code tenant} is the row's primary tenant - the first
+   * {@code @Shredded} field's resolved tenant, used wherever a single tenant names the row (the
+   * {@code IDENTITY} rebind's SQL parameters aside, everything else is per field). {@code
+   * fieldTenants} carries the <em>actual</em> per-field tenant for every {@code @Shredded} field of
+   * the entity, evaluated once, up front, in {@code scopeFor} - because a field's tenant expression
+   * can only be evaluated against the entity instance, and the converter that later asks for it is
+   * handed nothing but the attribute value. {@link #tenantFor(String)} is what every write-path use
+   * of a per-field tenant goes through; {@code tenant()} alone is never enough once an entity
+   * declares more than one tenant expression.
    */
-  public record Scope(TenantId tenant, SubjectId subject, String entityName, RowId rowId) {
+  public record Scope(
+      TenantId tenant,
+      SubjectId subject,
+      String entityName,
+      RowId rowId,
+      Map<String, TenantId> fieldTenants) {
     public Scope {
       Objects.requireNonNull(tenant, "tenant");
       Objects.requireNonNull(subject, "subject");
       Objects.requireNonNull(entityName, "entityName");
       Objects.requireNonNull(rowId, "rowId");
+      fieldTenants = fieldTenants == null ? Map.of() : Map.copyOf(fieldTenants);
+    }
+
+    /** Convenience constructor for the common case of one tenant shared by every field. */
+    public Scope(TenantId tenant, SubjectId subject, String entityName, RowId rowId) {
+      this(tenant, subject, entityName, rowId, Map.of());
+    }
+
+    /**
+     * The tenant to use for {@code fieldName}: its own declared tenant if one was resolved, else
+     * this row's primary tenant.
+     */
+    public TenantId tenantFor(String fieldName) {
+      return fieldTenants.getOrDefault(fieldName, tenant);
     }
   }
 

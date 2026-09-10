@@ -115,7 +115,13 @@ public abstract class ShreddedConverter<T> implements AttributeConverter<T, byte
     var scope = ShreddingContext.require(entity, field);
     return ShreddingRuntime.require()
         .cipher()
-        .encrypt(scope.tenant(), scope.subject(), scope.rowId(), entity, field, toBytes(attribute));
+        .encrypt(
+            scope.tenantFor(field),
+            scope.subject(),
+            scope.rowId(),
+            entity,
+            field,
+            toBytes(attribute));
   }
 
   /**

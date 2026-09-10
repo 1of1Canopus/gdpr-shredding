@@ -131,7 +131,7 @@ public final class ShreddingEventListener
     // never running, which is exactly when a pooled thread would otherwise keep serving the wrong
     // subject's scope to the next, unrelated write - and pushBind drops residue first anyway.
     try {
-      writeBlindIndexes(event.getPersister(), event.getState(), scope.tenant());
+      writeBlindIndexes(event.getPersister(), event.getState(), scope);
     } catch (RuntimeException e) {
       ShreddingContext.popWrite(token);
       throw e;
@@ -209,7 +209,7 @@ public final class ShreddingEventListener
     long token = ShreddingContext.pushBind(scope, event.getSession());
     writeScopeToken.set(token);
     try {
-      writeBlindIndexes(event.getPersister(), event.getState(), scope.tenant());
+      writeBlindIndexes(event.getPersister(), event.getState(), scope);
     } catch (RuntimeException e) {
       ShreddingContext.popWrite(token);
       throw e;
@@ -378,11 +378,6 @@ public final class ShreddingEventListener
                   + " the subject source, or erase the row if it is orphaned.",
               e));
     }
-    var first = fields.get(0);
-    TenantId trueTenant =
-        first.tenant() != null
-            ? TenantId.of(first.tenant().evaluate(entity))
-            : ambientTenantOrNull();
     SubjectId subjectId = SubjectId.of(trueSubject);
     RowId rowId = RowId.ofIdentifier(event.getId());
 
@@ -390,7 +385,12 @@ public final class ShreddingEventListener
     // cannot be accounted for, and only then write anything into the entity.
     var verified = new java.util.ArrayList<byte[]>(awaiting.size());
     for (var field : awaiting) {
-      TenantId tenant = trueTenant;
+      // S-2: this field's own declared tenant, not the entity's first shredded field's.
+      TenantId fieldTenant =
+          field.tenant() != null
+              ? TenantId.of(field.tenant().evaluate(entity))
+              : ambientTenantOrNull();
+      TenantId tenant = fieldTenant;
       if (tenant == null) {
         // No tenant expression and no ambient tenant: the region's own entry names one, and the
         // row cannot contradict what it does not carry. Fall back to whatever the single pending
@@ -402,7 +402,7 @@ public final class ShreddingEventListener
       var plaintext =
           tenant == null ? java.util.Optional.<byte[]>empty() : ShreddingContext.drain(key);
       if (plaintext.isEmpty()) {
-        throw refuseLoad(event, explain(entityName, field, subjectId, rowId, trueTenant));
+        throw refuseLoad(event, explain(entityName, field, subjectId, rowId, fieldTenant));
       }
       verified.add(plaintext.get());
     }
@@ -619,7 +619,8 @@ public final class ShreddingEventListener
           runtime
               .cipher()
               .encrypt(
-                  scope.tenant(),
+                  // S-2: this field's own tenant, not the row's primary one.
+                  scope.tenantFor(field.fieldName()),
                   scope.subject(),
                   bound,
                   field.entityName(),
@@ -688,8 +689,9 @@ public final class ShreddingEventListener
         continue;
       }
       var header = EncryptedValue.decode(column);
+      // S-2: this field's own tenant, not the row's primary one.
       if (!header.subject().equals(scope.subject())
-          || !header.tenant().equals(scope.tenant())
+          || !header.tenant().equals(scope.tenantFor(fields.get(i).fieldName()))
           || !header.rowId().equals(expectedRow)) {
         throw new ShreddingException(
             ErrorCodes.SUBJECT_IMMUTABLE,
@@ -796,7 +798,8 @@ public final class ShreddingEventListener
       }
       var header = EncryptedValue.decode(column);
       boolean subjectMoved = !header.subject().equals(scope.subject());
-      boolean tenantMoved = !header.tenant().equals(scope.tenant());
+      // S-2: this field's own tenant, not the row's primary one.
+      boolean tenantMoved = !header.tenant().equals(scope.tenantFor(fields.get(i).fieldName()));
       boolean rowMoved = !header.rowId().equals(scope.rowId());
       if (subjectMoved || tenantMoved || rowMoved) {
         throw new ShreddingException(
@@ -859,13 +862,30 @@ public final class ShreddingEventListener
     return "\"" + identifier.replace("\"", "\"\"") + "\"";
   }
 
+  /**
+   * S-2: every field's own declared tenant, evaluated here - the one place that has both the tenant
+   * expression and the entity instance to evaluate it against. A field with no tenant expression
+   * falls back to the ambient tenant, exactly as before. {@code tenant} (the scope's primary) is
+   * the first field's resolved tenant, kept for every use that names the row rather than one of its
+   * fields (the {@code IDENTITY} rebind's WHERE clause, principally); every per-field use goes
+   * through {@link ShreddingContext.Scope#tenantFor(String)}.
+   */
   private ShreddingContext.Scope scopeFor(
       Object entity, List<ShreddedModel.ShreddedField> fields, RowId rowId) {
     var first = fields.get(0);
-    TenantId tenant =
-        first.tenant() != null ? TenantId.of(first.tenant().evaluate(entity)) : requireTenant();
+    var fieldTenants = new java.util.LinkedHashMap<String, TenantId>();
+    for (var field : fields) {
+      TenantId fieldTenant =
+          field.tenant() != null ? TenantId.of(field.tenant().evaluate(entity)) : requireTenant();
+      fieldTenants.put(field.fieldName(), fieldTenant);
+    }
+    TenantId tenant = fieldTenants.get(first.fieldName());
     return new ShreddingContext.Scope(
-        tenant, SubjectId.of(resolveSubject(entity, fields)), first.entityName(), rowId);
+        tenant,
+        SubjectId.of(resolveSubject(entity, fields)),
+        first.entityName(),
+        rowId,
+        fieldTenants);
   }
 
   private static String resolveSubject(Object entity, List<ShreddedModel.ShreddedField> fields) {
@@ -898,7 +918,8 @@ public final class ShreddingEventListener
     return tenant;
   }
 
-  private void writeBlindIndexes(EntityPersister persister, Object[] state, TenantId tenant) {
+  private void writeBlindIndexes(
+      EntityPersister persister, Object[] state, ShreddingContext.Scope scope) {
     var indexes = model().blindIndexesByEntityName().get(entityName(persister));
     if (indexes == null || indexes.isEmpty()) {
       return;
@@ -917,11 +938,16 @@ public final class ShreddingEventListener
         continue;
       }
       Object value = state[sourceIndex];
+      // S-2: the index is derived from the field it indexes (of=), so it belongs under that
+      // field's own tenant, not the row's primary one.
       state[targetIndex] =
           value == null
               ? null
               : blindIndex.compute(
-                  tenant, index.entityName(), index.ofFieldName(), normalise(value));
+                  scope.tenantFor(index.ofFieldName()),
+                  index.entityName(),
+                  index.ofFieldName(),
+                  normalise(value));
     }
   }
 
