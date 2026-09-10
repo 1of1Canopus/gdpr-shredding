@@ -3,6 +3,7 @@ package com.housedevinci.shredding.jpa;
 import java.math.BigDecimal;
 import java.security.SecureRandom;
 import java.time.LocalDate;
+import java.util.Arrays;
 
 /**
  * What {@code convertToEntityAttribute} returns instead of plaintext (design §1.1).
@@ -20,12 +21,19 @@ import java.time.LocalDate;
  * would write {@code NULL} over a live ciphertext with nothing to notice it. A non-null marker
  * turns that same write into {@code SHRED-PLACEHOLDER-001}.
  *
- * <p><strong>Compared by reference identity, never by {@code equals}</strong> (Cipher items 2, 3).
- * The string marker carries 128 bits drawn once per JVM run, so an attacker holding {@code UPDATE}
- * cannot store a value that reads back as a placeholder - and even a lucky guess would be an
- * equal-but-distinct instance, which {@link #isPlaceholder} does not accept. The rendering is ASCII
- * only, with no control character and no {@code %}, {@code &#123;} or {@code &#125;}, so it is safe
- * to drop into a log format string or an exception message.
+ * <p><strong>Matched by value as well as by reference identity</strong> (Cipher items 2, 3; S-3,
+ * Cipher sixth pass). An attacker holding {@code UPDATE} still cannot store a value that reads back
+ * as a placeholder - that would need a ciphertext of the marker under the subject's own data key,
+ * which no amount of {@code UPDATE} gives them, and is exactly the residual {@code
+ * a_forged_placeholder_in_the_column_is_refused} covers. What value equality closes is a different
+ * hole: a refused load leaves the entity holding the marker <em>instance</em> and detaches it, and
+ * the ordinary things an application then does to a detached entity - a DTO round trip through
+ * Jackson, {@code new String(...)}, {@code trim()}, a defensive {@code clone()} of a {@code
+ * byte[]}, a normalising setter - all produce a value-equal, reference-distinct copy. Recognising
+ * only the instance let that copy sail through both write-back checks and overwrite the live
+ * ciphertext with the marker's own rendering. The rendering is ASCII only, with no control
+ * character and no {@code %}, {@code &#123;} or {@code &#125;}, so it is safe to drop into a log
+ * format string or an exception message.
  */
 public final class Placeholders {
 
@@ -49,11 +57,27 @@ public final class Placeholders {
   private Placeholders() {}
 
   /**
-   * Reference identity against every marker. Used by the converter before it encrypts anything and
-   * by the {@code Pre*} listeners on the state array, before the blind indexes are written.
+   * Reference identity <em>or</em> value equality against every marker (S-3). Used by the converter
+   * before it encrypts anything and by the {@code Pre*} listeners on the state array, before the
+   * blind indexes are written.
    */
   public static boolean isPlaceholder(Object value) {
-    return value == STRING || value == BYTES || value == LOCAL_DATE || value == BIG_DECIMAL;
+    if (value == STRING || value == BYTES || value == LOCAL_DATE || value == BIG_DECIMAL) {
+      return true;
+    }
+    if (value instanceof String s) {
+      return STRING.equals(s);
+    }
+    if (value instanceof byte[] b) {
+      return Arrays.equals(BYTES, b);
+    }
+    if (value instanceof LocalDate d) {
+      return LOCAL_DATE.equals(d);
+    }
+    if (value instanceof BigDecimal n) {
+      return BIG_DECIMAL.equals(n);
+    }
+    return false;
   }
 
   /** The marker's rendering, for a message that has to name it without printing a real value. */

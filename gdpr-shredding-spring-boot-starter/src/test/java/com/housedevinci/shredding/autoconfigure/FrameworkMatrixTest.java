@@ -193,12 +193,17 @@ class FrameworkMatrixTest {
         .extracting(e -> ((ShreddingException) e).code())
         .isEqualTo(ErrorCodes.PLACEHOLDER);
 
-    // Cipher item 3: an equal-but-distinct instance is not the placeholder, and reaching the same
-    // refusal by value would be a way to store a string that reads back as one.
-    assertThat(Placeholders.isPlaceholder(new String(Placeholders.STRING))).isFalse();
+    // S-3 (Cipher sixth pass), correcting Cipher item 3: an equal-but-distinct instance IS the
+    // placeholder as far as write-back is concerned - a refused load leaves the entity holding the
+    // marker instance and detaches it, and the ordinary things an application does to a detached
+    // entity (a DTO round trip, new String(...), trim(), a defensive clone()) all produce a
+    // value-equal, reference-distinct copy that must be refused exactly like the instance itself.
+    // What stays true from item 3 is that an attacker holding UPDATE cannot manufacture one: doing
+    // so would need a ciphertext of the marker under the subject's own data key.
+    assertThat(Placeholders.isPlaceholder(new String(Placeholders.STRING))).isTrue();
     assertThat(Placeholders.isPlaceholder(new BigDecimal(Placeholders.BIG_DECIMAL.toPlainString())))
-        .isFalse();
-    assertThat(Placeholders.isPlaceholder(LocalDate.of(-999_999_999, 1, 1))).isFalse();
+        .isTrue();
+    assertThat(Placeholders.isPlaceholder(LocalDate.of(-999_999_999, 1, 1))).isTrue();
   }
 
   // -- §2 row 21: a forged placeholder in the column ---------------------------------------------

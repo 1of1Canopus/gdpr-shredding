@@ -30,8 +30,9 @@ import org.testcontainers.utility.DockerImageName;
  * Cipher sixth pass. Design item 2's whole reason for a non-null placeholder is that the write-back
  * check turns "an entity whose install never ran, flushed anyway" into {@code
  * SHRED-PLACEHOLDER-001} instead of a live ciphertext overwritten with a marker. Item 3 then made
- * the comparison reference identity, and {@code FrameworkMatrixTest.a_placeholder_is_never_re_encrypted}
- * asserts that an equal-but-distinct instance is deliberately <em>not</em> recognised.
+ * the comparison reference identity, and {@code
+ * FrameworkMatrixTest.a_placeholder_is_never_re_encrypted} asserts that an equal-but-distinct
+ * instance is deliberately <em>not</em> recognised.
  *
  * <p>That is the hole. A refused load leaves the entity holding the marker and detaches it; the
  * ordinary things an application then does to a detached entity - serialise it to a DTO and back,
