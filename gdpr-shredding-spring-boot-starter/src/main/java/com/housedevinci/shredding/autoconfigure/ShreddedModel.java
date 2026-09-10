@@ -309,6 +309,7 @@ public final class ShreddedModel {
             .add(field.fieldName());
       }
       refuseUnmodelledShreddedConverters(entityManagerFactory, known);
+      refuseIfShreddedFieldUnmodelled(entityManagerFactory, shredded);
       refuseCompositeIdShreddedEntities(entityManagerFactory, shreddedFieldNamesByEntity);
     }
 
@@ -342,6 +343,73 @@ public final class ShreddedModel {
           String entityName = simpleEntityName(persister.getEntityName());
           scanAttributeMappings(entityName, entityName, persister.getAttributeMappings(), known);
         });
+  }
+
+  /**
+   * S-5 (Cipher sixth pass). The forward direction of the C-19 check: for every field-level
+   * {@code @Shredded} the class scan above found, the metamodel attribute of that name must resolve
+   * to that field's own declared {@code ShreddedConverter}. This is the case C-19's reverse check
+   * cannot catch: {@code @Access(AccessType.PROPERTY)} moves the mapping to the getters, so
+   * Hibernate ignores every field-level annotation - the {@code @Convert} among them - and the
+   * metamodel attribute has no converter at all. The forward scan above still reads
+   * {@code @Shredded} off the field and accepts the mapping; nothing before this checked that
+   * Hibernate actually applied the converter it names. Without it, the column starts as a plain,
+   * unconverted varchar, caught only on the first write by the post-hoc header check (item 14) with
+   * a message that names neither the entity nor the field - unlike every other mapping this module
+   * cannot protect (composite id, {@code @SecondaryTable} split, {@code byte[]} without
+   * {@code @Immutable}), which is refused here, at startup, naming both.
+   */
+  private static void refuseIfShreddedFieldUnmodelled(
+      EntityManagerFactory entityManagerFactory, List<ShreddedField> shredded) {
+    var sessionFactory =
+        entityManagerFactory.unwrap(org.hibernate.engine.spi.SessionFactoryImplementor.class);
+    var mappingMetamodel = sessionFactory.getMappingMetamodel();
+    var byEntityName = new LinkedHashMap<String, org.hibernate.persister.entity.EntityPersister>();
+    mappingMetamodel.forEachEntityDescriptor(
+        persister -> byEntityName.put(simpleEntityName(persister.getEntityName()), persister));
+    for (var field : shredded) {
+      var persister = byEntityName.get(field.entityName());
+      if (persister == null) {
+        continue;
+      }
+      var attribute = persister.findAttributeMapping(field.fieldName());
+      String where = field.entityName() + "." + field.fieldName();
+      if (!(attribute instanceof org.hibernate.metamodel.mapping.BasicValuedModelPart basic)) {
+        throw config(
+            "@Shredded on "
+                + where
+                + " is declared on the field, but the entity's mapping resolves that attribute to"
+                + " something other than a single converted column ("
+                + (attribute == null ? "no such attribute" : attribute.getClass().getSimpleName())
+                + "). This happens under @Access(AccessType.PROPERTY): Hibernate ignores"
+                + " field-level mapping annotations - the @Convert among them - when the class is"
+                + " mapped through its getters, so the converter this module found on the field was"
+                + " never applied. Move every @Shredded field's mapping annotations onto its"
+                + " getter, or map the entity with @Access(AccessType.FIELD).");
+      }
+      var converter = basic.getSingleJdbcMapping().getValueConverter();
+      boolean isShreddedConverter =
+          converter
+                  instanceof
+                  org.hibernate.type.descriptor.converter.spi.JpaAttributeConverter<?, ?>
+                      jpaConverter
+              && jpaConverter.getConverterBean().getBeanInstance()
+                  instanceof ShreddedConverter<?> resolved
+              && resolved.getClass() == field.converter().getClass();
+      if (!isShreddedConverter) {
+        throw config(
+            "@Shredded on "
+                + where
+                + " is declared on the field with @Convert(converter = "
+                + field.converter().getClass().getName()
+                + ".class), but the entity's actual mapping for that attribute does not use it. This"
+                + " happens under @Access(AccessType.PROPERTY): Hibernate ignores field-level"
+                + " mapping annotations - the @Convert among them - when the class is mapped through"
+                + " its getters, so the column is written and read as a plain, unconverted value."
+                + " Move every @Shredded field's mapping annotations onto its getter, or map the"
+                + " entity with @Access(AccessType.FIELD).");
+      }
+    }
   }
 
   /**

@@ -31,9 +31,9 @@ import org.testcontainers.utility.DockerImageName;
  * read-back cannot decode it and the flush aborts with {@code SHRED-FORMAT-001}, so nothing is
  * committed in the clear. That is fail-closed but it is discovered on the first write in
  * production, with a message about the {@code SH1} magic that names neither the field nor the
- * mapping - where every other mapping this module cannot protect (composite id, {@code
- * @SecondaryTable} split, {@code byte[]} without {@code @Immutable}, {@code @NaturalId}, {@code
- * OptimisticLockType.ALL}) is refused at startup, naming the field.
+ * mapping - where every other mapping this module cannot protect (composite id,
+ * {@code @SecondaryTable} split, {@code byte[]} without {@code @Immutable}, {@code @NaturalId},
+ * {@code OptimisticLockType.ALL}) is refused at startup, naming the field.
  */
 @Testcontainers
 class CipherProbePropertyAccessTest {
