@@ -234,16 +234,43 @@ public class ShreddingAutoConfiguration {
   }
 
   @Bean
-  public HibernatePropertiesCustomizer shreddingHibernateCustomizer(
+  @ConditionalOnMissingBean
+  public ShreddingEventListener shreddingEventListener(
       ObjectProvider<ShreddedModel> model,
       ShreddingEventListener.TenantSupplier tenantSupplier,
       ObjectProvider<BlindIndex> blindIndex) {
-    var listener =
-        new ShreddingEventListener(model::getObject, tenantSupplier, blindIndex.getIfAvailable());
-    return properties ->
-        properties.put(
-            JpaSettings.INTEGRATOR_PROVIDER,
-            (IntegratorProvider) () -> List.of(new ShreddingIntegrator(listener)));
+    return new ShreddingEventListener(
+        model::getObject, tenantSupplier, blindIndex.getIfAvailable());
+  }
+
+  @Bean
+  public HibernatePropertiesCustomizer shreddingHibernateCustomizer(
+      ShreddingEventListener shreddingEventListener) {
+    // S-6 (Cipher sixth pass): JpaSettings.INTEGRATOR_PROVIDER holds one value. An unconditional
+    // put() replaces whatever a library that ships its own integrator, or an application's own
+    // HibernatePropertiesCustomizer, already stored there - discarded silently, an application's
+    // own auditing or security integrator included. Composed instead: whatever IntegratorProvider
+    // is already in the map (from a customizer Spring already applied) keeps its integrators, and
+    // this module's is added last - so its POST_LOAD listener is the last one prepended and
+    // therefore the first one Hibernate calls, which shreddingStartupCheck (below) then verifies
+    // rather than assumes.
+    return properties -> {
+      Object existing = properties.get(JpaSettings.INTEGRATOR_PROVIDER);
+      var shreddingIntegrator = new ShreddingIntegrator(shreddingEventListener);
+      IntegratorProvider composed;
+      if (existing instanceof IntegratorProvider existingProvider) {
+        composed =
+            () -> {
+              var integrators = new ArrayList<org.hibernate.integrator.spi.Integrator>();
+              integrators.addAll(existingProvider.getIntegrators());
+              integrators.add(shreddingIntegrator);
+              return integrators;
+            };
+      } else {
+        composed = () -> List.of(shreddingIntegrator);
+      }
+      properties.put(JpaSettings.INTEGRATOR_PROVIDER, composed);
+    };
   }
 
   /**
@@ -273,8 +300,11 @@ public class ShreddingAutoConfiguration {
       ShreddingProperties properties,
       FieldCipher cipher,
       ShreddedModel model,
-      DataSource dataSource) {
-    return new ShreddingStartupCheck(properties, cipher, model, dataSource);
+      DataSource dataSource,
+      EntityManagerFactory entityManagerFactory,
+      ShreddingEventListener shreddingEventListener) {
+    return new ShreddingStartupCheck(
+        properties, cipher, model, dataSource, entityManagerFactory, shreddingEventListener);
   }
 
   static byte[] requiredSecret(String property, String value) {

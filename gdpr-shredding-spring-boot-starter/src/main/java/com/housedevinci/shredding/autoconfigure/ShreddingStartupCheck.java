@@ -3,8 +3,14 @@ package com.housedevinci.shredding.autoconfigure;
 import com.housedevinci.shredding.adapter.jdbc.JdbcSupport;
 import com.housedevinci.shredding.application.FieldCipher;
 import com.housedevinci.shredding.domain.ErasedValuePolicy;
+import com.housedevinci.shredding.domain.ErrorCodes;
+import com.housedevinci.shredding.domain.ShreddingException;
 import com.housedevinci.shredding.jpa.ShreddingRuntime;
+import jakarta.persistence.EntityManagerFactory;
 import javax.sql.DataSource;
+import org.hibernate.engine.spi.SessionFactoryImplementor;
+import org.hibernate.event.service.spi.EventListenerRegistry;
+import org.hibernate.event.spi.EventType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.InitializingBean;
@@ -22,21 +28,28 @@ public final class ShreddingStartupCheck implements InitializingBean {
   private final FieldCipher cipher;
   private final ShreddedModel model;
   private final DataSource dataSource;
+  private final EntityManagerFactory entityManagerFactory;
+  private final ShreddingEventListener shreddingEventListener;
 
   public ShreddingStartupCheck(
       ShreddingProperties properties,
       FieldCipher cipher,
       ShreddedModel model,
-      DataSource dataSource) {
+      DataSource dataSource,
+      EntityManagerFactory entityManagerFactory,
+      ShreddingEventListener shreddingEventListener) {
     this.properties = properties;
     this.cipher = cipher;
     this.model = model;
     this.dataSource = dataSource;
+    this.entityManagerFactory = entityManagerFactory;
+    this.shreddingEventListener = shreddingEventListener;
   }
 
   @Override
   public void afterPropertiesSet() {
     ShreddingRuntime.set(new ShreddingRuntime(cipher, properties.getErasedValue().getPolicy()));
+    refuseIfVerifierNotRegisteredFirst();
 
     if (properties.isDevMode()) {
       log.warn(
@@ -92,5 +105,75 @@ public final class ShreddingStartupCheck implements InitializingBean {
         model.blindIndexFields().size(),
         properties.getDataKeyCache().getTtl(),
         properties.getErasure().getBackupRetention());
+  }
+
+  /**
+   * S-6 (Cipher sixth pass). {@code ShreddingHibernateCustomizer} composes with whatever {@code
+   * IntegratorProvider} another library or the application already installed, so this module's
+   * listener is never silently discarded - but composing is a best effort, not a proof: nothing
+   * checked, until now, that the composition actually reached Hibernate and that this module's
+   * {@code POST_LOAD} listener is still the first one called. Run once, after the {@code
+   * SessionFactory} is actually built (this bean depends on {@code EntityManagerFactory}, so Spring
+   * has already finished building it by the time this runs), against the real, live {@code
+   * EventListenerRegistry} rather than assumed from the customizer having run without an exception.
+   */
+  private void refuseIfVerifierNotRegisteredFirst() {
+    var sessionFactory = entityManagerFactory.unwrap(SessionFactoryImplementor.class);
+    EventListenerRegistry registry =
+        sessionFactory.getServiceRegistry().getService(EventListenerRegistry.class);
+    if (registry == null) {
+      throw new ShreddingException(
+          ErrorCodes.CONFIG,
+          "shredding: Hibernate's EventListenerRegistry is unavailable. This module's write and"
+              + " read-path checks are Hibernate event listeners; without a registry none of them"
+              + " can be registered at all.");
+    }
+    refuseUnlessRegistered(registry, EventType.PRE_INSERT);
+    refuseUnlessRegistered(registry, EventType.PRE_UPDATE);
+    refuseUnlessRegistered(registry, EventType.POST_INSERT);
+    refuseUnlessRegistered(registry, EventType.POST_UPDATE);
+    refuseUnlessFirst(registry, EventType.POST_LOAD);
+  }
+
+  private <T> void refuseUnlessRegistered(EventListenerRegistry registry, EventType<T> type) {
+    var group = registry.getEventListenerGroup(type);
+    for (T candidate : group.listeners()) {
+      if (candidate == shreddingEventListener) {
+        return;
+      }
+    }
+    throw new ShreddingException(
+        ErrorCodes.CONFIG,
+        "shredding: this module's listener is not registered on "
+            + type.eventName()
+            + ". A second HibernatePropertiesCustomizer that sets"
+            + " hibernate.integrator_provider without composing with the one this module installs -"
+            + " see ShreddingAutoConfiguration.shreddingHibernateCustomizer - replaces it instead of"
+            + " adding to it, and every write and read-path check this module makes is silently"
+            + " off.");
+  }
+
+  private <T> void refuseUnlessFirst(EventListenerRegistry registry, EventType<T> type) {
+    var group = registry.getEventListenerGroup(type);
+    T first = null;
+    for (T candidate : group.listeners()) {
+      first = candidate;
+      break;
+    }
+    if (first == shreddingEventListener) {
+      return;
+    }
+    throw new ShreddingException(
+        ErrorCodes.CONFIG,
+        "shredding: this module's listener is not first on "
+            + type.eventName()
+            + " ("
+            + (first == null ? "no listener at all" : first.getClass().getName())
+            + " is). It has to run before any other POST_LOAD listener - a user @PostLoad method, an"
+            + " @EntityListeners bean, or another library's own integrator - or that listener sees"
+            + " the read placeholder instead of the decrypted value (Cipher item 8). Another"
+            + " integrator prepended after this module's own installed; see"
+            + " ShreddingAutoConfiguration.shreddingHibernateCustomizer for how to compose instead"
+            + " of prepending around it.");
   }
 }
