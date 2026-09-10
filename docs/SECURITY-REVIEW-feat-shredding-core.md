@@ -3353,3 +3353,198 @@ not work on inherited entity fields or inside embeddables, which the docs now sa
    reused singleton with a schema per test class (QUESTIONS S-25, deferred by Thor with a reason I
    accept). Open it as an issue on merge so it is not lost; E-3 removes the current symptom, not the
    container churn that will produce the next one.
+
+---
+
+## Twelfth pass (13535d8, 2026-09-11): MERGE WITH FIXES
+
+Re-verification of the eleventh pass's four items, then an attack on the two surfaces those fixes
+created: the vendored reserved-word list, and the collision refusal.
+
+### Numbers
+
+| | |
+|---|---|
+| build | `./mvnw clean verify`, exit 0, twice consecutively on 13535d8 and twice again with this pass's probes added |
+| tests on 13535d8 | 327 green, 0 failed, 0 errored, 0 skipped (core 109, starter 201, sample 17) |
+| tests with this pass's probes | 330 green (core 109, starter 204, sample 17) + 1 red under `-Pprobes-pending` |
+| coverage | core 85.6% line, starter 87.5% line (gate 80%) |
+| CI run 34535851969 | success, job "Build & test" success |
+| probes | 158 `probe_` methods on 6f253a0 (including `src/test-pending`), 158 on 13535d8 (all in `src/test`); the name sets are identical - nothing dropped, nothing renamed |
+| `src/test-pending` | empty on 13535d8 (`gdpr-shredding-core/src/test-pending/java/README.md` only); this pass adds one file back |
+| Docker | up; no test skipped for any reason |
+
+### The four eleventh-pass items
+
+**E-1 (MEDIUM) - closed.** `HibernateBlindIndexResidual`'s constructor refuses `SHRED-CONFIG-001`
+when two blind indexes resolve to the same `(table, column)`, naming both entities, the table and
+the column. Verified beyond the promoted probe: that probe supplies its *own* `JdbcErasureStore`
+bean, so what it pins is a refusal the test constructs. `probe_two_entities_on_one_table_are_
+refused_by_the_module_s_own_wiring` asks the same question with nothing overridden, and the refusal
+comes out of `ShreddingAutoConfiguration#shreddingErasureStore` during refresh
+(`HibernateBlindIndexResidual.<init>` line 93 in the stack), which is what "startup refusal" has to
+mean. Green.
+
+**E-2 (LOW) - closed, and the list is right.** Three attacks, all negative:
+
+1. *A word reserved in a later PostgreSQL than the vendored 16.14.* Ran `select word from
+   pg_get_keywords() where catcode in ('R','T') order by word` against live `postgres:16.14`,
+   `postgres:17.11` and `postgres:18.6`. 101 words each, `diff` empty both ways. PostgreSQL 18 does
+   add key words (`json`, `json_query`, `json_table`, `json_value`, `merge_action`, ...) but all of
+   them land in catcode `C`, not in `R` or `T`. A vendored list pinned to 16 does not under-refuse
+   on 17 or 18.
+2. *Categories `U` and `C`, excluded on purpose - is `C` safe?* `C` is "can be used as column name,
+   but reserved elsewhere", and the argument for excluding it is a grammar argument, so I tested it
+   rather than read it. For every one of the 55 `C` words, on 16.14 and on 18.6: create a table with
+   that column *unquoted*, then `select count(*) ... where <word> is not null` and `update ... set
+   <word> = null where <word> is not null`, both unqualified, exactly the shape this module builds.
+   Zero failures on either version. Excluding `C` is correct and refusing it would have been a false
+   refusal.
+3. *Over-refusal on `R`/`T`.* For each of the 101 words, `create table probe_r (<word> text, ...)`
+   unquoted: all 101 fail. There is no word on the list that a mapping could have used unquoted and
+   got away with, so the refusal costs no working application anything.
+   And the vendored file's word lines are byte-identical to a live 16.14's `R`+`T` output, checked
+   independently of the class's own SHA-256.
+
+The other half - a reserved word the mapping *quotes* must still boot - was unpinned: the tenth
+pass's `probe_a_reserved_word_column_quoted_by_the_mapping_is_cleared` returns early and passes if
+startup refuses, so an over-refusal would have been green there. It is pinned now by
+`probe_a_reserved_word_column_the_mapping_quotes_still_boots_and_erases`, where a startup refusal is
+an `AssertionError`. Green, and `probe_an_auto_quoted_column_boots_and_round_trips` (unquoted `user`
+under `hibernate.auto_quote_keyword=true`, which Hibernate quotes) is green beside it.
+
+**E-3 (LOW) - closed.** Every `PostgreSQLContainer` under `*/src/test` carries
+`withStartupTimeout(Duration.ofMinutes(2))`; the three sample tests that start a context pin
+`hibernate.dialect`. The grep in the eleventh pass's fix list still names
+`ShreddedFieldsDoNotLeakTest`, which is not a miss: that class starts no context and no container -
+it is three assertions on `toString`. The repro was imprecise; the fix is complete.
+
+**E-4 (INFO) - closed.** `BlindIndex`'s Javadoc now says "lookup key ... never becomes a SQL
+identifier and there is no pattern it is validated against"; `TableRef`'s field comment says the
+same from its side.
+
+### The two recorded decisions
+
+**E-1's key stays `(table, column)`, not the wider key.** Confirmed correct. A key that also carried
+the subject and tenant columns is exactly the key that a mis-addressed erasure looks up with the
+wrong values, so it would find nothing at the moment it matters. The class Javadoc says this in its
+own words.
+
+**E-1's probe assertion moved from erasure-refusal to startup-refusal.** Accepted, and it is not a
+narrowing: a mapping that cannot boot cannot reach the erasure path at all, so the startup assertion
+is the stronger of the two. What it did cost is coverage of the module's own wiring, because the
+probe's application supplies its own `JdbcErasureStore`; the new probe above closes that.
+
+### Attacks that produced nothing
+
+- **`@SecondaryTable` reaching the collision refusal.** Two entities on one table already have to be
+  two `@Entity` classes; `@SecondaryTable` widens one entity, it does not create a second name, and
+  every axis but one already refuses a secondary-table mapping (see F-1 for the one).
+- **Inheritance reaching the collision refusal.** A `SINGLE_TABLE` hierarchy *is* two entity names
+  over one table, and `allFields` walks the superclass, so the root's one `@BlindIndex` field is
+  scanned once per entity name and could have produced E-1's message - which tells a developer to
+  stop mapping two entities onto one table, something a subclass cannot stop doing. It does not: the
+  inheritance limit refuses first, and its message names inheritance. Pinned by
+  `probe_a_single_table_hierarchy_is_refused_by_its_real_reason`, green. (`JOINED` was already
+  pinned by the tenth pass.)
+- **A tampered keyword list.** The SHA-256 is over the parsed, sorted word lines, so adding or
+  removing a word changes it and the class refuses to load; re-ordering or re-commenting the file
+  does not, which is the correct sensitivity. The refusal surfaces as an `ExceptionInInitializerError`
+  wrapping the `ShreddingException` rather than as `SHRED-CONFIG-001` directly, because the load runs
+  in a static initialiser - still a loud, message-carrying startup failure, so I close this as
+  not-a-finding rather than raise it.
+- **A table named with a reserved word.** Unlike a column, a bare reserved word in `UPDATE <table>`
+  or `FROM <table>` is a syntax error in every statement, Hibernate's included, so such an
+  application cannot start or write at all. There is nothing this module can silently get wrong.
+
+### F-1 (LOW) A `@BlindIndex` column on a `@SecondaryTable` boots, and then no erasure of that entity can ever succeed
+
+`ShreddedModel.resolveIndexColumns` builds the `BlindIndexColumn` from two independent sources:
+`primaryTable(persister)` for the table, and the `@BlindIndex` field's own mapping for the column.
+It never compares the two. Every other axis does: `refuseSecondaryTableSplit` does it for the
+`@Shredded` column, and `resolveAxis` does it for `subjectColumn` and for `tenantColumn`, both
+refusing at startup and naming the mapping. The `@BlindIndex` column itself is the one that does
+not, so a field mapped `@Column(name = "email_idx", table = "secidx_note_ext")` yields a
+`BlindIndexColumn` naming the *primary* table and a column that exists only in the *secondary* one.
+
+The application boots, writes indexes correctly, and then every erasure of that entity fails with
+`SHRED-KEY-UNAVAILABLE: shredding key store is unavailable (SHRED-KEY-UNAVAILABLE, SQLState 42703)`.
+That is control 16 working as designed - a database failure inside an erasure is reported as a key
+store outage, with the driver's message dropped because it can carry a bind value - which is
+precisely why the mapping has to be caught at startup: the erasure path is, deliberately, incapable
+of telling the operator what is wrong. `42703` is "undefined column", and the only place that
+appears is in a code the operator will take to their key store and their health endpoint.
+
+Nothing is lost: the probe asserts it. The transaction aborts, the subject's key survives, and the
+ciphertext still decrypts after the failure. This is an erasure that is impossible, not one that is
+half-done, and that is what keeps it at LOW.
+
+**Repro.** `./mvnw -Pprobes-pending -pl gdpr-shredding-spring-boot-starter -Dtest=CipherProbeTwelfthPassPendingTest test`
+- `gdpr-shredding-spring-boot-starter/src/test-pending/java/com/housedevinci/shredding/autoconfigure/CipherProbeTwelfthPassPendingTest.java`,
+`probe_a_blind_index_column_on_a_secondary_table_is_refused_at_startup`, RED on 13535d8:
+
+```
+a @BlindIndex column mapped onto a @SecondaryTable booted; the erasure then said:
+ERASURE-FAILED SHRED-KEY-UNAVAILABLE: shredding key store is unavailable
+(SHRED-KEY-UNAVAILABLE, SQLState 42703) | row still readable after the failure: true
+```
+
+**Correction (Isis).** In `ShreddedModel.resolveIndexColumns` (or in `indexColumnOf`, which already
+has the persister and the field): compare `TableRef.parse(basic.getContainingTableExpression())`
+with `primaryTable(persister)` and refuse `SHRED-CONFIG-001` when they differ, naming the entity,
+the field, the containing table and the primary table - the same message shape
+`refuseSecondaryTableSplit` and `resolveAxis` already use, and for the same reason: the erasure's
+`UPDATE` names one table. Then `git mv` the probe into `src/test/java`. No new mechanism, no design
+stop.
+
+### Fix list
+
+| # | severity | who | item |
+|---|---|---|---|
+| F-1 | LOW | Isis | `ShreddedModel.resolveIndexColumns` / `indexColumnOf`: refuse at startup when the `@BlindIndex` field's containing table is not the entity's primary table, naming both. Probe `probe_a_blind_index_column_on_a_secondary_table_is_refused_at_startup` green and promoted out of `src/test-pending` |
+
+Re-verification: that probe green in the default build after promotion, `-Pprobes-pending` with
+nothing red, `src/test-pending` empty again, and two consecutive full green runs.
+
+### For Souhaile, in plain words
+
+Module C encrypts the personal fields you mark, one key per person, and an erasure destroys that
+person's key. The row stays; the fields become unreadable. That is pseudonymisation with key
+destruction, not deletion, and the module's documents say so rather than claiming more.
+
+This pass had two jobs. The first was checking the two guards added since last time. One refuses to
+start when an application maps two different entities onto one database table in a way that would
+leave the module checking the wrong one after an erasure - it works, and it works through the
+module's own wiring, not only through the test that was written for it. The other refuses to start
+when a column is named after a word PostgreSQL reserves for itself, such as `user`, without the
+quotation marks that make it an ordinary name; left alone, that column would have made every erasure
+of that table quietly address something else. I checked the list of reserved words the module
+carries against three real PostgreSQL versions, 16, 17 and 18, word by word, in both directions: it
+misses nothing on the newer versions, and it refuses nothing that would actually have worked. I also
+pinned the opposite case, which nothing had pinned before - an application that *does* quote such a
+column must still start and still erase - because a guard that is too eager is its own outage.
+
+The second job was to look for the same mistake somewhere nobody had looked. I found it. The module
+checks that the encrypted column, the person column and the tenant column all live in the entity's
+main table, and refuses at startup if any of them has been moved to a side table. There is a fourth
+column - the searchable fingerprint the module writes so an application can still look someone up -
+and that one is not checked. Move it to a side table and the application starts happily; then every
+erasure of that entity fails, for ever, with a message saying the key store is unavailable, which is
+not what is wrong. Nothing is destroyed and nothing leaks - I verified that the person's key and
+data survive the failure intact - but a data-subject erasure request cannot be fulfilled and the
+operator is pointed at the wrong system. It is a small, mechanical fix in the same place as the
+three checks that already exist.
+
+The residuals you keep, unchanged: other servers can hold a decrypted key in memory for up to sixty
+seconds after an erasure; backups keep the row until your retention window expires, and the erasure
+record prints that date; and `@Shredded` does not work on inherited entity fields or inside
+embeddables, which the docs say plainly.
+
+### Pre-public checklist
+
+Unchanged from the eleventh pass and still open - it is the merge's tail, not this finding's. Kept
+here so it is not lost: move `SPEC.md`, `STATUS.md`, `QUESTIONS.md`, this review, `docs/plans/` and
+`RELEASING.md` to `15-regulated-spring/internal/gdpr-shredding/`; rename agents to roles across the
+test classes, main-source Javadoc and docs; re-read `README.md` against the final feature set;
+`LICENSE` (FSL-1.1-ALv2) and `NOTICE` are present and correct, no action; open the singleton-container
+collapse (QUESTIONS S-25) as a post-merge issue.
