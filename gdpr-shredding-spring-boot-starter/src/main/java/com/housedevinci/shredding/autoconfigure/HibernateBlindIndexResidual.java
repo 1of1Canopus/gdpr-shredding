@@ -66,8 +66,8 @@ final class HibernateBlindIndexResidual implements BlindIndexResidual {
     var built = new LinkedHashMap<Key, Residual>();
     for (var index : model.blindIndexFields()) {
       var column = index.column();
-      built.put(
-          new Key(column.table(), column.column()),
+      var key = new Key(column.table(), column.column());
+      var residual =
           new Residual(
               "select count(*) from "
                   + index.entityName()
@@ -78,7 +78,25 @@ final class HibernateBlindIndexResidual implements BlindIndexResidual {
                   + " = :tenant and e."
                   + index.fieldName()
                   + " is not null",
-              index.entityName()));
+              index.entityName());
+      Residual previous = built.put(key, residual);
+      if (previous != null && !previous.equals(residual)) {
+        throw new ShreddingException(
+            ErrorCodes.CONFIG,
+            "the blind indexes "
+                + previous.entityName()
+                + " and "
+                + residual.entityName()
+                + " both resolve to "
+                + key.table()
+                + "."
+                + key.column().sql()
+                + ": two entities mapped to one table that index the same physical column would"
+                + " share one independent read-back, and the erasure would verify one blind index"
+                + " with the other entity's subject and tenant columns. This module has not been"
+                + " shown to erase that mapping correctly, so startup refuses rather than keeping"
+                + " only one of the two checks.");
+      }
     }
     this.residuals = Map.copyOf(built);
   }

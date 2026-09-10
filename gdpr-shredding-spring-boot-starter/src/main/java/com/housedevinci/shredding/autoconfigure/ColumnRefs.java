@@ -82,7 +82,39 @@ final class ColumnRefs {
     }
     ColumnRef ref = parse(selectable.getSelectionExpression(), where);
     assertRoundTrip(ref, selectable.getSelectionExpression(), where, dialect);
+    refuseIfUnquotedReservedWord(ref, where);
     return ref;
+  }
+
+  /**
+   * The round trip above proves this module reproduces the expression Hibernate's mapping holds -
+   * it says nothing about whether that expression can survive an <em>unqualified</em> reference.
+   * Hibernate's own SQL always qualifies a column with its table alias ({@code n1_0.user}), where
+   * PostgreSQL's grammar allows a reserved word after the dot; this module's {@code UPDATE} and
+   * {@code WHERE} do not qualify, and a bare reserved word there is parsed as the keyword, not as a
+   * column reference - {@code user} becomes {@code CURRENT_USER}, silently matching nothing. Refuse
+   * at startup, naming the mapping, rather than let every erasure of that column fail for ever with
+   * a message that blames something else.
+   */
+  private static void refuseIfUnquotedReservedWord(ColumnRef ref, String where) {
+    if (!ref.quoted() && PostgreSqlReservedKeywords.isReserved(ref.text())) {
+      String quotedMapping = "@Column(name = \"" + "\\\"" + ref.text() + "\\\"" + "\")";
+      throw new ShreddingException(
+          ErrorCodes.CONFIG,
+          where
+              + " maps column "
+              + ref.text()
+              + " unquoted, and \""
+              + ref.text().toLowerCase(java.util.Locale.ROOT)
+              + "\" is one of PostgreSQL's reserved key words. Hibernate's own SQL qualifies every"
+              + " column reference with a table alias and is unaffected, but this module's WHERE and"
+              + " SET are not qualified, so an unqualified reserved word there is parsed as the"
+              + " keyword itself rather than as this column - and every erasure of "
+              + where
+              + " would then match nothing, forever, without saying why. Quote it in the mapping: "
+              + quotedMapping
+              + ".");
+    }
   }
 
   /**

@@ -2,12 +2,9 @@ package com.housedevinci.shredding.autoconfigure;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.housedevinci.shredding.application.ErasureRequest;
-import com.housedevinci.shredding.application.ErasureService;
 import com.housedevinci.shredding.autoconfigure.columnid.autoquote.AutoQuoteNote;
 import com.housedevinci.shredding.autoconfigure.columnid.autoquote.AutoQuoteNoteRepository;
 import com.housedevinci.shredding.domain.ShreddingException;
-import com.housedevinci.shredding.domain.SubjectId;
 import com.housedevinci.shredding.domain.TenantId;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
@@ -18,7 +15,6 @@ import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.persistence.autoconfigure.EntityScan;
-import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -27,11 +23,11 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Cipher, eleventh pass: the two findings. Both are RED against 704f23b. Run with {@code ./mvnw
- * -Pprobes-pending test}; promote into {@code src/test} when they are green.
+ * Cipher, eleventh pass, E-1 and E-2: both close as a startup refusal (design addendum 4, §4.5 and
+ * §4.2). Promoted from {@code src/test-pending} once Isis's fixes made them green.
  */
 @Testcontainers
-class CipherProbeEleventhPassPendingTest {
+class CipherProbeEleventhPassStartupRefusalsTest {
 
   @Container
   static final PostgreSQLContainer<?> POSTGRES =
@@ -92,9 +88,11 @@ class CipherProbeEleventhPassPendingTest {
   @SpringBootConfiguration
   @EnableAutoConfiguration
   @EntityScan(
-      basePackageClasses = com.housedevinci.shredding.autoconfigure.eleventhpass.sharedtable.DupA.class)
+      basePackageClasses =
+          com.housedevinci.shredding.autoconfigure.eleventhpass.sharedtable.DupA.class)
   @EnableJpaRepositories(
-      basePackageClasses = com.housedevinci.shredding.autoconfigure.eleventhpass.sharedtable.DupA.class)
+      basePackageClasses =
+          com.housedevinci.shredding.autoconfigure.eleventhpass.sharedtable.DupA.class)
   static class SharedTableDecoyApp extends Tenant {
 
     /**
@@ -133,13 +131,13 @@ class CipherProbeEleventhPassPendingTest {
   }
 
   /**
-   * {@code HibernateBlindIndexResidual} keys its residuals on (table, index column). Two entities
-   * mapped to one table that index the same column therefore collide in one {@code
-   * LinkedHashMap}: the second {@code put} overwrites the first and {@code Map.copyOf} says
-   * nothing. The erasure then verifies one of the two blind indexes with the <em>other</em>
-   * entity's query - the S-22 net, silently pointed at the wrong subject column. Both erasures
-   * below must refuse; with the collision exactly one of them does, whichever way the scan ordered
-   * the two entities.
+   * {@code HibernateBlindIndexResidual} keyed its residuals on (table, index column) alone. Two
+   * entities mapped to one table that index the same column collided in one {@code LinkedHashMap}:
+   * the second {@code put} overwrote the first and {@code Map.copyOf} said nothing. The erasure
+   * would then have verified one of the two blind indexes with the <em>other</em> entity's query -
+   * the S-22 net, silently pointed at the wrong subject column. Isis's fix (E-1): the constructor
+   * now refuses at startup, naming both entities, the shared table and the shared column, rather
+   * than keeping only one of the two independent read-backs.
    */
   @Test
   void probe_two_entities_on_one_table_do_not_share_one_independent_read_back() throws Exception {
@@ -147,31 +145,23 @@ class CipherProbeEleventhPassPendingTest {
         "create table if not exists dup_note (id bigserial primary key,"
             + " owner_a varchar(255) not null, owner_b varchar(255) not null,"
             + " tenant_id varchar(255) not null, email bytea, email_idx bytea)");
-    String p = "dup-p-" + System.nanoTime();
-    String q = "dup-q-" + System.nanoTime();
-    sql(
-        "insert into dup_note (owner_a, owner_b, tenant_id, email, email_idx) values"
-            + " ('" + p + "', 'other-b', 'org-a', null, '\\x0102'),"
-            + " ('other-a', '" + q + "', 'org-a', null, '\\x0304')");
+    String outcome;
     try (var ctx =
         builder(SharedTableDecoyApp.class).properties("spring.jpa.hibernate.ddl-auto=none").run()) {
-      var erasures = ctx.getBean(ErasureService.class);
-      assertThat(eraseOutcome(erasures, p))
-          .describedAs("the erasure of the subject in owner_a completed with its index in place")
-          .startsWith("SHRED-ERASURE-004");
-      assertThat(eraseOutcome(erasures, q))
-          .describedAs("the erasure of the subject in owner_b completed with its index in place")
-          .startsWith("SHRED-ERASURE-004");
-    }
-  }
-
-  private static String eraseOutcome(ErasureService erasures, String subject) {
-    try {
-      erasures.erase(new ErasureRequest(TenantId.of("org-a"), SubjectId.of(subject), "dpo", "art 17"));
-      return "COMPLETED";
+      outcome = "STARTED";
     } catch (RuntimeException e) {
-      return code(e);
+      outcome = "STARTUP-REFUSED " + code(e);
     }
+    assertThat(outcome)
+        .describedAs(
+            "two entities on one table sharing a blind-index column must not silently share one"
+                + " independent read-back")
+        .startsWith("STARTUP-REFUSED SHRED-CONFIG-001");
+    assertThat(outcome)
+        .contains("DupA")
+        .contains("DupB")
+        .contains("dup_note")
+        .contains("email_idx");
   }
 
   private static void ddl(String statement) throws java.sql.SQLException {
