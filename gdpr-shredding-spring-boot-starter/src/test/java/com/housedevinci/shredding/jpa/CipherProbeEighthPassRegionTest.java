@@ -47,19 +47,13 @@ class CipherProbeEighthPassRegionTest {
   }
 
   /**
-   * Bounded on purpose. {@code discardRegion(-1L)} - a token that is on no stack - is today's
-   * "clear this thread" idiom in {@code CipherProbeRegionEpochTest}, {@code
-   * CipherProbeRegionResidueTest} and {@code CipherProbeSeventhPassTest}, and it works only because
-   * of the very behaviour S-14 says must stop. Once {@code unwindTo} pops nothing for a token it
-   * does not find, this loop is a no-op and the four {@code @AfterEach} blocks that rely on it need
-   * the package-private {@code ShreddingContext.resetForTests()} the fix adds instead. Written as a
-   * bounded loop so it cannot spin forever on either side of that change.
+   * S-14 (Cipher eighth pass): {@code discardRegion(-1L)} - a token that is on no stack - no longer
+   * empties the deque, so this thread's own {@code ShreddingContext.resetForTests()} is what leaves
+   * a clean thread for the next test.
    */
   @AfterEach
   void clean() {
-    for (int i = 0; i < 64 && ShreddingContext.inReadBracket(); i++) {
-      ShreddingContext.discardRegion(-1L);
-    }
+    ShreddingContext.resetForTests();
   }
 
   /** A1: three entries deep, each serving only its own decode. */
@@ -93,7 +87,8 @@ class CipherProbeEighthPassRegionTest {
             () -> {
               ShreddingContext.recordDecoded(key("inner", 2), secret("INNER"));
               assertThat(ShreddingContext.drain(key("outer", 1))).isEmpty();
-              return new String(ShreddingContext.drain(key("inner", 2)).orElseThrow(), StandardCharsets.UTF_8);
+              return new String(
+                  ShreddingContext.drain(key("inner", 2)).orElseThrow(), StandardCharsets.UTF_8);
             });
     assertThat(inner).isEqualTo("INNER");
     assertThat(ShreddingContext.drain(key("outer", 1))).contains(secret("OUTER"));

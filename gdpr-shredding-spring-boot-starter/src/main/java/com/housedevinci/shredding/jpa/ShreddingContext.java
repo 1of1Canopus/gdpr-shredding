@@ -451,7 +451,7 @@ public final class ShreddingContext {
   private static void sweepForeignRegions(Deque<Region> stack, long inForce) {
     int swept = 0;
     String first = null;
-    while (!stack.isEmpty() && stack.peek().epoch != inForce) {
+    while (!stack.isEmpty() && !isCurrent(stack.peek(), inForce)) {
       Region region = stack.pop();
       swept++;
       if (first == null) {
@@ -468,6 +468,23 @@ public final class ShreddingContext {
   }
 
   /**
+   * Whether {@code region} is the one this thread's bracketed entry - if any - has authority over:
+   * an entry is in force ({@code inForce != NO_ENTRY}) and {@code region} was stamped with exactly
+   * that epoch. {@code NO_ENTRY == NO_ENTRY} is deliberately false here (S-15, ruling on QUESTIONS
+   * S-4a, Cipher eighth pass): with no entry in force there is no live region for a raw {@link
+   * #openRegion()} region to be confused with, so a region carrying {@link #NO_ENTRY} is residue by
+   * construction, never current - addendum 2 change 3's "never sweep a region whose epoch equals
+   * the epoch in force" protected the nested case (a caller's own live region must survive its
+   * callee's entry), which needs no protection when nothing is in force at all. One predicate, used
+   * by both {@link #sweepForeignRegions} (a region opened outside any entry must not survive on a
+   * pooled thread for the thread's whole life, S-15) and {@link #currentRegion} (addendum 2 change
+   * 4).
+   */
+  private static boolean isCurrent(Region region, long inForce) {
+    return inForce != NO_ENTRY && region.epoch == inForce;
+  }
+
+  /**
    * The one region a decode may be filed into, drained from or counted in on this thread, or {@code
    * null} (addendum 2 change 4: one predicate, four callers). A region access with no bracketed
    * entry in force, or against a region stamped by another entry, is not a region access at all -
@@ -478,8 +495,7 @@ public final class ShreddingContext {
     if (top == null) {
       return null;
     }
-    long inForce = EPOCH.get();
-    return inForce != NO_ENTRY && top.epoch == inForce ? top : null;
+    return isCurrent(top, EPOCH.get()) ? top : null;
   }
 
   /**
@@ -578,9 +594,22 @@ public final class ShreddingContext {
    * retry still starts clean. {@link #discardRegion(long)} passes {@code false}: on that path the
    * original exception already in flight is the failure worth reporting, and this must not replace
    * it or stop the unwind partway through.
+   *
+   * <p><strong>S-14 (Cipher eighth pass).</strong> {@code token} is looked up on the deque
+   * <em>before</em> anything is popped, and nothing is popped at all when it is not there. The old
+   * shape popped unconditionally until it found {@code token} or ran out of deque - so a token from
+   * another frame, or one a nested entry's sweep had already taken away, emptied the whole stack,
+   * including the live entry region of the call this was invoked from: a well-behaved caller's own,
+   * still-open region destroyed as collateral by a close it had nothing to do with. A token not on
+   * the deque is not "unwind as far as possible and give up" (that is indistinguishable from
+   * success to everything above it); it is {@code null}, which {@link #closeRegion(long)} already
+   * turns into its own refusal and {@link #discardRegion(long)} already treats as a no-op.
    */
   private static Region unwindTo(long token, boolean refuseUndrainedIntermediates) {
     Deque<Region> stack = REGIONS.get();
+    if (stack.stream().noneMatch(region -> region.token == token)) {
+      return null;
+    }
     Region found = null;
     Region undrainedIntermediate = null;
     while (!stack.isEmpty()) {
@@ -647,6 +676,20 @@ public final class ShreddingContext {
    */
   public static boolean inReadBracket() {
     return !REGIONS.get().isEmpty();
+  }
+
+  /**
+   * Clears every region and the entry epoch on this thread, unconditionally. Package-private: the
+   * idiom this replaces - {@code discardRegion(-1L)} in a bounded loop, a token on no stack - was
+   * "clean this thread" only as a side effect of {@link #unwindTo} once popping unconditionally
+   * until it found its token or ran out of deque; S-14 (Cipher eighth pass) closed that shape
+   * because it also destroyed a live caller's region on the ordinary, in-application path, so it
+   * can no longer be reused here. For {@code @AfterEach} blocks in this package's own tests only -
+   * never called from production code, which never needs to discard a region it does not own.
+   */
+  static void resetForTests() {
+    REGIONS.remove();
+    EPOCH.remove();
   }
 
   /**

@@ -28,13 +28,10 @@ class CipherProbeSeventhPassTest {
 
   @AfterEach
   void clean() {
-    while (ShreddingContext.inReadBracket()) {
-      try {
-        ShreddingContext.discardRegion(-1L);
-      } catch (RuntimeException ignored) {
-        break;
-      }
-    }
+    // S-14 (Cipher eighth pass): discardRegion(-1L) no longer empties the deque for a token that
+    // is not on it, so this thread's own resetForTests() replaces the loop that used to rely on
+    // that behaviour.
+    ShreddingContext.resetForTests();
   }
 
   /**

@@ -43,9 +43,10 @@ class CipherProbeRegionEpochTest {
 
   @AfterEach
   void leaveTheThreadClean() {
-    while (ShreddingContext.inReadBracket()) {
-      ShreddingContext.discardRegion(-1L);
-    }
+    // S-14 (Cipher eighth pass): discardRegion(-1L) no longer empties the deque for a token that
+    // is not on it, so this thread's own resetForTests() replaces the loop that used to rely on
+    // that behaviour.
+    ShreddingContext.resetForTests();
   }
 
   // -- change 2, first case: a thread that has never entered ----------------------------------
