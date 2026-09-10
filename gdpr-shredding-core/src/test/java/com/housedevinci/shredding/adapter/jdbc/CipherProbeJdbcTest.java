@@ -406,7 +406,9 @@ class CipherProbeJdbcTest {
     }
 
     var store =
-        store(List.of(new BlindIndexColumn("customer", "email_bidx", "customer_id", "tenant_id")));
+        store(
+            List.of(
+                BlindIndexColumn.unresolved("customer", "email_bidx", "customer_id", "tenant_id")));
     var result = service(store).erase(new ErasureRequest(TENANT, subject, "dpo", "art 17"));
 
     assertThat(result.blindIndexColumnsCleared()).isEqualTo(1);

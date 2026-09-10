@@ -101,6 +101,30 @@ public final class ShreddingStartupCheck implements InitializingBean {
               + " (control 8). Run with a role that has only INSERT and SELECT on"
               + " shredding_erasure, shredding_erasure_anchor and shredding_erased_subject.");
     }
+    // Design addendum 3, change 1/2 (applied §3.1): every @BlindIndex must have had its
+    // tenantColumn resolved to the property the write path reads. The auto-configured model always
+    // scans with the EntityManagerFactory and so always resolves; an application that supplies its
+    // own ShreddedModel bean might not, and an index derived under a tenant nobody resolved is an
+    // index no erasure can be shown to reach. Refused here rather than at the first indexed write.
+    model
+        .blindIndexFields()
+        .forEach(
+            index -> {
+              if (index.column().tenantProperty().isEmpty()) {
+                throw new ShreddingException(
+                    ErrorCodes.CONFIG,
+                    "@BlindIndex on "
+                        + index.entityName()
+                        + "."
+                        + index.fieldName()
+                        + " has no property resolved for tenantColumn=\""
+                        + index.column().tenantColumn()
+                        + "\". Build the ShreddedModel with ShreddedModel.scan(entities,"
+                        + " allowSecondLevelCache, properties, entityManagerFactory) so the column"
+                        + " the erasure matches on can be resolved to the property the write path"
+                        + " derives the index under.");
+              }
+            });
     log.info(
         "shredding: {} shredded field(s) across {} entity type(s), {} blind-index column(s),"
             + " data-key cache ttl {}, backup retention {}",

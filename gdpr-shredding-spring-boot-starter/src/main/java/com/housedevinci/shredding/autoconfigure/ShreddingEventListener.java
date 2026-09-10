@@ -935,18 +935,101 @@ public final class ShreddingEventListener
       if (sourceIndex < 0 || targetIndex < 0) {
         continue;
       }
+      TenantId rowTenant = rowTenant(index, names, state);
+      TenantId fieldTenant = scope.tenantFor(index.ofFieldName());
+      if (!fieldTenant.value().equals(rowTenant.value())) {
+        throw new ShreddingException(
+            ErrorCodes.UNVERIFIED_WRITE,
+            "@BlindIndex on "
+                + index.entityName()
+                + "."
+                + index.fieldName()
+                + " indexes "
+                + index.entityName()
+                + "."
+                + index.ofFieldName()
+                + ", whose data key is derived under tenant \""
+                + fieldTenant.value()
+                + "\", while this row's tenant column \""
+                + index.column().tenantColumn()
+                + "\" holds \""
+                + rowTenant.value()
+                + "\". One erasure request names one tenant and one subject, so it can only reach"
+                + " the key, the ciphertext and the index when all three are under the same tenant."
+                + " Declare the @Shredded tenant as the one the tenant column holds, or write the"
+                + " tenant column with the tenant the value belongs to. The write is refused.");
+      }
       Object value = state[sourceIndex];
-      // S-2: the index is derived from the field it indexes (of=), so it belongs under that
-      // field's own tenant, not the row's primary one.
+      // Design addendum 3, option (a) (applied §3.1): derived under the row's own tenantColumn
+      // value - the one value the erasure's WHERE can match - read out of the same state array
+      // this write is about to persist. Change 4 has just refused the write if that is not also
+      // the tenant the of-field's data key was derived under, so the key, the ciphertext and the
+      // index are one erasure's worth of work by construction.
       state[targetIndex] =
           value == null
               ? null
               : blindIndex.compute(
-                  scope.tenantFor(index.ofFieldName()),
-                  index.entityName(),
-                  index.ofFieldName(),
-                  normalise(value));
+                  rowTenant, index.entityName(), index.ofFieldName(), normalise(value));
     }
+  }
+
+  /**
+   * Design addendum 3, changes 3 and 4 (applied §3.3, §3.4). The tenant this row's index is derived
+   * under, read out of the state array by the property {@code tenantColumn} was resolved to at
+   * startup, and refused unless it is usable and unless it agrees with the tenant the of-field's
+   * data key is derived under.
+   *
+   * <p>Change 4 is the one that closes S-13. Deriving under {@code state[tenantColumn]} alone only
+   * moves the gap: the ciphertext would still be encrypted under {@code Scope.tenantFor(of-field)},
+   * so an erasure for that tenant would destroy the key and match no row, and an erasure for the
+   * column's tenant would clear the index and destroy a key the ciphertext was never under. For a
+   * row to be erasable by one request, the tenant its data key was derived under, the tenant its
+   * index was derived under and the value in its tenant column have to be one value. When they are
+   * not, the write is refused here, naming both - a shape no keying this module could choose would
+   * make erasable is refused at the boundary rather than written and reported as erased later.
+   */
+  private static TenantId rowTenant(
+      ShreddedModel.BlindIndexField index, String[] names, Object[] state) {
+    String where = index.entityName() + "." + index.fieldName();
+    String property =
+        index
+            .column()
+            .tenantProperty()
+            .orElseThrow(
+                () ->
+                    new ShreddingException(
+                        ErrorCodes.CONFIG,
+                        "@BlindIndex on "
+                            + where
+                            + " has no property resolved for tenantColumn=\""
+                            + index.column().tenantColumn()
+                            + "\". The resolution happens at startup from the Hibernate metamodel;"
+                            + " a ShreddedModel built without an EntityManagerFactory cannot write"
+                            + " blind indexes, because it cannot read the tenant the erasure will"
+                            + " match on out of the row."));
+    int tenantIndex = indexOf(names, property);
+    Object raw = tenantIndex < 0 ? null : state[tenantIndex];
+    if (!(raw instanceof String tenantValue) || tenantValue.isBlank()) {
+      throw new ShreddingException(
+          ErrorCodes.UNVERIFIED_WRITE,
+          "@BlindIndex on "
+              + where
+              + " derives its index under the value of "
+              + index.entityName()
+              + "."
+              + property
+              + " (column \""
+              + index.column().tenantColumn()
+              + "\"), which this write leaves "
+              + (raw == null
+                  ? "null"
+                  : raw.getClass().getName() + (raw instanceof String ? " and blank" : ""))
+              + ". An index no WHERE "
+              + index.column().tenantColumn()
+              + " = ? can match is an index no erasure can destroy, so the write is refused rather"
+              + " than performed.");
+    }
+    return TenantId.of(tenantValue);
   }
 
   /** One code path, shared by the write path here and by the query helper. */

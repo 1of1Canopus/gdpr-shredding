@@ -278,39 +278,12 @@ public final class ShreddedModel {
                   + "\", which is not a @Shredded field of "
                   + entityName);
         }
-        // S-7: writeBlindIndexes derives the index under the of-field's own declared tenant
-        // (Scope.tenantFor), but the erasure that is supposed to destroy it matches on the row's
-        // tenantColumn value - the ambient tenant, not any one field's declared one. If the
-        // of-field declares its own tenant expression, this module cannot know at scan time
-        // whether that expression's runtime value will ever equal tenantColumn's, so it cannot
-        // prove the index is reachable by the erasure that is meant to destroy it. Refused rather
-        // than written: a completed erasure must not be able to leave an HMAC of the erased
-        // plaintext behind.
-        ShreddedField ofField =
-            shreddedFieldsHere.stream()
-                .filter(f -> f.fieldName().equals(annotation.of()))
-                .findFirst()
-                .orElseThrow();
-        if (ofField.tenant() != null) {
-          throw config(
-              "@BlindIndex on "
-                  + where
-                  + " indexes "
-                  + entityName
-                  + "."
-                  + annotation.of()
-                  + ", which declares its own @Shredded(tenant=\""
-                  + ofField.tenant().source()
-                  + "\"). writeBlindIndexes derives the index under that declared tenant, but the"
-                  + " erasure matches the index's tenantColumn=\""
-                  + annotation.tenantColumn()
-                  + "\" against the row's own column value - not against any field's declared"
-                  + " tenant expression - so this module cannot prove the index will ever be"
-                  + " reachable by the erasure meant to destroy it. The value in tenantColumn must"
-                  + " be the tenant the index was derived under, or the erasure cannot find it. Do"
-                  + " not declare a tenant on a @Shredded field that a @BlindIndex names in of=, or"
-                  + " index a field that does not need its own tenant instead.");
-        }
+        // S-7 / S-13, design addendum 3 change 4 (applied §3.4): the of-field may declare its own
+        // @Shredded(tenant = ...) again. The seventh pass refused that shape at startup because
+        // the module could not prove, at scan time, that the declared tenant would ever equal the
+        // value in tenantColumn - the value the erasure matches on. It is no longer guessed at
+        // scan time: writeBlindIndexes refuses the write, per row, when the two disagree, so the
+        // shape is allowed exactly when it is erasable. See ShreddingEventListener.
         field.setAccessible(true);
         indexes.add(
             new BlindIndexField(
@@ -319,7 +292,9 @@ public final class ShreddedModel {
                 field.getName(),
                 annotation.of(),
                 field,
-                new BlindIndexColumn(
+                // Design addendum 3 change 1 (applied §3.1): tenantColumn is a column name, and
+                // the property it maps to is resolved below, from the entity's own column mapping.
+                BlindIndexColumn.unresolved(
                     tableName(type),
                     columnName(field),
                     annotation.subjectColumn(),
@@ -344,6 +319,7 @@ public final class ShreddedModel {
       refuseUnmodelledShreddedConverters(entityManagerFactory, known);
       refuseIfShreddedFieldUnmodelled(entityManagerFactory, shredded);
       refuseCompositeIdShreddedEntities(entityManagerFactory, shreddedFieldNamesByEntity);
+      resolveTenantColumns(entityManagerFactory, indexes);
     }
 
     return new ShreddedModel(shredded, indexes);
@@ -357,6 +333,241 @@ public final class ShreddedModel {
    * encrypted and completely unverified: refused here, at startup, naming the entity and attribute,
    * rather than left for CIPHER's own {@code Ledger.secret} repro to find on a live row.
    */
+  /**
+   * Design addendum 3, change 1 (applied §3.1). {@code @BlindIndex(tenantColumn = "tenant_id")}
+   * names the <em>column</em> the erasure's {@code UPDATE ... WHERE tenant_id = ?} matches on. The
+   * state array the write path reads, and {@code EntityPersister.getPropertyNames()}, are keyed by
+   * <em>property</em> name ({@code tenantId}). Resolving one as if it were the other would either
+   * refuse every correct configuration or, worse, miss and derive the index under something
+   * unstated - so the column is resolved to a property here, through the entity's own column
+   * mapping, once, at startup.
+   *
+   * <p>The resolution must yield exactly one property that is basic, {@code String}-typed, mapped
+   * to the entity's primary table (the table the erasure updates), not a formula, not the
+   * identifier and not itself encrypted. Anything else is refused, naming the entity, the index
+   * field, {@code tenantColumn} and what was found. Change 2: the result is stored on the {@link
+   * BlindIndexColumn} beside the column it came from, so the write path and the erasure path read
+   * one object rather than two independently computed tenants.
+   */
+  private static void resolveTenantColumns(
+      EntityManagerFactory entityManagerFactory, List<BlindIndexField> indexes) {
+    if (indexes.isEmpty()) {
+      return;
+    }
+    var sessionFactory =
+        entityManagerFactory.unwrap(org.hibernate.engine.spi.SessionFactoryImplementor.class);
+    var byEntityName = new LinkedHashMap<String, org.hibernate.persister.entity.EntityPersister>();
+    sessionFactory
+        .getMappingMetamodel()
+        .forEachEntityDescriptor(
+            persister -> byEntityName.put(simpleEntityName(persister.getEntityName()), persister));
+    for (int i = 0; i < indexes.size(); i++) {
+      BlindIndexField index = indexes.get(i);
+      String where = index.entityName() + "." + index.fieldName();
+      var persister = byEntityName.get(index.entityName());
+      if (persister == null) {
+        throw config(
+            "@BlindIndex on "
+                + where
+                + " is declared on a class Hibernate's mapping metamodel does not know as an"
+                + " entity, so its tenantColumn=\""
+                + index.column().tenantColumn()
+                + "\" cannot be resolved to the property the write path reads.");
+      }
+      indexes.set(
+          i,
+          new BlindIndexField(
+              index.entityClass(),
+              index.entityName(),
+              index.fieldName(),
+              index.ofFieldName(),
+              index.javaField(),
+              index.column().resolvedTo(resolveTenantProperty(persister, index, where))));
+    }
+  }
+
+  private static String resolveTenantProperty(
+      org.hibernate.persister.entity.EntityPersister persister,
+      BlindIndexField index,
+      String where) {
+    String wanted = index.column().tenantColumn();
+    var matches =
+        new java.util.LinkedHashMap<String, org.hibernate.metamodel.mapping.BasicValuedModelPart>();
+    var nested = new ArrayList<String>();
+    persister
+        .getAttributeMappings()
+        .forEach(
+            attribute ->
+                collectColumnMatches(
+                    attribute.getAttributeName(), attribute, wanted, matches, nested));
+    String prefix = "@BlindIndex on " + where + " names tenantColumn=\"" + wanted + "\", which ";
+    if (matches.size() > 1) {
+      throw config(
+          prefix
+              + "the mapping of "
+              + index.entityName()
+              + " resolves to more than one property ("
+              + String.join(", ", matches.keySet())
+              + "). The write path has to read one value out of the state array for the column the"
+              + " erasure matches on; two properties over one column give it no single answer.");
+    }
+    if (matches.isEmpty()) {
+      var identifier = persister.getIdentifierMapping();
+      if (identifier instanceof org.hibernate.metamodel.mapping.BasicValuedModelPart id
+          && unquote(id.getSelectionExpression()).equals(wanted)) {
+        throw config(
+            prefix
+                + "is the identifier column of "
+                + index.entityName()
+                + ". The identifier is not part of the state array the write path reads, so the"
+                + " tenant the index is derived under could not be read from the row being"
+                + " written. Use an ordinary basic property for the tenant column.");
+      }
+      if (!nested.isEmpty()) {
+        throw config(
+            prefix
+                + "is mapped only inside an @Embeddable or an @ElementCollection of "
+                + index.entityName()
+                + " ("
+                + String.join(", ", nested)
+                + "). The write path reads the tenant out of the entity's own top-level state"
+                + " array; a component's attribute is not there. Map the tenant column as a"
+                + " top-level basic property of the entity.");
+      }
+      throw config(
+          prefix
+              + "no property of "
+              + index.entityName()
+              + " maps to. tenantColumn is a column name, not a property name: it must name the"
+              + " column the erasure's UPDATE matches on, and that column must be mapped by a"
+              + " basic String property of this entity so the write path can read the value the"
+              + " index is derived under out of the row being written.");
+    }
+    var entry = matches.entrySet().iterator().next();
+    String property = entry.getKey();
+    var basic = entry.getValue();
+    if (basic.isFormula()) {
+      throw config(
+          prefix
+              + "is mapped by the @Formula property "
+              + index.entityName()
+              + "."
+              + property
+              + ". A formula is computed by the database on read and has no column the erasure can"
+              + " match on.");
+    }
+    String table = unquote(basic.getContainingTableExpression());
+    if (!table.equals(index.column().table())) {
+      throw config(
+          prefix
+              + "is mapped by "
+              + index.entityName()
+              + "."
+              + property
+              + " onto the table \""
+              + table
+              + "\", not onto \""
+              + index.column().table()
+              + "\" - the table the erasure's UPDATE names. A tenant column on a secondary table"
+              + " cannot be matched by that statement.");
+    }
+    Class<?> javaType = basic.getJavaType().getJavaTypeClass();
+    if (!String.class.equals(javaType)) {
+      throw config(
+          prefix
+              + "is mapped by "
+              + index.entityName()
+              + "."
+              + property
+              + ", whose type is "
+              + javaType.getName()
+              + " and not java.lang.String. The tenant an index is derived under is a TenantId,"
+              + " which is a string; a value of any other type could not be compared with the one"
+              + " the erasure was asked for.");
+    }
+    var converter = basic.getSingleJdbcMapping().getValueConverter();
+    if (converter
+            instanceof org.hibernate.type.descriptor.converter.spi.JpaAttributeConverter<?, ?> jpa
+        && jpa.getConverterBean().getBeanInstance() instanceof ShreddedConverter<?>) {
+      throw config(
+          prefix
+              + "is mapped by "
+              + index.entityName()
+              + "."
+              + property
+              + ", which is itself @Shredded. The erasure matches the stored column value, which"
+              + " for an encrypted column is ciphertext that changes on every write, so no index"
+              + " derived under the plaintext could ever be reached by it.");
+    }
+    if (indexOfProperty(persister.getPropertyNames(), property) < 0) {
+      throw config(
+          prefix
+              + "resolves to "
+              + index.entityName()
+              + "."
+              + property
+              + ", which is not one of the entity's own persistent properties, so the write path"
+              + " cannot read its value out of the state array.");
+    }
+    return property;
+  }
+
+  private static void collectColumnMatches(
+      String path,
+      org.hibernate.metamodel.mapping.ModelPart part,
+      String wanted,
+      Map<String, org.hibernate.metamodel.mapping.BasicValuedModelPart> matches,
+      List<String> nested) {
+    if (part instanceof org.hibernate.metamodel.mapping.BasicValuedModelPart basic) {
+      if (unquote(basic.getSelectionExpression()).equals(wanted)) {
+        if (path.indexOf('.') < 0 && path.indexOf('[') < 0) {
+          matches.put(path, basic);
+        } else {
+          nested.add(path);
+        }
+      }
+      return;
+    }
+    if (part instanceof org.hibernate.metamodel.mapping.EmbeddableValuedModelPart embeddable) {
+      embeddable
+          .getEmbeddableTypeDescriptor()
+          .getAttributeMappings()
+          .forEach(
+              attribute ->
+                  collectColumnMatches(
+                      path + "." + attribute.getAttributeName(),
+                      attribute,
+                      wanted,
+                      matches,
+                      nested));
+      return;
+    }
+    if (part instanceof org.hibernate.metamodel.mapping.PluralAttributeMapping plural) {
+      collectColumnMatches(path + "[]", plural.getElementDescriptor(), wanted, matches, nested);
+    }
+  }
+
+  private static String unquote(String identifier) {
+    String trimmed = identifier == null ? "" : identifier.trim();
+    if (trimmed.length() > 1) {
+      char first = trimmed.charAt(0);
+      char last = trimmed.charAt(trimmed.length() - 1);
+      if ((first == '"' && last == '"') || (first == '`' && last == '`')) {
+        trimmed = trimmed.substring(1, trimmed.length() - 1);
+      }
+    }
+    return trimmed.toLowerCase(java.util.Locale.ROOT);
+  }
+
+  private static int indexOfProperty(String[] names, String name) {
+    for (int i = 0; i < names.length; i++) {
+      if (names[i].equals(name)) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
   private static Field accessible(Field field) {
     field.setAccessible(true);
     return field;
