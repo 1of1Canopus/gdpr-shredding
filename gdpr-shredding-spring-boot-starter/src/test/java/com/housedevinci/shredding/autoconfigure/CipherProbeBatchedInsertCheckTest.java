@@ -4,68 +4,54 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.housedevinci.shredding.autoconfigure.propseq.PropSeqWidget;
 import com.housedevinci.shredding.autoconfigure.propseq.PropSeqWidgetRepository;
+import com.housedevinci.shredding.domain.ShreddingException;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
-import java.util.List;
-import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.SpringBootConfiguration;
+import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
+import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.persistence.autoconfigure.EntityScan;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
-import org.springframework.test.annotation.DirtiesContext;
-import org.springframework.test.context.DynamicPropertyRegistry;
-import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Cipher sixth pass, design item 14's insert half. {@code onPostInsert} reads the row back with its
- * own {@code SELECT} and refuses any stored header that is not bound to the scope the row was
- * written under - the last line of defence, and the one that does not depend on any of the module's
- * own bookkeeping being right.
+ * Cipher sixth pass, design item 14's insert half - QUESTIONS #25.
  *
- * <p>{@code readStoredShreddedColumns} returns {@code null} when the {@code SELECT} finds no row,
- * and {@code refuseIfStoredHeadersDisagree} then returns without checking anything. With {@code
- * hibernate.jdbc.batch_size} set and an id strategy that permits insert batching (a sequence), the
- * {@code INSERT} is still sitting in the JDBC batch when the post-insert event fires, so the
- * {@code SELECT} finds nothing and the check silently does not happen - for every row of every
- * batch, on an ordinary performance setting no warning mentions.
+ * <p>This probe originally demonstrated S-1 (a batched {@code INSERT} silently skipping the
+ * insert-side post-hoc header check) through {@code PropSeqWidget}, an
+ * {@code @Access(AccessType.PROPERTY)} shredded mapping: the one shape whose column Hibernate wrote
+ * with no converter applied at all, which is what let a batched write commit plaintext without a
+ * fixture needing to fight Hibernate's own snapshot machinery.
  *
- * <p>Demonstrated with the mapping the check is currently the only thing that catches: an
- * {@code @Access(AccessType.PROPERTY)} shredded field, whose column Hibernate writes in the clear
- * because a field-level {@code @Convert} does not apply under property access. Without batching the
- * flush aborts with {@code SHRED-FORMAT-001} and nothing is committed. With batching the plaintext
- * is committed.
+ * <p>{@code PropSeqWidget} is also exactly S-5's shape - {@code @Shredded} declared on the field,
+ * {@code @Convert} never applied because Hibernate reads property-access mappings off the getters -
+ * and S-5's fix refuses that mapping at startup, naming the entity and the field, the same
+ * treatment every other mapping this module cannot protect gets (composite id,
+ * {@code @SecondaryTable} split, {@code byte[]} without {@code @Immutable}). Once S-5 lands, this
+ * fixture's {@code @SpringBootTest} context can no longer come up at all - refused before a single
+ * row is ever written, batched or not - so what this probe demonstrates today is the startup
+ * refusal itself, in the same shape as {@code CipherProbeCompositeIdTest} (C-38) and {@code
+ * CipherProbePropertyAccessTest} (S-5's own probe, on a different fixture).
+ *
+ * <p>S-1's property - no row of a {@code @Shredded} entity commits whose stored header is not bound
+ * to the scope it was written under, at any {@code hibernate.jdbc.batch_size} - is independently
+ * carried in the default build by {@code BatchedWriteVerificationTest}'s seventeen probes, none of
+ * which needs a mapping S-5 refuses to demonstrate it.
  */
-@SpringBootTest(classes = CipherProbeBatchedInsertCheckTest.TestApp.class)
 @Testcontainers
-@DirtiesContext
 class CipherProbeBatchedInsertCheckTest {
 
-  @Container @ServiceConnection
+  @Container
   static final PostgreSQLContainer<?> POSTGRES =
       new PostgreSQLContainer<>(
           DockerImageName.parse(
                   "postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777")
               .asCompatibleSubstituteFor("postgres"));
-
-  @DynamicPropertySource
-  static void secrets(DynamicPropertyRegistry registry) {
-    registry.add("shredding.master-key", () -> b64("starter-integration-master-key32"));
-    registry.add(
-        "shredding.erasure-log.hmac-secret", () -> b64("starter-integration-chain-secret"));
-    registry.add(
-        "shredding.blind-index.hmac-secret", () -> b64("starter-integration-index-secret"));
-    registry.add("spring.jpa.hibernate.ddl-auto", () -> "create-drop");
-    registry.add("spring.jpa.properties.hibernate.jdbc.batch_size", () -> "10");
-    registry.add("spring.jpa.properties.hibernate.order_inserts", () -> "true");
-  }
 
   private static String b64(String s) {
     return Base64.getEncoder().encodeToString(s.getBytes(StandardCharsets.UTF_8));
@@ -75,40 +61,49 @@ class CipherProbeBatchedInsertCheckTest {
   @EnableAutoConfiguration
   @EntityScan(basePackageClasses = PropSeqWidget.class)
   @EnableJpaRepositories(basePackageClasses = PropSeqWidgetRepository.class)
-  static class TestApp {}
+  static class PropSeqApp {}
 
-  @Autowired PropSeqWidgetRepository widgets;
-  @Autowired DataSource dataSource;
-  @Autowired org.springframework.transaction.support.TransactionTemplate transactions;
-
+  /**
+   * The mapping this probe used to write batched rows through is refused at boot, naming the entity
+   * and the field - not left to be discovered by a batched write committing plaintext.
+   */
   @Test
-  void probe_the_post_hoc_header_check_still_runs_when_inserts_are_batched() throws Exception {
-    String owner = "batched-" + System.nanoTime();
-    String outcome;
-    try {
-      transactions.executeWithoutResult(
-          s ->
-              widgets.saveAll(
-                  List.of(
-                      new PropSeqWidget(owner, "BATCHED-SECRET-1"),
-                      new PropSeqWidget(owner, "BATCHED-SECRET-2"),
-                      new PropSeqWidget(owner, "BATCHED-SECRET-3"))));
-      outcome = "COMMITTED";
-    } catch (RuntimeException e) {
-      outcome = "REFUSED " + e.getClass().getSimpleName();
-    }
+  void probe_a_property_access_mapping_under_batching_is_refused_at_startup() {
+    String outcome = startup();
+    assertThat(outcome).startsWith("STARTUP-REFUSED SHRED-CONFIG-001");
+    assertThat(outcome).contains("PropSeqWidget").contains("name");
+  }
 
-    String stored;
-    try (var connection = dataSource.getConnection();
-        var ps =
-            connection.prepareStatement(
-                "select string_agg(cast(name as text), '|') from prop_seq_widget where owner_id = ?")) {
-      ps.setString(1, owner);
-      try (var rs = ps.executeQuery()) {
-        stored = rs.next() ? String.valueOf(rs.getObject(1)) : "NO ROW";
+  private String startup() {
+    SpringApplicationBuilder builder =
+        new SpringApplicationBuilder(PropSeqApp.class)
+            .web(WebApplicationType.NONE)
+            .properties(
+                "shredding.master-key=" + b64("propseq-master-key-32-bytes!!!!!"),
+                "shredding.erasure-log.hmac-secret=" + b64("propseq-chain-secret-32-bytes!!!"),
+                "shredding.blind-index.hmac-secret=" + b64("propseq-index-secret-32-bytes!!!"),
+                "spring.jpa.hibernate.ddl-auto=create-drop",
+                "spring.jpa.properties.hibernate.jdbc.batch_size=10",
+                "spring.jpa.properties.hibernate.order_inserts=true",
+                "spring.datasource.url=" + POSTGRES.getJdbcUrl(),
+                "spring.datasource.username=" + POSTGRES.getUsername(),
+                "spring.datasource.password=" + POSTGRES.getPassword());
+    try (var ctx = builder.run()) {
+      System.out.println("PROPSEQ BATCHED -> STARTED (nothing refused it)");
+      return "STARTED";
+    } catch (RuntimeException e) {
+      String outcome = "STARTUP-REFUSED " + code(e);
+      System.out.println("PROPSEQ BATCHED -> " + outcome);
+      return outcome;
+    }
+  }
+
+  private static String code(Throwable thrown) {
+    for (Throwable t = thrown; t != null; t = t.getCause()) {
+      if (t instanceof ShreddingException s) {
+        return s.code() + ": " + s.getMessage();
       }
     }
-    System.out.println("BATCHED INSERT -> " + outcome + "; stored " + stored);
-    assertThat(stored).doesNotContain("BATCHED-SECRET");
+    return thrown.getClass().getSimpleName() + ": " + thrown.getMessage();
   }
 }

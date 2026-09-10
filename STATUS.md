@@ -2,15 +2,25 @@
 
 Sixth pass corrections (2026-09-10): Cipher's `## Sixth pass (75af7ea)` review of the read-path
 redesign found one HIGH design stop (S-1, `hibernate.jdbc.batch_size` silently switches off the
-insert-side post-hoc header check — left for Thor, a separate worktree, `S-1 DESIGN STOP`) and five
-corrections, S-2 to S-6. Isis closed S-2, S-3, S-5 and S-6 fully, and S-4 for its data-loss half (an
-ownerless region can now only ever serve this row's own, current value, never a stale one); S-4's
-missing-refusal half needs a design stop of its own — see QUESTIONS.md S-4. See the CHANGELOG's
-"Fixed (sixth pass corrections at `75af7ea`)" entry and QUESTIONS.md S-2/S-4/"S-1 / S-5 interaction"
-for the deviations and the one item still open. Also applied: the #22 doc correction, stating the
-per-decrypt key-state cost beside control 7 in `SECURITY-NOTES.md`. `./mvnw clean verify` green
-across all four modules (`gdpr-shredding`, `-core`, `-spring-boot-starter`, `-sample`); coverage
-gates held.
+insert-side post-hoc header check) and five corrections, S-2 to S-6. Thor closed S-1 in a separate
+worktree (settlement ledger, `WriteVerification`, `0e68fb1`/`623f86c`) and Isis closed S-2, S-3, S-5
+and S-6 fully, and S-4 for its data-loss half (an ownerless region can now only ever serve this row's
+own, current value, never a stale one); S-4's missing-refusal half needs a design stop of its own —
+see QUESTIONS.md S-4. Isis's branch was rebased onto Thor's after the fact (unpushed work only, no
+force-push); the rebase surfaced one real interaction, not a mechanical conflict: Thor's new
+`WriteVerification.owe`/`verifyChunk` compared every field's stored header against one scope-wide
+tenant, exactly the defect S-2 closed on the older per-row post-hoc check - `WriteVerification.Debt`
+now carries the whole `Scope` and checks each field's own tenant via `Scope.tenantFor`. Per QUESTIONS
+#25, `CipherProbeBatchedInsertCheckTest` (S-1's original probe) is rewritten from "the write is
+refused" to "startup refuses the `@Access(PROPERTY)` mapping it used to reach", C-38-style, since
+S-5's startup refusal now makes the original fixture unstartable; S-1's property stays independently
+carried by `BatchedWriteVerificationTest`'s seventeen probes. See the CHANGELOG's "Fixed (sixth pass
+corrections at `75af7ea`)" entry and QUESTIONS.md S-2/S-4/#25 for the deviations and the one item
+still open (S-4's R1). Also applied: the #22 doc correction, stating the per-decrypt key-state cost
+beside control 7 in `SECURITY-NOTES.md`. `./mvnw clean verify` green across all four modules
+(`gdpr-shredding`, `-core`, `-spring-boot-starter`, `-sample`); coverage gates held; default build is
+92 (core) + 110 (starter) + 17 (sample) = 219 tests, 0 failures. `src/test-pending/java` holds exactly
+one file, `CipherProbeRegionResidueTest.java`, for the S-4 residual.
 
 Licensing (2026-09-08): free core switched from Apache-2.0 to FSL-1.1-ALv2 (Souhaile's decision); `LICENSE`/`NOTICE` added, `pom.xml` updated, `./mvnw -B clean verify` re-confirmed green.
 
