@@ -19,6 +19,12 @@ import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import org.hibernate.event.spi.AutoFlushEvent;
+import org.hibernate.event.spi.AutoFlushEventListener;
+import org.hibernate.event.spi.FlushEvent;
+import org.hibernate.event.spi.FlushEventListener;
+import org.hibernate.event.spi.PostDeleteEvent;
+import org.hibernate.event.spi.PostDeleteEventListener;
 import org.hibernate.event.spi.PostInsertEvent;
 import org.hibernate.event.spi.PostInsertEventListener;
 import org.hibernate.event.spi.PostLoadEvent;
@@ -51,6 +57,9 @@ public final class ShreddingEventListener
         PostInsertEventListener,
         PreUpdateEventListener,
         PostUpdateEventListener,
+        PostDeleteEventListener,
+        FlushEventListener,
+        AutoFlushEventListener,
         PostLoadEventListener {
 
   private static final long serialVersionUID = 1L;
@@ -105,6 +114,9 @@ public final class ShreddingEventListener
     // bound to a random, unbound intermediate that onPostInsert rebinds. The intermediate carries
     // tag 0x7f, which matches no real identifier, so an insert captured by change data capture, a
     // trigger or a physical replica between the two statements is bound to no row at all.
+    // S-1, design addendum: the transaction is where this write is verified before it commits.
+    // A write with nowhere to settle is refused here rather than performed and never checked.
+    WriteVerification.requireSettlementAnchor(event.getSession(), entityName(event.getPersister()));
     Object id = event.getId();
     RowId rowId = id == null ? RowId.unboundIntermediate(random) : RowId.ofIdentifier(id);
     var scope = scopeFor(event.getEntity(), fields, rowId);
@@ -155,8 +167,23 @@ public final class ShreddingEventListener
     if (scope.rowId().isUnboundIntermediate()) {
       rebindToGeneratedId(event, fields, scope, bound);
     }
+    // The belt (design item 14): an immediate read-back, which catches an unbatched write inside
+    // the flush that produced it. It is fail-open by nature - under batching the row is still in
+    // the JDBC batch and there is nothing to read - so it is no longer the control.
     refuseIfStoredHeadersDisagree(
         event.getSession(), event.getPersister(), event.getId(), fields, scope, bound, "inserted");
+    // The control (S-1): a debt this session cannot commit without settling.
+    WriteVerification.owe(
+        event.getSession(),
+        entityName(event.getPersister()),
+        fields.get(0).tableName(),
+        singleIdColumn(event.getPersister()),
+        event.getId(),
+        fields,
+        scope.tenant(),
+        scope.subject(),
+        bound,
+        "inserted");
   }
 
   @Override
@@ -165,6 +192,7 @@ public final class ShreddingEventListener
     if (fields == null) {
       return false;
     }
+    WriteVerification.requireSettlementAnchor(event.getSession(), entityName(event.getPersister()));
     var scope = scopeFor(event.getEntity(), fields, RowId.ofIdentifier(event.getId()));
     // QUESTIONS #4, ruling (c): the previous subject is read from the stored blob's own header,
     // not from a cache of what this process happened to load.
@@ -212,6 +240,50 @@ public final class ShreddingEventListener
         scope,
         scope.rowId(),
         "updated");
+    WriteVerification.owe(
+        event.getSession(),
+        entityName(event.getPersister()),
+        fields.get(0).tableName(),
+        singleIdColumn(event.getPersister()),
+        event.getId(),
+        fields,
+        scope.tenant(),
+        scope.subject(),
+        scope.rowId(),
+        "updated");
+  }
+
+  /**
+   * S-1, design addendum. Inside one flush Hibernate executes insertions before deletions, so a row
+   * inserted and deleted in the same flush would otherwise be settled against a row that
+   * legitimately no longer exists. A deleted row has no stored header left to verify.
+   */
+  @Override
+  public void onPostDelete(PostDeleteEvent event) {
+    if (model().byEntityName().get(entityName(event.getPersister())) == null) {
+      return;
+    }
+    WriteVerification.forgive(event.getSession(), entityName(event.getPersister()), event.getId());
+  }
+
+  /**
+   * S-1, design addendum: the first of the two settlement points. Registered <em>appended</em> on
+   * {@code FLUSH} and {@code AUTO_FLUSH}, so it runs after Hibernate's own flush listener, which
+   * means after {@code ActionQueue.executeActions} has called {@code
+   * JdbcCoordinator.executeBatch()} for every action queue. That is the earliest moment at which
+   * what was written is readable at any batch size, and it bounds the ledger to one flush rather
+   * than one transaction.
+   *
+   * <p>A refusal thrown here escapes the flush and aborts the transaction, which is the point.
+   */
+  @Override
+  public void onFlush(FlushEvent event) {
+    WriteVerification.settle(event.getSession());
+  }
+
+  @Override
+  public void onAutoFlush(AutoFlushEvent event) {
+    WriteVerification.settle(event.getSession());
   }
 
   /**

@@ -56,6 +56,16 @@ public final class ErrorCodes {
   /** Misconfiguration found at startup. Names the property. */
   public static final String CONFIG = "SHRED-CONFIG-001";
 
+  /**
+   * S-1, design addendum of 2026-09-10: a written {@code @Shredded} row reached the end of its
+   * transaction without what actually stored in it being compared against the scope it was written
+   * under - because the row could not be read back, or because the write had no transaction to
+   * settle in at all. The write path's other refusals mean "this row is wrong"; this one means
+   * "nobody checked whether this row is wrong", and a check that could not run is a refusal, never
+   * a pass. The transaction is aborted before commit.
+   */
+  public static final String UNVERIFIED_WRITE = "SHRED-UNVERIFIED-WRITE";
+
   /** The erasure log has rows but no anchor row (control 8). */
   public static final String ERASURE_ANCHOR_MISSING = "SHRED-ERASURE-002";
 

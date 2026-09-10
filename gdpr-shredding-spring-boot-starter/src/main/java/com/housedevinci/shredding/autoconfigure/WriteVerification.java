@@ -1,0 +1,306 @@
+package com.housedevinci.shredding.autoconfigure;
+
+import com.housedevinci.shredding.domain.EncryptedValue;
+import com.housedevinci.shredding.domain.ErrorCodes;
+import com.housedevinci.shredding.domain.RowId;
+import com.housedevinci.shredding.domain.ShreddingException;
+import com.housedevinci.shredding.domain.SubjectId;
+import com.housedevinci.shredding.domain.TenantId;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import org.hibernate.engine.spi.SharedSessionContractImplementor;
+import org.hibernate.engine.spi.TransactionCompletionCallbacks;
+
+/**
+ * Design addendum "insert-side binding under batching" (2026-09-10), Cipher S-1.
+ *
+ * <p>The property this class exists for: <em>no row of a {@code @Shredded} entity commits whose
+ * stored header is not bound to that row's own id, subject and tenant - at any {@code
+ * hibernate.jdbc.batch_size}.</em> With the corollary the per-row post-hoc check in {@link
+ * ShreddingEventListener} lacked: <strong>a check that could not run is a refusal, never a
+ * pass.</strong>
+ *
+ * <p>S-1 was not "the {@code SELECT} sits in the wrong place". With {@code jdbc.batch_size} set the
+ * {@code INSERT} is still in the JDBC batch when {@code onPostInsert} fires, so the read-back found
+ * no row - and {@code refuseIfStoredHeadersDisagree} read "I saw nothing" as "nothing is wrong" and
+ * returned. Every row of every batch went unchecked, on an ordinary performance property, with no
+ * warning.
+ *
+ * <p>So a bind no longer <em>performs</em> a check, it <strong>incurs a debt</strong>: {@code
+ * (entity, table, id column, id, expected tenant/subject/rowId)}, recorded on this session's ledger
+ * the moment the row's identifier is known. Debts are settled - one {@code SELECT} with an {@code
+ * IN} list per entity, not one statement per row - at every point where the JDBC batch has
+ * demonstrably executed and the transaction has not yet committed:
+ *
+ * <ul>
+ *   <li>the end of every flush and auto-flush, after {@code ActionQueue.executeActions} has called
+ *       {@code JdbcCoordinator.executeBatch()} for each action queue;
+ *   <li>{@code beforeCompletion}, which runs after Hibernate's own commit-time flush and covers
+ *       {@code StatelessSession}, which fires no flush event at all.
+ * </ul>
+ *
+ * <p><strong>Settlement is total or the transaction aborts.</strong> A debt whose row is absent, a
+ * stored header that disagrees, or any debt still outstanding when the transaction completes is a
+ * {@code SHRED-UNVERIFIED-WRITE} thrown before the commit. A configuration knob can no longer
+ * remove this control; it can only make it refuse.
+ *
+ * <p>A row deleted in the same transaction discharges its own debt ({@code onPostDelete}): inside a
+ * single flush Hibernate executes insertions before deletions, so an insert-then-delete of one row
+ * would otherwise settle against a row that legitimately no longer exists.
+ */
+final class WriteVerification {
+
+  /** Ids per settlement statement. Keeps the {@code IN} list off any driver's parameter limit. */
+  private static final int CHUNK = 500;
+
+  /**
+   * Keyed by session identity - Hibernate's session implementations do not override {@code equals}.
+   * An entry is created only when a transaction is in progress, so the after-completion callback
+   * that removes it is always registered and always runs.
+   */
+  private static final Map<SharedSessionContractImplementor, WriteVerification> LEDGERS =
+      new ConcurrentHashMap<>();
+
+  private final Map<Key, Debt> debts = new LinkedHashMap<>();
+
+  private WriteVerification() {}
+
+  /** One written row, identified the way the settlement query will identify it. */
+  private record Key(String entityName, Object id) {}
+
+  private record Debt(
+      String entityName,
+      String tableName,
+      String idColumn,
+      Object id,
+      List<ShreddedModel.ShreddedField> fields,
+      TenantId tenant,
+      SubjectId subject,
+      RowId rowId,
+      String what) {}
+
+  /**
+   * Records what one flushed row must be found to hold. Called from {@code onPostInsert} and {@code
+   * onPostUpdate}, where the identifier exists; the {@code IDENTITY} rebind has already run, so the
+   * {@code rowId} recorded is the real one and never the {@code 0x7f} intermediate.
+   */
+  static void owe(
+      SharedSessionContractImplementor session,
+      String entityName,
+      String tableName,
+      String idColumn,
+      Object id,
+      List<ShreddedModel.ShreddedField> fields,
+      TenantId tenant,
+      SubjectId subject,
+      RowId rowId,
+      String what) {
+    ledgerFor(session)
+        .debts
+        .put(
+            new Key(entityName, normalise(id)),
+            new Debt(entityName, tableName, idColumn, id, fields, tenant, subject, rowId, what));
+  }
+
+  /** A row deleted in this transaction owes nothing: there is no stored header left to verify. */
+  static void forgive(SharedSessionContractImplementor session, String entityName, Object id) {
+    WriteVerification ledger = LEDGERS.get(session);
+    if (ledger != null) {
+      ledger.debts.remove(new Key(entityName, normalise(id)));
+    }
+  }
+
+  /**
+   * Settles every outstanding debt of this session, or throws. Called at the end of every flush and
+   * auto-flush, and again from the before-completion callback.
+   */
+  static void settle(SharedSessionContractImplementor session) {
+    WriteVerification ledger = LEDGERS.get(session);
+    if (ledger == null || ledger.debts.isEmpty()) {
+      return;
+    }
+    var outstanding = new ArrayList<>(ledger.debts.values());
+    // Cleared first: a refusal below throws out of the flush and aborts the transaction, and the
+    // after-completion callback drops the ledger either way. Leaving the entries in place would
+    // only let the same failure be reported a second time from beforeCompletion.
+    ledger.debts.clear();
+    for (var group : groupByTable(outstanding).values()) {
+      for (int from = 0; from < group.size(); from += CHUNK) {
+        verifyChunk(session, group.subList(from, Math.min(from + CHUNK, group.size())));
+      }
+    }
+  }
+
+  private static Map<String, List<Debt>> groupByTable(List<Debt> outstanding) {
+    var groups = new LinkedHashMap<String, List<Debt>>();
+    for (var debt : outstanding) {
+      groups
+          .computeIfAbsent(debt.entityName() + " " + debt.tableName(), k -> new ArrayList<>())
+          .add(debt);
+    }
+    return groups;
+  }
+
+  private static void verifyChunk(SharedSessionContractImplementor session, List<Debt> chunk) {
+    Debt first = chunk.get(0);
+    var fields = first.fields();
+    StringBuilder sql = new StringBuilder("SELECT ").append(quote(first.idColumn()));
+    for (var field : fields) {
+      sql.append(", ").append(quote(field.columnName()));
+    }
+    sql.append(" FROM ")
+        .append(quote(first.tableName()))
+        .append(" WHERE ")
+        .append(quote(first.idColumn()))
+        .append(" IN (");
+    for (int i = 0; i < chunk.size(); i++) {
+      sql.append(i == 0 ? "?" : ", ?");
+    }
+    sql.append(")");
+
+    Map<Object, byte[][]> stored =
+        session.doReturningWork(
+            connection -> {
+              var rows = new HashMap<Object, byte[][]>();
+              try (PreparedStatement ps = connection.prepareStatement(sql.toString())) {
+                for (int i = 0; i < chunk.size(); i++) {
+                  ps.setObject(i + 1, chunk.get(i).id());
+                }
+                try (ResultSet rs = ps.executeQuery()) {
+                  while (rs.next()) {
+                    byte[][] columns = new byte[fields.size()][];
+                    for (int i = 0; i < fields.size(); i++) {
+                      columns[i] = rs.getBytes(i + 2);
+                    }
+                    rows.put(normalise(rs.getObject(1)), columns);
+                  }
+                }
+              }
+              return rows;
+            });
+
+    for (var debt : chunk) {
+      byte[][] columns = stored.get(normalise(debt.id()));
+      if (columns == null) {
+        throw new ShreddingException(
+            ErrorCodes.UNVERIFIED_WRITE,
+            "the "
+                + debt.what()
+                + " "
+                + debt.entityName()
+                + " row "
+                + debt.id()
+                + " could not be read back before commit, so what it actually stores was never"
+                + " compared against the scope it was written under. The transaction is refused"
+                + " rather than committed unverified.");
+      }
+      for (int i = 0; i < fields.size(); i++) {
+        if (columns[i] == null) {
+          continue;
+        }
+        var header = EncryptedValue.decode(columns[i]);
+        if (!header.subject().equals(debt.subject())
+            || !header.tenant().equals(debt.tenant())
+            || !header.rowId().equals(debt.rowId())) {
+          throw new ShreddingException(
+              ErrorCodes.SUBJECT_IMMUTABLE,
+              "the "
+                  + debt.what()
+                  + " "
+                  + debt.entityName()
+                  + " row's stored "
+                  + fields.get(i).fieldName()
+                  + " is not bound to the subject and row it was written for. A write scope is"
+                  + " consumable only by the bind it was pushed for; this row is refused before"
+                  + " commit rather than left in another subject's erasure scope.");
+        }
+      }
+    }
+  }
+
+  /**
+   * A ledger for this session, and with it the two callbacks that make settlement unavoidable.
+   *
+   * <p>The transaction is the settlement anchor, so a bind with no transaction in progress has
+   * nowhere to settle and is refused by {@link #requireSettlementAnchor} before it ever gets here.
+   */
+  private static WriteVerification ledgerFor(SharedSessionContractImplementor session) {
+    WriteVerification existing = LEDGERS.get(session);
+    if (existing != null) {
+      return existing;
+    }
+    var created = new WriteVerification();
+    LEDGERS.put(session, created);
+    var callbacks = session.getTransactionCompletionCallbacks();
+    callbacks.registerCallback(
+        (TransactionCompletionCallbacks.BeforeCompletionCallback)
+            s -> {
+              settle(s);
+              WriteVerification ledger = LEDGERS.get(s);
+              if (ledger != null && !ledger.debts.isEmpty()) {
+                int owed = ledger.debts.size();
+                ledger.debts.clear();
+                throw new ShreddingException(
+                    ErrorCodes.UNVERIFIED_WRITE,
+                    owed
+                        + " written @Shredded row(s) were still unverified when this transaction"
+                        + " tried to commit. The commit is refused: a row whose stored header was"
+                        + " never compared against the scope it was written under may be sitting in"
+                        + " another subject's erasure scope.");
+              }
+            });
+    callbacks.registerCallback(
+        (TransactionCompletionCallbacks.AfterCompletionCallback) (success, s) -> LEDGERS.remove(s));
+    return created;
+  }
+
+  /**
+   * Design addendum, part 3: a bind with no settlement anchor is refused at bind time rather than
+   * written and never verified. Every JPA write runs inside a transaction; a {@code
+   * StatelessSession} write outside one does not, and that is the path this closes.
+   */
+  static void requireSettlementAnchor(SharedSessionContractImplementor session, String entityName) {
+    if (!session.isTransactionInProgress()) {
+      throw new ShreddingException(
+          ErrorCodes.UNVERIFIED_WRITE,
+          "refusing to write a @Shredded "
+              + entityName
+              + " with no transaction in progress. What actually reached the database is verified"
+              + " before the transaction commits; with no transaction there is no point at which"
+              + " that check can run, and an unverifiable write is refused rather than performed.");
+    }
+  }
+
+  /** How many rows this session still owes. Used by the settlement assertions in the tests. */
+  static int outstanding(SharedSessionContractImplementor session) {
+    WriteVerification ledger = LEDGERS.get(session);
+    return ledger == null ? 0 : ledger.debts.size();
+  }
+
+  /**
+   * Identifier values come back from JDBC in whatever type the driver chose, which is not always
+   * the type Hibernate bound: a {@code bigint} id bound as {@code Long} can return as {@code Long}
+   * or as {@code BigInteger}, an {@code int} column as {@code Integer}. Both sides of the
+   * comparison go through here so settlement matches rows rather than boxes.
+   */
+  private static Object normalise(Object id) {
+    return switch (id) {
+      case null -> null;
+      case Number n -> n.longValue();
+      case UUID u -> u;
+      case byte[] b -> java.util.Arrays.toString(b);
+      default -> id.toString();
+    };
+  }
+
+  private static String quote(String identifier) {
+    return "\"" + identifier.replace("\"", "\"\"") + "\"";
+  }
+}

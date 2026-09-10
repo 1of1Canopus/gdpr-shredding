@@ -42,6 +42,13 @@ public final class ShreddingIntegrator implements Integrator {
     // what actually reached the database, after every other listener has had its turn.
     registry.appendListeners(EventType.POST_INSERT, listener);
     registry.appendListeners(EventType.POST_UPDATE, listener);
+    // S-1, design addendum: the settlement points. FLUSH and AUTO_FLUSH are appended so this runs
+    // after Hibernate's own flush listener, which is what executes the JDBC batch - the earliest
+    // point at which a batched INSERT is readable. POST_DELETE discharges the debt of a row deleted
+    // in the same transaction, which the insert-then-delete-in-one-flush ordering needs.
+    registry.appendListeners(EventType.POST_DELETE, listener);
+    registry.appendListeners(EventType.FLUSH, listener);
+    registry.appendListeners(EventType.AUTO_FLUSH, listener);
   }
 
   @Override
