@@ -1,5 +1,14 @@
 # STATUS — GDPR Shredding free core
 
+**S-4 (region residue) — BLOCKED on Cipher, design only (Thor, 2026-09-10).** The design stop is
+taken and pushed: `docs/plans/read-path-design.md`, "Design addendum 2: region residue", weighs
+session/transaction binding, an epoch stamped at proxy entry, and an entry-time sweep, and recommends
+the **epoch** with the sweep as a free complement. The other two leave S-4's R1 probe red on the
+evidence, not on taste. No mechanism was built: the instruction for this recommendation is that
+Cipher reviews the design before anything is written. `CipherProbeRegionResidueTest.java` therefore
+stays in `src/test-pending/java` and S-4 stays open in QUESTIONS.md. No production code changed on
+this commit; the tree is otherwise `9f9f9b1`.
+
 Sixth pass corrections (2026-09-10): Cipher's `## Sixth pass (75af7ea)` review of the read-path
 redesign found one HIGH design stop (S-1, `hibernate.jdbc.batch_size` silently switches off the
 insert-side post-hoc header check) and five corrections, S-2 to S-6. Thor closed S-1 in a separate
