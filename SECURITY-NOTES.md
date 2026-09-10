@@ -381,6 +381,25 @@ Probes: `CipherProbeCompositeIdTest.probe_a_composite_id_shredded_entity_is_refu
 `probe_a_moved_ciphertext_in_a_composite_id_entity_is_never_displayed`, and
 `LoadedStateHostileMappingsTest.a_single_column_embedded_id_is_refused_at_startup`.
 
+### The subject-immutability check refuses when its own read-back finds no row (S-21b)
+
+`refuseIfSubjectMoved` (control 14) re-reads a row's own stored shredded columns by id, from
+`onPreUpdate` only — Hibernate is issuing an `UPDATE` for a row it believes already exists. Before
+this fix, `readStoredShreddedColumns` returning `null` for "no row at that id" was treated the same
+as "every shredded column is null" (the legitimate early return, CIPHER-14): the caller returned
+without comparing anything. A `SELECT` that cannot find the row it was asked to verify is not
+evidence the check passed. Fixed: `refuseIfSubjectMoved` now refuses with `SHRED-UNVERIFIED-WRITE`,
+naming the entity, the row id and the table it looked in, whenever the read-back finds no row. The
+only legitimate "not found" for a `@Shredded` entity is a brand-new row on insert, which never
+reaches this method — insert has its own path (`onPreInsert`/`onPostInsert`).
+
+This module's own tables (`shredding_data_key`, `shredding_erasure`, `shredding_erasure_anchor`,
+`shredding_erased_subject`) are addressed unqualified, deliberately, and are expected on the runtime
+role's `search_path` — the same residual S-21 records for user tables that interpolate an
+unqualified `@Table(name = ...)`.
+
+Probe: `CipherProbeSubjectMovedNotFoundTest.probe_the_subject_immutability_check_refuses_when_the_read_back_finds_no_row`.
+
 ### A `@Shredded` field must not be mapped `@Basic(fetch = LAZY)` (documented, not reproduced)
 
 Lazy fetching of a basic attribute is inert in Hibernate without bytecode enhancement, and none of

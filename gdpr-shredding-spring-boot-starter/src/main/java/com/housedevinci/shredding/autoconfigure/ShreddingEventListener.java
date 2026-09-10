@@ -785,7 +785,23 @@ public final class ShreddingEventListener
     var first = fields.get(0);
     Object[] stored = readStoredShreddedColumns(session, id, fields, singleIdColumn(persister));
     if (stored == null) {
-      return;
+      // S-21b: this runs from onPreUpdate, for a row Hibernate believes already exists - never for
+      // a brand-new row on insert, which has its own path (onPreInsert/onPostInsert) and never
+      // calls this method. A SELECT that finds no row here is either racing a concurrent delete -
+      // in which case Hibernate's own UPDATE fails moments later with a stale-state error anyway -
+      // or it addressed the wrong table or the wrong row, and a check that could not find the row
+      // it was asked to verify is not a pass. Failing open here is exactly S-21b: the subject-
+      // immutability control skipped in silence.
+      throw new ShreddingException(
+          ErrorCodes.UNVERIFIED_WRITE,
+          "the data subject of "
+              + first.entityName()
+              + " row "
+              + id
+              + " could not be verified before update: no row was found at "
+              + fields.get(0).tableName()
+              + " for that identifier. Hibernate believes this row exists; a check that cannot find"
+              + " it is refused rather than skipped.");
     }
     for (int i = 0; i < fields.size(); i++) {
       byte[] column = (byte[]) stored[i];

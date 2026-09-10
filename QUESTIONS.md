@@ -1124,3 +1124,27 @@ own writeup.
 `withReadBracket` unchanged and still the one supported entry. `README.md`'s "What it is careful
 about" section gains one sentence naming the same split. No probe (Cipher's own finding: nothing
 mechanical distinguishes the two until the module says which is which).
+
+## S-21b (2026-09-10, Isis) — CLOSED. `refuseIfSubjectMoved` refuses, not returns, when its read-back finds no row.
+
+Ninth pass, `docs/SECURITY-REVIEW-feat-shredding-core.md`, "Ninth pass (4a95ba5)": S-21's third
+consequence ("suspected, not reproduced" there) is that `refuseIfSubjectMoved`'s own read-back,
+`readStoredShreddedColumns`, treats "no row found" the same as "every shredded column is null" - the
+legitimate CIPHER-14 early return - and skips the subject-immutability comparison in silence.
+
+**Fix (Isis).** `refuseIfSubjectMoved` throws `SHRED-UNVERIFIED-WRITE`, naming the entity, the row id
+and the table it looked in, whenever `readStoredShreddedColumns` returns `null` on the update path.
+The method runs from `onPreUpdate` only - Hibernate is issuing an `UPDATE` for a row it believes
+already exists - so "not found" here is never the legitimate new-row case; that is `onPreInsert`/
+`onPostInsert`, which never calls this method.
+
+**Probe.** `CipherProbeSubjectMovedNotFoundTest` (promoted green from `src/test-pending/java`).
+Built the deterministic version rather than racing a concurrent delete: Hibernate's own row-count
+check would fail on the subsequent real `UPDATE` regardless of this module's own check, masking the
+finding. Instead the probe invokes `refuseIfSubjectMoved` directly (reflection, same pattern as
+`CipherProbeLedgerKeyTest`/`CipherProbeSecondIntegratorTest`) with an id that addresses no row at
+all - the same shape as a wrongly-addressed `SELECT` - and asserts refusal.
+
+Out of scope, left to Thor (S-20, S-21): `BlindIndex`, `subjectColumn` and `tableName`/schema
+handling were not touched. `SECURITY-NOTES.md` carries one sentence noting this module's own tables
+are unqualified deliberately, per Cipher's instruction.

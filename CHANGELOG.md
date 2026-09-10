@@ -6,6 +6,26 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed (ninth pass at `4a95ba5`, S-21b: the subject-immutability check failed open on a wrongly-addressed read-back)
+
+**MEDIUM.** `refuseIfSubjectMoved` (control 14) is the write path's per-update check that a
+persisted row's data subject has not moved out of its own erasure scope; it re-reads the row's own
+stored shredded columns by id, from `onPreUpdate` only. `readStoredShreddedColumns` returns `null`
+both when a row genuinely holds no shredded blob at all (the legitimate early return, CIPHER-14) and
+when its `SELECT ... WHERE id = ?` simply finds no row - and the caller did `if (stored == null) {
+return; }` for both, skipping the comparison in silence. A `SELECT` that cannot find the row
+Hibernate believes it is about to `UPDATE` is either racing a concurrent delete (in which case
+Hibernate's own row-count check fails a moment later anyway) or addressing the wrong table or row -
+never evidence the check passed. Fixed: `refuseIfSubjectMoved` now throws `SHRED-UNVERIFIED-WRITE`,
+naming the entity, the row id and the table looked in, whenever the read-back finds no row. The only
+legitimate "not found" for a `@Shredded` entity is a brand-new row on insert, which never reaches
+this method.
+
+Probe: `CipherProbeSubjectMovedNotFoundTest.probe_the_subject_immutability_check_refuses_when_the_read_back_finds_no_row`,
+promoted green from `src/test-pending/java`. It invokes the check directly with an id that addresses
+no row at all - the deterministic shape of a wrongly-addressed `SELECT` - rather than racing a
+concurrent delete, which Hibernate's own row-count check would mask.
+
 ### Fixed (eighth pass at `fa6f477`, S-13 / S-7b: a blind index survives the erasure of the subject it was derived for)
 
 **HIGH.** The index was derived under `Scope.tenantFor(of-field)` - a field's declared tenant, else

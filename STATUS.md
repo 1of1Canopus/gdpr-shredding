@@ -8,6 +8,17 @@ are fine here for now — but before this repo is made public, move them to
 tests, README, CHANGELOG, LICENSE/NOTICE, SECURITY.md, CONTRIBUTING.md, user docs, CI, the
 probe script). See how `agent-guard` did it (2026-09-10).
 
+**S-21b (subject-immutability check fails open on "row not found") — CLOSED, built (Isis,
+2026-09-10).** `refuseIfSubjectMoved` now refuses with `SHRED-UNVERIFIED-WRITE`, naming the entity,
+row id and table, when its own read-back finds no row - previously it returned silently, the same
+branch as the legitimate "every shredded column is null" case. `CipherProbeSubjectMovedNotFoundTest`
+promoted green from `src/test-pending/java`. `./mvnw -B clean verify`: BUILD SUCCESS, 263 tests (core
+92, starter 154, sample 17), 0 failures. Line coverage core 84.8% (1072/1264), starter 88.0%
+(1417/1610); gate 80% held. S-20 and S-21 (Thor's, `subjectColumn`/`tableName` handling) are
+untouched and remain open; their probes (`CipherProbeBlindIndexSubjectColumnTest`,
+`CipherProbeNinthPassBlindIndexTest.probe_a_default_schema_is_supported_or_refused_by_its_real_reason`)
+still sit red under `-Pprobes-pending`. Cipher re-verifies; not self-marked closed.
+
 **S-13 / S-7b (blind index tenant binding) — CLOSED, built (Thor, 2026-09-10).** Design addendum 3
 was approved with seven changes and all seven are built and marked "applied §3.x" in
 `docs/plans/read-path-design.md` ("Addendum 3 as built"): `tenantColumn` resolved from column to
