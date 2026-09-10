@@ -2898,3 +2898,185 @@ Re-verification when both are in: `CipherProbeBlindIndexSubjectColumnTest` and
 `CipherProbeNinthPassBlindIndexTest.probe_a_default_schema_is_supported_or_refused_by_its_real_reason`
 green, my other five ninth-pass probe methods promoted out of `test-pending` and green in the
 default build, the whole default build green, and `-Pprobes-pending` with nothing red.
+
+---
+
+## Tenth pass (f6ee230, 2026-09-10): NOT MERGEABLE
+
+**Verdict: NOT MERGEABLE.** One HIGH, reproduced: **S-22**. Change 9 gave the *table* an identifier
+type — parsed from the persister, refused when it is not folded lowercase, rendered quoted. The
+three column identifiers in the same statements got none of that. `JdbcErasureStore` interpolates
+`column()`, `subjectColumn()` and `tenantColumn()` **unquoted**, and `BlindIndexColumn` silently
+lowercases them instead of refusing. A subject column named `user` — a PostgreSQL reserved word
+that is also a valid scalar expression — turns the erasure's `WHERE "user" = ?` into
+`WHERE user = ?`: the connection's role name compared against the subject id. It parses. It matches
+nothing. And `verifyCleared`'s two read-backs are built from the same unquoted text, so they agree
+with it. Key destroyed, ciphertext destroyed, `outcome=COMPLETE`, `cleared=0`, and
+`HMAC(secret | tenant | entity | field | plaintext)` still in the table as a correlator over the
+erased value. That is S-13's consequence and S-20's consequence a third time, reached through the
+quoting instead of through the binding — which is why the fix is a **DESIGN STOP**, not a patch.
+
+The good news is real. **S-20, S-21 and S-21b are closed**, and I did not take them on the probes
+alone. S-21 in particular I re-attacked in the shape an enterprise deployment actually has —
+`hibernate.default_schema=app3`, no `@Table(schema)` anywhere, and a decoy `public.owned_note` on
+the connection's `search_path` while `app3` is not — because the ninth-pass probe only exercised
+`default_schema=public`, where qualified and unqualified address the same table and the bug is
+invisible. The module writes to `app3`, erases `app3`, and leaves the decoy untouched. Change 9
+holds where it counts.
+
+### Numbers
+
+| | |
+|---|---|
+| build | `./mvnw -B verify` BUILD SUCCESS, exit 0, **three times**; Docker up throughout, nothing skipped |
+| tests, default build | **289** green (core 99, starter 173, sample 17); 0 failures, 0 errors, 0 skipped, all three runs |
+| line coverage (jacoco.csv) | core **85.3 %**, starter **87.9 %**; gate 80 % |
+| `-Pprobes-pending` before this pass | **empty** — both `src/test-pending/java` trees hold no `.java` at all |
+| `-Pprobes-pending` after this pass | `CipherProbeTenthPassTest`, 5 methods, **3 red** (S-22, S-23, S-24), 2 green (verifications) |
+| probes diffed against `a84486c` | 110 probe methods then, **131** now. Eleven files promoted out of `test-pending` into `src/test`; **no assertion narrowed, none removed** — the two names that disappear are the `test-pending` copies of `CipherProbeBlindIndexSubjectColumnTest`, which reappear as two live files with more methods, not fewer |
+| flake | `CipherProbeCompositeIdTest` "Unable to determine Dialect" **not reproduced** in three consecutive full runs. Ruled below: **fix required**, not accepted |
+
+### The diff, checked
+
+Eleven probe files moved `src/test-pending/java → src/test/java` and Spotless reformatted them; the
+only assertion changes are additions. `CipherProbeJdbcTest` line 411 and `CipherProbeStartupTest`
+change `BlindIndexColumn.unresolved("customer", …)` to `unresolved(TableRef.of("customer"), …)` —
+a signature change, same assertion. The deviation Thor recorded on my two S-20 probes is right and I
+re-checked it rather than took it: `SplitNote`'s shape is now unwritable, so the original assertion
+(the erasure clears the index) is unbuildable on that fixture; `AlignedNote` in the same file is the
+same application shape declared correctly and asserts the clearing. That is the `#25` situation
+again and the property is not retired with the fixture.
+
+### S-20, S-21, S-21b: verified
+
+- **S-20 closed.** `Axis` parameterises one resolver over both columns, so changes 1–4 and change 8
+  are one body of code and cannot drift again — that is the right shape, and it is what I asked for.
+  `BlindIndexColumn.subjectProperty` carries the resolution; `rowSubject` reads it out of the state
+  array; `writeBlindIndexes` refuses before any derivation when it is not `scope.subject()`. The
+  open question from the ninth pass — `subjectColumn` naming the identifier — is decided rather than
+  deferred, refused with three reasons, and the reasons are correct: the identifier is not in the
+  state array, does not exist under `IDENTITY` when the index is derived, and is not a string.
+- **S-21 closed**, and re-attacked as above with a real second schema and a decoy: untouched.
+  `TableRef` refuses a catalog rather than reducing it, refuses a non-lowercase part rather than
+  folding it, and splits on dots outside quotes so a quoted dotted name stays whole and is then
+  refused by the pattern. I could not get a `"` past `sql()`: the pattern that gates every part
+  admits no quote character, so the rendering cannot be closed early. The `@SecondaryTable` refusal
+  is genuinely live now, rebuilt on each field's own containing table, and does **not** false-positive
+  on a JOINED hierarchy — something earlier does, which is S-23.
+- **S-21b closed.** `CipherProbeSubjectMovedNotFoundTest` green.
+
+### S-22 (HIGH) The erasure's three column identifiers are unquoted and silently case-folded, and its own verification is built from the same text
+
+**What breaks.** `JdbcErasureStore.clearBlindIndexes` builds
+`UPDATE <TableRef.sql()> SET <column> = NULL WHERE <tenantColumn> = ? AND <subjectColumn> = ? …`
+with the three column names interpolated as bare text, and `verifyCleared` builds its residual
+count and its cross-tenant WARN count the same way. `BlindIndexColumn.identifier()` lowercases what
+it is given and validates the folded form, so a name PostgreSQL would treat as significant is
+accepted and then addressed as something else. Every statement the *starter* builds quotes its
+columns (`ShreddingEventListener.quote`, `WriteVerification.verifyChunk`); the erasure does not.
+The two halves of the module disagree about what a column identifier is.
+
+**Repro** (`CipherProbeTenthPassTest.probe_a_reserved_word_subject_column_is_not_silently_missed_by_the_erasure`,
+fixture `tenthpass/keyword/KeywordNote`): map the subject column as `@Column(name = "\"user\"")` and
+declare `@BlindIndex(subjectColumn = "user", tenantColumn = "tenant_id")`. Startup accepts it —
+`ShreddedModel.unquote` folds the mapping's `"user"` to `user` and matches. Write a row: the index
+is written. Erase the subject:
+
+```
+outcome=COMPLETE  keysDestroyed=1  blindIndexColumnsCleared=0
+select count(*) from keyword_note where "user" = ? and email_idx is not null  →  1
+```
+
+No exception, no WARN. The `UPDATE`'s `WHERE user = ?` compared the role name `test` to the subject
+id; `verifyCleared`'s residual count asked the same question and got the same zero, so the control
+that exists to catch exactly this confirmed it. The DPO's record says the erasure completed.
+
+**Two more faces of the same statement, both verified:**
+
+- A subject column mapped `@Column(name = "\"Owner\"")` next to an ordinary column `owner`: refused
+  at startup, because both properties fold to `owner` and the "more than one property" rule fires
+  (`probe_a_case_folded_subject_column_does_not_address_a_different_column`, green — this one is a
+  verification, not a finding). But the same mapping **without** a mapped `owner` twin — a legacy
+  `owner` column present in the table and mapped by nothing — passes that rule and the erasure then
+  matches on the legacy column. Same root cause, same fix.
+- `ShreddedModel.columnName(Field)` returns the raw text of `@Column(name = …)`, quotes included,
+  and the starter's `quote()` then doubles them. A `@Shredded` column the mapping quotes is
+  addressed as the identifier `"Email"` *with the quote characters in the name* — see S-24.
+
+**Severity: HIGH.** Identical consequence to S-13 and S-20, which were both rated HIGH: a blind
+index over erased plaintext survives an erasure that records itself as complete, and the read-back
+that is supposed to catch that is built from the same wrong text.
+
+**DESIGN STOP — not a fix-list item.** The property that must hold, for Thor's one-page design:
+
+> Every identifier this module interpolates into SQL addresses exactly the column, table or schema
+> Hibernate's own mapping addresses — or startup refuses, naming the mapping.
+
+Change 9 established that for tables in one type. Columns need the same treatment in one type, and
+the design must cover every path that turns a mapping into an identifier:
+`BlindIndexColumn.identifier` (stop folding; refuse as `TableRef.part` does),
+`ShreddedModel.columnName(Field)` (raw annotation text today), `ShreddedModel.unquote` (folding a
+*quoted* selection expression before comparing is what makes the mismatch invisible),
+`persister.getIdentifierColumnNames()` / `singleIdColumn`, and the six interpolations in
+`JdbcErasureStore.clearBlindIndexes` and `verifyCleared`. I review the design before any code.
+
+### S-23 (LOW) `@Shredded` cannot be used anywhere in an entity inheritance hierarchy, and the refusal blames the one thing the developer cannot change
+
+Both the root and the subclass are entities, and `allFields` walks the superclass, so the single
+converter on a root's `@Shredded` field is checked twice against two entity names.
+`super("JoinedBase", "email")` is refused for `JoinedChild`; `super("JoinedChild", "email")` is
+refused for `JoinedBase`. I ran it both ways. No pair satisfies both, under any inheritance
+strategy, so the shape is impossible — and the message says *"the converter … declares (JoinedBase,
+email) but maps (JoinedChild, email). The pair is bound into the AAD, so it must describe where the
+value actually lives"*, which reads as a correctable mistake and is not one. Entity inheritance
+appears nowhere in `README.md`, `docs/index.md`, `SECURITY-NOTES.md` or `SPEC.md`.
+
+Fail-closed, so LOW — but this is the same defect Thor just fixed for S-21 ("refused at startup by
+accident, blaming a secondary table that did not exist"), and it gets the same standard.
+Repro: `CipherProbeTenthPassTest.probe_a_shredded_field_in_an_inheritance_hierarchy_is_refused_by_its_real_reason`.
+
+**Correction (Isis).** In `ShreddedModel.scan`, refuse a `@Shredded` field whose declaring class is
+not the entity class being scanned, or whose entity is part of an inheritance hierarchy, with a
+message naming inheritance and saying `@MappedSuperclass` is the supported way to share the field.
+Record the limit in `SECURITY-NOTES.md` beside the `@Embeddable` one and in `docs/index.md`.
+
+### S-24 (LOW) A `@Shredded` column the mapping quotes boots and fails on the first row, not at startup
+
+`ShreddedModel.columnName(Field)` returns `@Column(name = …)` verbatim, so `@Column(name = "\"Email\"")`
+yields `"Email"`, and `ShreddingEventListener.quote` doubles the quotes into `"""Email"""` — the
+identifier `"Email"`, quote characters included. Startup passes; the first `saveAndFlush` fails with
+a raw `PSQLException: column ""Email"" of relation "quotedcol_note" does not exist` out of the
+post-hoc header read-back. Fail-closed, but the module's own definition of done says misconfiguration
+fails fast at startup naming the property, and this is a driver error on a production write path.
+Repro: `CipherProbeTenthPassTest.probe_a_quoted_shredded_column_is_refused_at_startup_not_at_the_first_write`.
+Same DESIGN STOP as S-22; listed separately so it is not lost if the design narrows.
+
+### S-25 (LOW) The `CipherProbeCompositeIdTest` flake: fix required, not accepted
+
+I could not reproduce it — three consecutive full `verify` runs, 289 green each time. I am not
+closing it on that. "Unable to determine Dialect" is Hibernate failing to obtain a bootstrap
+connection, and the starter's test suite starts **32 separate PostgreSQL containers** in one module
+run, each `@Container static` on its own class. Under CI load one of them is not accepting
+connections before Hikari's default 30 s `connectionTimeout` expires, and dialect resolution is the
+first thing that needs a connection. A skipped or flaky probe is never a passing probe.
+
+**Correction (Isis), two parts:**
+1. Pin the dialect in every probe application's properties
+   (`spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect`) so dialect
+   resolution never needs a connection. This removes the observed symptom deterministically.
+2. Give the shared container an explicit `withStartupTimeout(Duration.ofMinutes(2))`, and open a
+   follow-up to collapse the 32 containers onto one reused singleton — the container churn is the
+   load, and the next flake will land somewhere else until it is gone.
+
+### Fix list
+
+| # | severity | who | item |
+|---|---|---|---|
+| S-22 | **HIGH** | **DESIGN STOP → Thor** | one identifier type for columns, as `TableRef` is for tables. Property: every interpolated identifier addresses exactly the column Hibernate's mapping addresses, or startup refuses naming the mapping. Paths: `BlindIndexColumn.identifier`, `ShreddedModel.columnName/unquote`, `singleIdColumn`, and the six interpolations in `JdbcErasureStore.clearBlindIndexes` + `verifyCleared`. One page, reviewed by me, before any code |
+| S-23 | LOW | Isis | refuse `@Shredded` in an entity inheritance hierarchy by its real reason; document the limit and point at `@MappedSuperclass` |
+| S-24 | LOW | Isis | folded into S-22's design; keep the probe |
+| S-25 | LOW | Isis | pin the dialect in the probe apps, explicit container startup timeout, follow-up for a reused container |
+
+Re-verification when they are in: `CipherProbeTenthPassTest` green in the default build with its
+five methods promoted out of `test-pending`, the whole default build green twice, `-Pprobes-pending`
+with nothing red, and a fresh-clone run of `CipherProbeCompositeIdTest` under parallel load.
