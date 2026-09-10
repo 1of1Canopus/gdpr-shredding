@@ -409,6 +409,11 @@ public final class ShreddingContext {
    *
    * @return the token that closes this region, which is also the token {@link #closeRegion(long)}
    *     and {@link #discardRegion(long)} take
+   * @apiNote S-19 (Cipher eighth pass). This module's internal SPI: called by the framework
+   *     integration that owns a call boundary (the repository proxy), never by application code.
+   *     {@link #withReadBracket} is the one supported entry point and it hands out no epoch an
+   *     application can act on; calling this method directly reopens the S-4 shape addendum 2 was
+   *     built to close. Subject to change without a major version.
    */
   public static long enterRegion() {
     Deque<Region> stack = REGIONS.get();
@@ -729,6 +734,8 @@ public final class ShreddingContext {
    *     boundary with no signal at all, so the decrypt is refused instead - the case of a
    *     hand-written DAO, a bare {@code EntityManager}, a {@code Stream} drained after the
    *     repository call returned, or an {@code @Async} continuation.
+   * @apiNote S-19 (Cipher eighth pass). This module's internal SPI: called by {@code
+   *     Shredded*Converter}, not API for applications. Subject to change without a major version.
    */
   public static void recordDecoded(FrameKey key, byte[] plaintext) {
     Region region = currentRegion();
@@ -777,6 +784,9 @@ public final class ShreddingContext {
    * bracketed entry now in force opened. What remains is stated in SECURITY-NOTES.md: a read
    * opening no region of its own, on a thread where an {@link Error} skipped exactly the frame that
    * restores the epoch, still sees a matching one. A leaked region costs a refusal, never a value.
+   *
+   * @apiNote S-19 (Cipher eighth pass). This module's internal SPI: called by {@code
+   *     Shredded*Converter}, not API for applications. Subject to change without a major version.
    */
   public static Optional<byte[]> drain(FrameKey key) {
     Region region = currentRegion();
@@ -799,6 +809,10 @@ public final class ShreddingContext {
    * <em>why</em> a row's own key was not there: a header naming another subject or tenant is {@code
    * SHRED-SUBJECT-MISMATCH}, a header naming the right subject but another row is {@code
    * SHRED-ROW-MISMATCH}, and nothing at all is {@code SHRED-READ-UNVERIFIED}.
+   *
+   * @apiNote S-19 (Cipher eighth pass). This module's internal SPI: called by {@code
+   *     ShreddingEventListener}, not API for applications. Subject to change without a major
+   *     version.
    */
   public static List<FrameKey> pendingKeysFor(String entity, String field) {
     Region region = currentRegion();

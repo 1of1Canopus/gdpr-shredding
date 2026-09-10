@@ -99,6 +99,10 @@ what was destroyed, when, by whom, and the date the erasure is also complete in 
   `Stream<T>` consumed after the repository call already returned, a hand-written DAO's own
   `EntityManager` use, a `StatelessSession` - is refused (`SHRED-READ-UNVERIFIED` or
   `SHRED-READ-UNSCOPED`) with nothing decrypted returned. See `docs/index.md` for the full contract.
+  `ShreddingContext.withReadBracket(...)` is the one stable entry point an application calls
+  directly; `enterRegion`, `recordDecoded`, `drain` and `pendingKeysFor` are this module's internal
+  SPI for its own converters and listeners, not application API, and may change without a major
+  version.
 - **Every stored value is bound to its row.** Tenant, subject *and* the row's own identifier go into
   the header and the AAD, so a ciphertext copied between two rows of the same person is
   `SHRED-ROW-MISMATCH` rather than displayed as the second row's own value.
