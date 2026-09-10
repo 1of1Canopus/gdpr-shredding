@@ -730,16 +730,23 @@ property this module states. Do not exclude the lines from JaCoCo.
 groups debt *keys*, and `verifyChunk` removes each key from the ledger immediately after the row it
 names is found to agree - one at a time within a chunk, in iteration order - not the whole chunk at
 once after the SELECT returns. A chunk that throws partway through therefore leaves every debt it
-had not yet reached still in the ledger, correctly, and `beforeCompletion`'s "still outstanding"
-branch is reachable the moment something between a `settle` throw and the transaction's own commit
-attempt swallows the exception - not reproducible today for the reason stated above (kept, not
-removed: `SwallowedWriteRefusalTest`'s javadoc now says so), but no longer unreachable by
-construction. New test,
+had not yet reached still in the ledger, correctly. New test,
 `BatchedWriteVerificationTest.a_settlement_refusal_discharges_only_the_debt_that_actually_passed`:
 two rows in one chunk, one deleted out from under its own debt before settlement, `settle` called
 directly (package-private, same package) so the still-open transaction can be inspected before it
 unwinds - it throws for the vanished row, and the row that verified is discharged regardless of
 where in the chunk it fell. Lines not excluded from JaCoCo.
+
+**Correction (S-18, Cipher eighth pass).** The line above used to end "... but no longer unreachable
+by construction." That is wrong, and so was the CHANGELOG entry that said the same thing. `settle`
+still only ever returns normally after emptying every debt it started with, or throws before
+returning at all; a throw from inside `settle` propagates straight out of the `beforeCompletion`
+callback, past the branch that checks the ledger afterwards, on every path, including this one. The
+"still outstanding at completion" branch in `beforeCompletion` is unreachable by construction today
+- the ledger residue this fix produces is real and correctly recorded, it is simply never read back
+by that particular branch, because `settle`'s own throw always wins the race to leave `settle`
+first. The branch stays: a belt for whatever settlement path replaces this one, deliberately not
+excluded from JaCoCo. `WriteVerification.settle`'s javadoc carries the same correction.
 
 ---
 
@@ -969,7 +976,32 @@ decision about reading the row's tenant column out of the state array at write t
 
 ---
 
-## S-11 (2026-09-10, Isis) — the described fix (presence + position) does not close the probe's own scenario; needs a design decision
+## S-11 (2026-09-10, Isis) — CLOSED (Cipher eighth pass): accepted residual, no design stop. History kept below.
+
+**Ruling (Cipher, eighth pass, 2026-09-10): accepted residual, and here is why.** What the attack
+removes is Hibernate's own seeded listener, never ours - ours is registered after the wipe and its
+presence is what `refuseIfVerifierNotRegisteredFirst` proves, on all eight types. No control of this
+module is disabled: `POST_LOAD`'s default gone still leaves our verifier first and installing;
+`FLUSH`'s default gone means Hibernate stops flushing, which is an application that does not work
+rather than an erasure that does not erase. And the actor is an integrator on the classpath - code
+running in this JVM, which can reflect into `ShreddingContext` and defeat any check the module
+writes. A new snapshot mechanism would buy detection of one path against an actor who has ten. Not a
+design stop.
+
+**Done (Isis, 2026-09-10).** The accepted-residual wording is in `SECURITY-NOTES.md` ("The startup
+listener check proves position, not survival of Hibernate's own defaults") and, condensed, in
+`ShreddingStartupCheck.REGISTERED_TYPES`'s own javadoc. `CipherProbeSettlementListenerDisplacedTest`
+asserted the wrong outcome (that the application must refuse to start) for a shape the module was
+never going to close; rewritten to assert the true, documented one -
+`CipherProbeEarlierIntegratorWipesHibernateDefaultsTest`.
+`our_listener_is_still_present_and_last_on_flush_after_an_earlier_integrator_wipes_it`: after
+`DisplacingIntegrator` wipes Hibernate's own seeded `FLUSH` listener, this module's own listener is
+still present and still last on `FLUSH`. `git mv`d into `src/test/java`, green.
+
+### History (superseded by the ruling above)
+
+The original finding, before Cipher's ruling: the described fix (presence + position) does not close
+the probe's own scenario.
 
 **What I built.** `ShreddingStartupCheck` now iterates all eight event types `ShreddingIntegrator`
 registers (previously five) - `PRE_INSERT`, `PRE_UPDATE`, `POST_LOAD`, `POST_INSERT`, `POST_UPDATE`,
@@ -1012,3 +1044,83 @@ it) for `ShreddingStartupCheck` to compare against post-boot - genuinely new sta
 Neither is "the smallest correct change" for a LOW finding; I am flagging it rather than building
 either. `CipherProbeSettlementListenerDisplacedTest.java` stays in `src/test-pending/java`, red,
 until this is decided.
+
+## S-14 (2026-09-10, Isis) — CLOSED. `unwindTo` scanned the deque before popping.
+
+**Fix (Isis).** `ShreddingContext.unwindTo` scans the deque for `token` first and pops nothing when
+it is absent, returning `null` - `closeRegion`'s existing refusal, `discardRegion`'s existing no-op.
+`unwindTo(token, ...)` was popping unconditionally until it found `token` or ran out of deque, so a
+token from another frame, or one a nested entry's sweep had already taken away, emptied the whole
+deque including the live entry region of the call it was invoked from. Package-private
+`ShreddingContext.resetForTests()` added for the four `@AfterEach` blocks that used to rely on
+`discardRegion(-1L)` emptying the deque unconditionally
+(`CipherProbeRegionEpochTest`, `CipherProbeRegionResidueTest`, `CipherProbeSeventhPassTest`,
+`CipherProbeEighthPassRegionTest`). Probe:
+`CipherProbeEighthPassRegionTest.probe_closing_a_swept_region_does_not_destroy_the_callers_live_region`,
+green, moved to `src/test/java`; `CipherProbeRegionEpochTest` and `CipherProbeRegionResidueTest`
+still green.
+
+## S-15 (2026-09-10, Isis) — CLOSED. Ruling on QUESTIONS S-4a: widen the sweep predicate.
+
+**Ruling (Cipher, eighth pass, 2026-09-10).** Widen the predicate, as Thor proposed for S-4a.
+Addendum 2 change 3's "sweep only regions whose epoch is not the epoch in force at entry" was
+written to protect the nested case - a caller's live region must survive its callee's entry.
+Applied literally to `NO_ENTRY == NO_ENTRY` it protects nothing, because with no entry in force
+there is no live region to protect: everything on that deque is residue by definition.
+
+**Fix (Isis).** Extracted `currentRegion()`'s predicate as `private static boolean isCurrent(Region
+region, long inForce)` = `inForce != NO_ENTRY && region.epoch == inForce`, used in both
+`currentRegion()` and `sweepForeignRegions`'s loop condition, which is now `while (!stack.isEmpty()
+&& !isCurrent(stack.peek(), inForce))`. The nested case is unchanged (the caller's region *is*
+current, the loop stops at it); the `NO_ENTRY`-in-force case now clears the deque. WARN content
+unchanged. Probe:
+`CipherProbeEighthPassRegionTest.probe_raw_regions_do_not_accumulate_on_a_pooled_thread`, green,
+moved to `src/test/java`.
+
+## S-16 (2026-09-10, Isis) — CLOSED. `max-outstanding` below 1 now refuses at startup.
+
+**Fix (Isis).** `ShreddingStartupCheck.refuseIfLedgerCapBelowOne`, called in `afterPropertiesSet`
+before `WriteVerification.configureMaxOutstanding`, refuses `SHRED-CONFIG-001` when
+`shredding.write-verification.max-outstanding` is below 1, naming the property, its value and the
+default. `WriteVerification.maxOutstanding`'s javadoc now says it is a `static volatile` shared by
+every Spring context in the JVM, the same as `ShreddingRuntime`. Probe:
+`CipherProbeLedgerCapConfigTest` (`0` and `-1`), green, moved to `src/test/java`.
+
+## S-17 (2026-09-10, Isis) — CLOSED. The `BigDecimal` placeholder's scale is in the low thousands.
+
+**Fix (Isis).** `Placeholders.randomBigDecimal()` draws the scale from `1_000 + random.nextInt(1_000)`
+instead of `1_000_000 + random.nextInt(1_000)`; the seventh pass's own prescription ("a scale of the
+order of 10^6") was careless - the unguessability comes from the 64 random unscaled bits, not the
+scale, and `toPlainString()` at a scale of 10^6 is over a million characters. `LOCAL_DATE` unchanged.
+S-10's javadoc corrected. Probe: `CipherProbePlaceholderRenderingTest`, both methods green, moved to
+`src/test/java`.
+
+## S-18 (2026-09-10, Isis) — CLOSED. Corrected #27's own claim rather than fabricate reachability.
+
+Cipher's fix text offered two shapes: a test that reaches `beforeCompletion`'s "still outstanding at
+completion" branch, or a correction to the javadoc/CHANGELOG/QUESTIONS claiming it. I looked for a
+test and did not find one, and I am confident none exists on this code: `WriteVerification.settle`
+still only ever returns normally after emptying every debt it started with (each key is removed the
+moment its own row's check passes, one at a time, and nothing else in this module adds a debt to a
+session's ledger except `owe`, which only ever runs inside a flush that has already completed by the
+time `settle` is called for it) or throws before returning at all. A throw from inside `settle`
+propagates straight out of the `beforeCompletion` callback that calls it, past the branch that checks
+the ledger afterwards, on every path - there is no route by which `settle` returns normally with a
+non-empty ledger on this code. This matches Cipher's own analysis in the eighth-pass writeup.
+
+**Fix (Isis).** Corrected the overclaim in three places rather than build a test for something
+unreachable by construction: `WriteVerification.settle`'s own javadoc (new paragraph, explicit that
+the branch stays unreachable and why), the QUESTIONS #27 "Done" entry (correction appended, the wrong
+sentence identified), and the CHANGELOG #27 entry (rewritten with a correction paragraph). The branch
+stays in the code, deliberately not excluded from JaCoCo, as a belt for whatever settlement path
+replaces this one. No probe: an unreachable branch is what this finding is about, same as Cipher's
+own writeup.
+
+## S-19 (2026-09-10, Isis) — CLOSED. `@apiNote` on the four SPI methods; `README.md` API section.
+
+**Fix (Isis).** `@apiNote` added to the javadoc of `ShreddingContext.enterRegion`, `recordDecoded`,
+`drain` and `pendingKeysFor`: this module's internal SPI, called by `Shredded*Converter` and
+`ShreddingEventListener`, not API for applications, subject to change without a major version.
+`withReadBracket` unchanged and still the one supported entry. `README.md`'s "What it is careful
+about" section gains one sentence naming the same split. No probe (Cipher's own finding: nothing
+mechanical distinguishes the two until the module says which is which).

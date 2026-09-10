@@ -53,6 +53,71 @@ write, so the shape is allowed exactly when it is erasable. That restores the S-
 two tenants, one of them indexed) and gives an application with an acting organisation distinct from
 an owning one a correct way to declare it.
 
+### Fixed (eighth pass at `fa6f477`, S-14: closing a swept region could destroy a live caller's own region)
+
+**LOW.** `ShreddingContext.unwindTo` popped the region deque unconditionally until it found the
+token it was given or ran out of deque, so a token from another frame - or one a nested entry's own
+sweep had already taken away - emptied the whole deque, including the live entry region of the call
+that invoked it: a well-behaved caller's own, still-open region destroyed as collateral by a close it
+had nothing to do with. Now scans for the token first and pops nothing when it is absent, returning
+`null`, which `closeRegion` already turns into its own refusal and `discardRegion` already treats as
+a no-op. New package-private `ShreddingContext.resetForTests()` for the four `@AfterEach` blocks that
+used to rely on the old, unconditional-pop behaviour of `discardRegion(-1L)`.
+`CipherProbeEighthPassRegionTest`.
+
+### Fixed (eighth pass at `fa6f477`, S-15: a raw region opened outside any entry never swept)
+
+**LOW.** `sweepForeignRegions` compared a region's epoch against the epoch in force with `!=`, so
+with no entry in force (`NO_ENTRY`) a region left behind by the deprecated `openRegion()` also
+carried `NO_ENTRY` and compared equal, stopping the sweep - one node and one `HashMap` per leak,
+accumulating on a pooled thread for the life of the thread, and `inReadBracket()` staying `true` on
+that thread forever. Ruling on QUESTIONS S-4a: widened the predicate to `isCurrent(region, inForce)`
+= `inForce != NO_ENTRY && region.epoch == inForce`, used by both the sweep and `currentRegion()`.
+`CipherProbeEighthPassRegionTest`.
+
+### Fixed (eighth pass at `fa6f477`, S-16: a ledger cap of zero or negative refused every write)
+
+**INFO.** `shredding.write-verification.max-outstanding=0` (or negative) booted cleanly and then
+refused the application's first write of any `@Shredded` entity, forever. `ShreddingStartupCheck`
+now refuses `SHRED-CONFIG-001` at boot when the value is below 1, naming the property, its value and
+the default. `CipherProbeLedgerCapConfigTest`.
+
+### Fixed (eighth pass at `fa6f477`, S-17: the `BigDecimal` placeholder rendered as a megabyte)
+
+**INFO.** The seventh pass's own prescription for S-10 - a scale "of the order of 10^6" - was
+careless: `toPlainString()` at that scale is over a million characters, and a refused load is
+documented to leave the marker in a detached entity that ordinary application code (a DTO round
+trip, a log line, a JSON body with `WRITE_BIGDECIMAL_AS_PLAIN`) then copies around. The
+unguessability the marker needs comes from the 64 random unscaled bits, not the scale. Now drawn in
+the low thousands. `CipherProbePlaceholderRenderingTest`.
+
+### Corrected (eighth pass at `fa6f477`, S-18: #27's "now reachable" claim was wrong)
+
+**INFO.** See the correction under QUESTIONS #27 above and in `WriteVerification.settle`'s own
+javadoc: the "still outstanding at completion" branch in `beforeCompletion` remains unreachable by
+construction on this code. No behaviour change; documentation only.
+
+### Changed (eighth pass at `fa6f477`, S-19: the read-region SPI documented as internal, not application API)
+
+**INFO.** `@apiNote` on `ShreddingContext.enterRegion`, `recordDecoded`, `drain` and
+`pendingKeysFor`: this module's internal SPI, called by its own converters and listener, not
+application API, subject to change without a major version. `withReadBracket` unchanged. `README.md`
+gains one sentence naming the split.
+
+### Fixed (seventh pass at `e2c2bdd`, S-11: the startup listener check covered five of eight event types)
+
+**LOW, accepted residual (Cipher eighth pass).** `ShreddingStartupCheck` now checks all eight event
+types `ShreddingIntegrator` registers - `FLUSH`, `AUTO_FLUSH` and `POST_DELETE` were entirely
+unchecked before - for both presence and the position each was registered for. What this check
+cannot prove: that the listeners Hibernate itself seeded are still there when an earlier-composed
+integrator replaces a group's prior contents outright before this module ever registers. Ruled an
+accepted residual, not a design stop: no control of this module is disabled by it, only Hibernate's
+own default behaviour, which then fails loudly. Written up in `SECURITY-NOTES.md` and in
+`ShreddingStartupCheck.REGISTERED_TYPES`'s own javadoc.
+`CipherProbeEarlierIntegratorWipesHibernateDefaultsTest` (renamed from
+`CipherProbeSettlementListenerDisplacedTest`, which asserted the wrong outcome for a shape this
+module was never going to close).
+
 ### Added (QUESTIONS #26: a hard cap on the write-verification ledger)
 
 **Cipher's ruling on the seventh pass, accepted with a number.** Settlement discharges the ledger at
@@ -64,17 +129,26 @@ transaction for its whole run keeps accumulating debts - each one a subject and 
 property and the remedy (a transaction per chunk), rather than left to grow without bound. It
 refuses; it never degrades. `CipherProbeWriteVerificationCapTest`.
 
-### Fixed (QUESTIONS #27: the "still outstanding at completion" refusal was unreachable)
+### Fixed (QUESTIONS #27: a caught settlement refusal used to discharge debts it never checked)
 
-**Cipher's ruling on the seventh pass: keep it, and make it reachable.** `WriteVerification.settle`
-used to clear its whole ledger before it verified any of it, on the reasoning that a refusal below
-throws out of the flush and aborts the transaction anyway - which made `beforeCompletion`'s own
-"still outstanding when the transaction tries to commit" refusal permanently unreachable (three
-uncovered lines by construction) and meant a caught settlement refusal (`SwallowedWriteRefusalTest`'s
-shape) discharged debts it had never actually checked. A debt is now removed from the ledger only
-once the check that discharges it has actually passed, one at a time within a chunk, so a chunk that
-throws partway through leaves every debt it had not yet reached correctly still outstanding.
+**Cipher's ruling on the seventh pass: keep the "still outstanding at completion" refusal.**
+`WriteVerification.settle` used to clear its whole ledger before it verified any of it, on the
+reasoning that a refusal below throws out of the flush and aborts the transaction anyway - which
+meant a caught settlement refusal (`SwallowedWriteRefusalTest`'s shape) discharged debts it had
+never actually checked. A debt is now removed from the ledger only once the check that discharges it
+has actually passed, one at a time within a chunk, so a chunk that throws partway through leaves
+every debt it had not yet reached correctly still outstanding in the ledger's own data.
 `BatchedWriteVerificationTest.a_settlement_refusal_discharges_only_the_debt_that_actually_passed`.
+
+**Correction (S-18, Cipher eighth pass).** The seventh-pass fix text and this entry both claimed
+that change also made `beforeCompletion`'s own "still outstanding when the transaction tries to
+commit" refusal reachable. It does not: `settle` still only ever returns normally after emptying
+every debt it started with, or throws before returning at all, and a throw from inside `settle`
+propagates straight out of the `beforeCompletion` callback, past the branch that checks the ledger
+afterwards. That branch is unreachable by construction on this code, on both the
+belt-throws-before-`owe` path (`SwallowedWriteRefusalTest`) and this one - three lines JaCoCo
+correctly reports as uncovered. Kept as a belt for whatever settlement path replaces this one, and
+deliberately not excluded from coverage.
 
 ### Changed (seventh pass at `e2c2bdd`, S-12: renamed a probe to what it tests)
 
