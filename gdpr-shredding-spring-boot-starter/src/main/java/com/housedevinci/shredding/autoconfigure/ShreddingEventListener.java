@@ -180,8 +180,7 @@ public final class ShreddingEventListener
         singleIdColumn(event.getPersister()),
         event.getId(),
         fields,
-        scope.tenant(),
-        scope.subject(),
+        scope,
         bound,
         "inserted");
   }
@@ -247,8 +246,7 @@ public final class ShreddingEventListener
         singleIdColumn(event.getPersister()),
         event.getId(),
         fields,
-        scope.tenant(),
-        scope.subject(),
+        scope,
         scope.rowId(),
         "updated");
   }

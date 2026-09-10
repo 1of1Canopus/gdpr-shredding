@@ -4,8 +4,7 @@ import com.housedevinci.shredding.domain.EncryptedValue;
 import com.housedevinci.shredding.domain.ErrorCodes;
 import com.housedevinci.shredding.domain.RowId;
 import com.housedevinci.shredding.domain.ShreddingException;
-import com.housedevinci.shredding.domain.SubjectId;
-import com.housedevinci.shredding.domain.TenantId;
+import com.housedevinci.shredding.jpa.ShreddingContext;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
@@ -81,8 +80,12 @@ final class WriteVerification {
       String idColumn,
       Object id,
       List<ShreddedModel.ShreddedField> fields,
-      TenantId tenant,
-      SubjectId subject,
+      // S-2, carried into this ledger: a Scope, not a single TenantId - a debt covers every
+      // @Shredded field of the row, and two fields of one entity may declare different tenants
+      // (ShreddingContext.Scope#tenantFor). Comparing every field's stored header against one
+      // scope-wide tenant would reintroduce the exact defect S-2 closed on the per-row post-hoc
+      // check, just inside the settlement path instead.
+      ShreddingContext.Scope scope,
       RowId rowId,
       String what) {}
 
@@ -98,15 +101,14 @@ final class WriteVerification {
       String idColumn,
       Object id,
       List<ShreddedModel.ShreddedField> fields,
-      TenantId tenant,
-      SubjectId subject,
+      ShreddingContext.Scope scope,
       RowId rowId,
       String what) {
     ledgerFor(session)
         .debts
         .put(
             new Key(entityName, normalise(id)),
-            new Debt(entityName, tableName, idColumn, id, fields, tenant, subject, rowId, what));
+            new Debt(entityName, tableName, idColumn, id, fields, scope, rowId, what));
   }
 
   /** A row deleted in this transaction owes nothing: there is no stored header left to verify. */
@@ -206,8 +208,9 @@ final class WriteVerification {
           continue;
         }
         var header = EncryptedValue.decode(columns[i]);
-        if (!header.subject().equals(debt.subject())
-            || !header.tenant().equals(debt.tenant())
+        // S-2: this field's own tenant, not the row's primary one.
+        if (!header.subject().equals(debt.scope().subject())
+            || !header.tenant().equals(debt.scope().tenantFor(fields.get(i).fieldName()))
             || !header.rowId().equals(debt.rowId())) {
           throw new ShreddingException(
               ErrorCodes.SUBJECT_IMMUTABLE,
