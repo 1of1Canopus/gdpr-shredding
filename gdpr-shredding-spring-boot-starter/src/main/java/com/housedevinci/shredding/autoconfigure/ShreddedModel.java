@@ -3,6 +3,7 @@ package com.housedevinci.shredding.autoconfigure;
 import com.housedevinci.shredding.api.BlindIndex;
 import com.housedevinci.shredding.api.Shredded;
 import com.housedevinci.shredding.domain.BlindIndexColumn;
+import com.housedevinci.shredding.domain.ColumnRef;
 import com.housedevinci.shredding.domain.ErrorCodes;
 import com.housedevinci.shredding.domain.ShreddingException;
 import com.housedevinci.shredding.domain.TableRef;
@@ -39,7 +40,7 @@ public final class ShreddedModel {
       boolean carriesSentinel,
       SubjectExpression tenant,
       TableRef table,
-      String columnName,
+      java.util.Optional<ColumnRef> resolvedColumn,
       Field javaField,
       ShreddedConverter<?> converter) {
 
@@ -52,13 +53,36 @@ public final class ShreddedModel {
       java.util.Objects.requireNonNull(javaField, "javaField");
       java.util.Objects.requireNonNull(converter, "converter");
       java.util.Objects.requireNonNull(table, "table");
+      java.util.Objects.requireNonNull(resolvedColumn, "resolvedColumn");
+    }
+
+    /**
+     * The column this field's value is stored in, as Hibernate's mapping addresses it (addendum 4,
+     * §4.3). Empty only for a model scanned without an {@code EntityManagerFactory} - this module's
+     * own unit tests - which builds no SQL; every statement path goes through here, so an
+     * unresolved model refuses instead of interpolating a name derived from an annotation.
+     */
+    public ColumnRef column() {
+      return resolvedColumn.orElseThrow(
+          () ->
+              config(
+                  "the @Shredded column of "
+                      + entityName
+                      + "."
+                      + fieldName
+                      + " was never resolved from Hibernate's mapping. Build the ShreddedModel with"
+                      + " ShreddedModel.scan(entities, allowSecondLevelCache, properties,"
+                      + " entityManagerFactory): this module addresses a column exactly as the"
+                      + " mapping addresses it and will not derive one from @Column(name = ...)"
+                      + " text."));
     }
 
     /**
      * The same field, addressed at the table the persister maps rather than at the name derived
-     * from {@code @Table(name = ...)} (design addendum 3, change 9, applied §3.9b).
+     * from {@code @Table(name = ...)} (design addendum 3, change 9, applied §3.9b), and at the
+     * column the persister maps rather than at {@code @Column(name = ...)} (addendum 4, §4.3).
      */
-    ShreddedField at(TableRef resolvedTable) {
+    ShreddedField at(TableRef resolvedTable, ColumnRef resolved) {
       return new ShreddedField(
           entityClass,
           entityName,
@@ -67,20 +91,59 @@ public final class ShreddedModel {
           carriesSentinel,
           tenant,
           resolvedTable,
-          columnName,
+          java.util.Optional.of(resolved),
           javaField,
           converter);
     }
   }
 
-  /** One blind-index column and the shredded field it indexes. */
+  /**
+   * One blind-index column and the shredded field it indexes.
+   *
+   * @param subjectColumnKey what {@code @BlindIndex(subjectColumn = ...)} wrote: a <em>lookup
+   *     key</em>, matched case-sensitively against the mapped columns and then thrown away. It is
+   *     never an identifier and never reaches SQL (addendum 4, §4.3).
+   * @param tenantColumnKey the same, for {@code tenantColumn}
+   * @param resolvedColumn the columns the mapping actually addresses; empty until the scan has seen
+   *     an {@code EntityManagerFactory}
+   */
   public record BlindIndexField(
       Class<?> entityClass,
       String entityName,
       String fieldName,
       String ofFieldName,
       Field javaField,
-      BlindIndexColumn column) {}
+      String subjectColumnKey,
+      String tenantColumnKey,
+      java.util.Optional<BlindIndexColumn> resolvedColumn) {
+
+    /** The resolved columns, or a refusal. Nothing builds SQL from an unresolved index. */
+    public BlindIndexColumn column() {
+      return resolvedColumn.orElseThrow(
+          () ->
+              config(
+                  "@BlindIndex on "
+                      + entityName
+                      + "."
+                      + fieldName
+                      + " was never resolved against Hibernate's mapping, so the columns its"
+                      + " erasure would address are unknown. Build the ShreddedModel with"
+                      + " ShreddedModel.scan(entities, allowSecondLevelCache, properties,"
+                      + " entityManagerFactory)."));
+    }
+
+    BlindIndexField resolvedTo(BlindIndexColumn resolved) {
+      return new BlindIndexField(
+          entityClass,
+          entityName,
+          fieldName,
+          ofFieldName,
+          javaField,
+          subjectColumnKey,
+          tenantColumnKey,
+          java.util.Optional.of(resolved));
+    }
+  }
 
   private final List<ShreddedField> shreddedFields;
   private final List<BlindIndexField> blindIndexFields;
@@ -257,7 +320,7 @@ public final class ShreddedModel {
                 // (change 9, §3.9b). It survives only for a model scanned without an
                 // EntityManagerFactory, which builds no SQL.
                 TableRef.of(tableName(type)),
-                columnName(field),
+                java.util.Optional.empty(),
                 accessible(field),
                 converter);
         shredded.add(shreddedField);
@@ -302,13 +365,13 @@ public final class ShreddedModel {
                 field.getName(),
                 annotation.of(),
                 field,
-                // Design addendum 3 change 1 (applied §3.1): tenantColumn is a column name, and
-                // the property it maps to is resolved below, from the entity's own column mapping.
-                BlindIndexColumn.unresolved(
-                    TableRef.of(tableName(type)),
-                    columnName(field),
-                    annotation.subjectColumn(),
-                    annotation.tenantColumn())));
+                // Design addendum 3 change 1 (applied §3.1) and addendum 4 §4.3: these two are
+                // lookup keys, not identifiers. The columns the erasure addresses are resolved
+                // below, from the entity's own column mapping, and the keys are then never used
+                // again except in a message.
+                annotation.subjectColumn(),
+                annotation.tenantColumn(),
+                java.util.Optional.empty()));
       }
 
       if (!shreddedHere.isEmpty()) {
@@ -345,13 +408,20 @@ public final class ShreddedModel {
    * rather than left for CIPHER's own {@code Ledger.secret} repro to find on a live row.
    */
   /**
-   * Design addendum 3, change 1 (applied §3.1). {@code @BlindIndex(tenantColumn = "tenant_id")}
-   * names the <em>column</em> the erasure's {@code UPDATE ... WHERE tenant_id = ?} matches on. The
-   * state array the write path reads, and {@code EntityPersister.getPropertyNames()}, are keyed by
-   * <em>property</em> name ({@code tenantId}). Resolving one as if it were the other would either
-   * refuse every correct configuration or, worse, miss and derive the index under something
-   * unstated - so the column is resolved to a property here, through the entity's own column
-   * mapping, once, at startup.
+   * Design addendum 3, change 1 (applied §3.1), rebuilt on addendum 4 (§4.2, §4.3).
+   * {@code @BlindIndex(tenantColumn = "tenant_id")} names the <em>column</em> the erasure's {@code
+   * UPDATE ... WHERE tenant_id = ?} matches on. The state array the write path reads, and {@code
+   * EntityPersister.getPropertyNames()}, are keyed by <em>property</em> name ({@code tenantId}).
+   * Resolving one as if it were the other would either refuse every correct configuration or,
+   * worse, miss and derive the index under something unstated - so the column is resolved to a
+   * property here, through the entity's own column mapping, once, at startup.
+   *
+   * <p><b>Addendum 4, §4.3: the annotation's text is a lookup key, never an identifier.</b> It is
+   * matched, case-sensitively and with no second pass ever, against the text of each mapped column;
+   * once matched it is thrown away, and what goes into SQL is the {@link ColumnRef} built from the
+   * mapping's own selection expression. The index column itself is never matched by text at all -
+   * it is resolved from the {@code @BlindIndex} field's property name, which is what closes S-24 by
+   * construction.
    *
    * <p>The resolution must yield exactly one property that is basic, {@code String}-typed, mapped
    * to the entity's primary table (the table the erasure updates), not a formula, not the
@@ -371,6 +441,7 @@ public final class ShreddedModel {
       return;
     }
     var byEntityName = persistersByEntityName(entityManagerFactory);
+    var dialect = dialectOf(entityManagerFactory);
     for (int i = 0; i < indexes.size(); i++) {
       BlindIndexField index = indexes.get(i);
       String where = index.entityName() + "." + index.fieldName();
@@ -381,25 +452,54 @@ public final class ShreddedModel {
                 + where
                 + " is declared on a class Hibernate's mapping metamodel does not know as an"
                 + " entity, so its tenantColumn=\""
-                + index.column().tenantColumn()
+                + index.tenantColumnKey()
                 + "\" and subjectColumn=\""
-                + index.column().subjectColumn()
+                + index.subjectColumnKey()
                 + "\" cannot be resolved to the properties the write path reads.");
       }
+      TableRef table = primaryTable(persister);
+      ColumnRef indexColumn = indexColumnOf(persister, index, where, dialect);
+      var tenant = resolveAxis(persister, index, where, table, dialect, Axis.TENANT);
+      var subject = resolveAxis(persister, index, where, table, dialect, Axis.SUBJECT);
       indexes.set(
           i,
-          new BlindIndexField(
-              index.entityClass(),
-              index.entityName(),
-              index.fieldName(),
-              index.ofFieldName(),
-              index.javaField(),
-              index
-                  .column()
-                  .resolvedTo(
-                      resolveAxisProperty(persister, index, where, Axis.TENANT),
-                      resolveAxisProperty(persister, index, where, Axis.SUBJECT))));
+          index.resolvedTo(
+              new BlindIndexColumn(
+                  table,
+                  indexColumn,
+                  subject.column(),
+                  tenant.column(),
+                  java.util.Optional.of(tenant.property()),
+                  java.util.Optional.of(subject.property()))));
     }
+  }
+
+  /**
+   * S-24, closed by construction (addendum 4, change 5). The blind-index column is the column
+   * Hibernate maps the {@code @BlindIndex} <em>property</em> to - looked up by property name, its
+   * {@code @Column(name = ...)} text never read, never compared and never quoted by hand. A
+   * {@code @Column(name = "\"Email\"")} therefore settles here, at startup, instead of booting and
+   * failing on whichever row the application writes first.
+   */
+  private static ColumnRef indexColumnOf(
+      org.hibernate.persister.entity.EntityPersister persister,
+      BlindIndexField index,
+      String where,
+      org.hibernate.dialect.Dialect dialect) {
+    var attribute = persister.findAttributeMapping(index.fieldName());
+    if (!(attribute instanceof org.hibernate.metamodel.mapping.BasicValuedModelPart basic)) {
+      throw config(
+          "@BlindIndex on "
+              + where
+              + " is not mapped by Hibernate as a basic column of "
+              + index.entityName()
+              + (attribute == null
+                  ? " (Hibernate maps no attribute of that name at all)"
+                  : " (it is a " + attribute.getClass().getSimpleName() + ")")
+              + ". The erasure nulls this column by name; a field Hibernate does not map to one"
+              + " column of this entity has no name for it to null.");
+    }
+    return ColumnRefs.of(basic, where, dialect);
   }
 
   /**
@@ -409,12 +509,17 @@ public final class ShreddedModel {
    * connection's {@code search_path} to decide which table is hit (S-21). The entity's own primary
    * table comes from the persister; each field's containing table comes from its attribute mapping,
    * which is also what makes the {@code @SecondaryTable} refusal below real.
+   *
+   * <p>Addendum 4, §4.3: the same pass resolves each {@code @Shredded} field's own column, by
+   * property name, to a {@link ColumnRef} - the only column identifier the read-back and rebind
+   * statements are allowed to interpolate.
    */
   private static void resolveTables(
       EntityManagerFactory entityManagerFactory,
       List<ShreddedField> shredded,
       List<BlindIndexField> indexes) {
     var byEntityName = persistersByEntityName(entityManagerFactory);
+    var dialect = dialectOf(entityManagerFactory);
     var primaryTables = new LinkedHashMap<String, TableRef>();
     for (var entry : byEntityName.entrySet()) {
       primaryTables.put(entry.getKey(), primaryTable(entry.getValue()));
@@ -425,25 +530,32 @@ public final class ShreddedModel {
       if (primary == null) {
         continue; // an entity Hibernate does not map; other checks refuse it by their own reasons
       }
-      refuseSecondaryTableSplit(byEntityName.get(field.entityName()), field, primary);
-      shredded.set(i, field.at(primary));
+      var persister = byEntityName.get(field.entityName());
+      refuseSecondaryTableSplit(persister, field, primary);
+      shredded.set(i, field.at(primary, shreddedColumnOf(persister, field, dialect)));
     }
-    for (int i = 0; i < indexes.size(); i++) {
-      BlindIndexField index = indexes.get(i);
-      TableRef primary = primaryTables.get(index.entityName());
-      if (primary == null) {
-        continue; // resolveIndexColumns refuses it, naming the entity
-      }
-      indexes.set(
-          i,
-          new BlindIndexField(
-              index.entityClass(),
-              index.entityName(),
-              index.fieldName(),
-              index.ofFieldName(),
-              index.javaField(),
-              index.column().at(primary)));
+  }
+
+  /**
+   * The column Hibernate maps a {@code @Shredded} property to. Its annotation text is never read.
+   */
+  private static ColumnRef shreddedColumnOf(
+      org.hibernate.persister.entity.EntityPersister persister,
+      ShreddedField field,
+      org.hibernate.dialect.Dialect dialect) {
+    String where = field.entityName() + "." + field.fieldName();
+    var attribute = persister.findAttributeMapping(field.fieldName());
+    if (!(attribute instanceof org.hibernate.metamodel.mapping.BasicValuedModelPart basic)) {
+      // refuseIfShreddedFieldUnmodelled has already refused this shape by its own reason; this is
+      // the typed fallback rather than a cast that would throw ClassCastException.
+      throw config(
+          "@Shredded on "
+              + where
+              + " is not mapped by Hibernate as a basic column of "
+              + field.entityName()
+              + ", so this module has no column to read its stored value back from.");
     }
+    return ColumnRefs.of(basic, where, dialect);
   }
 
   /**
@@ -486,6 +598,14 @@ public final class ShreddedModel {
     return TableRef.parse(persister.getMappedTableDetails().getTableName());
   }
 
+  private static org.hibernate.dialect.Dialect dialectOf(
+      EntityManagerFactory entityManagerFactory) {
+    return entityManagerFactory
+        .unwrap(org.hibernate.engine.spi.SessionFactoryImplementor.class)
+        .getJdbcServices()
+        .getDialect();
+  }
+
   private static LinkedHashMap<String, org.hibernate.persister.entity.EntityPersister>
       persistersByEntityName(EntityManagerFactory entityManagerFactory) {
     var sessionFactory =
@@ -516,26 +636,40 @@ public final class ShreddedModel {
       this.type = type;
     }
 
-    String column(BlindIndexColumn column) {
-      return this == TENANT ? column.tenantColumn() : column.subjectColumn();
+    String key(BlindIndexField index) {
+      return this == TENANT ? index.tenantColumnKey() : index.subjectColumnKey();
     }
   }
 
-  private static String resolveAxisProperty(
+  /** What one axis resolved to: the property the write path reads, and the column SQL addresses. */
+  private record AxisResolution(String property, ColumnRef column) {}
+
+  private static AxisResolution resolveAxis(
       org.hibernate.persister.entity.EntityPersister persister,
       BlindIndexField index,
       String where,
+      TableRef primary,
+      org.hibernate.dialect.Dialect dialect,
       Axis axis) {
-    String wanted = axis.column(index.column());
+    String wanted = axis.key(index);
     var matches =
         new java.util.LinkedHashMap<String, org.hibernate.metamodel.mapping.BasicValuedModelPart>();
     var nested = new ArrayList<String>();
+    var associations = new ArrayList<String>();
+    var mapped = new java.util.LinkedHashMap<String, ColumnRef>();
     persister
         .getAttributeMappings()
         .forEach(
             attribute ->
                 collectColumnMatches(
-                    attribute.getAttributeName(), attribute, wanted, matches, nested));
+                    attribute.getAttributeName(),
+                    attribute,
+                    wanted,
+                    dialect,
+                    matches,
+                    nested,
+                    associations,
+                    mapped));
     String prefix =
         "@BlindIndex on " + where + " names " + axis.attribute + "=\"" + wanted + "\", which ";
     if (matches.size() > 1) {
@@ -549,9 +683,29 @@ public final class ShreddedModel {
               + " erasure matches on; two properties over one column give it no single answer.");
     }
     if (matches.isEmpty()) {
+      // Addendum 4, change 6: an association is refused as an association. Before it, a
+      // @JoinColumn of exactly this name fell into "no property maps to that column, here are the
+      // ones I map", which is false and sends the developer looking for a typo.
+      if (!associations.isEmpty()) {
+        throw config(
+            prefix
+                + "is mapped by an association of "
+                + index.entityName()
+                + " ("
+                + String.join(", ", associations)
+                + ") - a @ManyToOne or @OneToOne @JoinColumn, not a basic property. This module"
+                + " reads the "
+                + axis.noun
+                + " out of the entity's own state array as a String and binds it as a parameter;"
+                + " an association holds an entity, whose identifier Hibernate renders in a way"
+                + " this module would have to guess at. Map the "
+                + axis.noun
+                + " as an ordinary basic String property beside the association and name that"
+                + " property's column.");
+      }
       var identifier = persister.getIdentifierMapping();
       if (identifier instanceof org.hibernate.metamodel.mapping.BasicValuedModelPart id
-          && unquote(id.getSelectionExpression()).equals(wanted)) {
+          && ColumnRefs.of(id, index.entityName() + " identifier", dialect).text().equals(wanted)) {
         // Change 8 (§3.8a) decides the case Cipher left open on the subject axis, and it is the
         // same answer the tenant axis already gave, for one more reason: the identifier is not in
         // the state array the write path reads, under GenerationType.IDENTITY it does not exist at
@@ -596,23 +750,20 @@ public final class ShreddedModel {
               + " is a column name, not a property name: it must name the column the erasure's"
               + " UPDATE matches on, and that column must be mapped by a basic String property of"
               + " this entity so the write path can read the value the index is derived under out"
-              + " of the row being written.");
+              + " of the row being written."
+              + mappedColumnListing(wanted, mapped));
     }
     var entry = matches.entrySet().iterator().next();
     String property = entry.getKey();
     var basic = entry.getValue();
-    if (basic.isFormula()) {
-      throw config(
-          prefix
-              + "is mapped by the @Formula property "
-              + index.entityName()
-              + "."
-              + property
-              + ". A formula is computed by the database on read and has no column the erasure can"
-              + " match on.");
-    }
+    // Addendum 4, change 7: an exact match is not enough when the same mapping holds another column
+    // that differs only by case. Which of the two the developer meant is unreadable from the text,
+    // and PostgreSQL folds one of them, so the two names may or may not be the same physical
+    // column depending on quoting nobody wrote down. Refused, naming both.
+    refuseCaseOnlyTwin(prefix, wanted, property, mapped);
+    ColumnRef column = ColumnRefs.of(basic, index.entityName() + "." + property, dialect);
     TableRef table = TableRef.parse(basic.getContainingTableExpression());
-    if (!table.equals(index.column().table())) {
+    if (!table.equals(primary)) {
       throw config(
           prefix
               + "is mapped by "
@@ -622,7 +773,7 @@ public final class ShreddedModel {
               + " onto the table "
               + table
               + ", not onto "
-              + index.column().table()
+              + primary
               + " - the table the erasure's UPDATE names. A "
               + axis.noun
               + " column on a secondary table cannot be matched by that statement.");
@@ -668,18 +819,94 @@ public final class ShreddedModel {
               + ", which is not one of the entity's own persistent properties, so the write path"
               + " cannot read its value out of the state array.");
     }
-    return property;
+    return new AxisResolution(property, column);
+  }
+
+  /**
+   * Addendum 4, change 7. The match is case-sensitive against the <em>mapping</em>, never against
+   * the database, and there is no case-insensitive second pass - a second pass is the fold, back
+   * again, which is what S-22 was. The whole control is therefore the message: it lists the mapped
+   * columns verbatim with their quoting and names the ones that differ from the given text only by
+   * case, so the operator does not compare forty names by eye.
+   */
+  private static String mappedColumnListing(String wanted, Map<String, ColumnRef> mapped) {
+    var twins = caseOnlyTwins(wanted, mapped);
+    var listing =
+        new StringBuilder(
+            " The match is case-sensitive against the mapping (not against"
+                + " the database, which folds unquoted names), and the columns this entity maps are: ");
+    listing.append(
+        mapped.entrySet().stream()
+            .map(e -> e.getValue().sql() + " (" + e.getKey() + ")")
+            .collect(java.util.stream.Collectors.joining(", ")));
+    listing.append('.');
+    if (!twins.isEmpty()) {
+      listing
+          .append(" These differ from \"")
+          .append(wanted)
+          .append("\" only by case: ")
+          .append(String.join(", ", twins))
+          .append(".");
+    }
+    return listing.toString();
+  }
+
+  private static void refuseCaseOnlyTwin(
+      String prefix, String wanted, String matched, Map<String, ColumnRef> mapped) {
+    var twins = caseOnlyTwins(wanted, mapped);
+    if (twins.isEmpty()) {
+      return;
+    }
+    throw config(
+        prefix
+            + "matches "
+            + matched
+            + " exactly, but this entity also maps "
+            + String.join(", ", twins)
+            + ", which differs only by case. The match is case-sensitive against the mapping and"
+            + " there is no second, case-insensitive pass - that fold is precisely how an erasure"
+            + " came to address a different column than the one the mapping addresses. With two"
+            + " such columns in one entity, which one was meant cannot be read from the text, so"
+            + " the mapping is refused here rather than guessed at erasure time. Rename one of"
+            + " them.");
+  }
+
+  private static List<String> caseOnlyTwins(String wanted, Map<String, ColumnRef> mapped) {
+    var twins = new ArrayList<String>();
+    mapped.forEach(
+        (property, column) -> {
+          if (!column.text().equals(wanted) && column.text().equalsIgnoreCase(wanted)) {
+            twins.add(column.sql() + " (" + property + ")");
+          }
+        });
+    return twins;
   }
 
   private static void collectColumnMatches(
       String path,
       org.hibernate.metamodel.mapping.ModelPart part,
       String wanted,
+      org.hibernate.dialect.Dialect dialect,
       Map<String, org.hibernate.metamodel.mapping.BasicValuedModelPart> matches,
-      List<String> nested) {
+      List<String> nested,
+      List<String> associations,
+      Map<String, ColumnRef> mapped) {
     if (part instanceof org.hibernate.metamodel.mapping.BasicValuedModelPart basic) {
-      if (unquote(basic.getSelectionExpression()).equals(wanted)) {
-        if (path.indexOf('.') < 0 && path.indexOf('[') < 0) {
+      // A formula has no column to match on at all; it is listed as a formula rather than parsed,
+      // and refused by its flag if it is ever the thing that matched (addendum 4, change 3).
+      if (basic.isFormula()) {
+        if (basic.getSelectionExpression().equals(wanted)) {
+          matches.put(path, basic);
+        }
+        return;
+      }
+      ColumnRef column = ColumnRefs.parse(basic.getSelectionExpression(), path);
+      boolean top = path.indexOf('.') < 0 && path.indexOf('[') < 0;
+      if (top) {
+        mapped.put(path, column);
+      }
+      if (column.text().equals(wanted)) {
+        if (top) {
           matches.put(path, basic);
         } else {
           nested.add(path);
@@ -697,25 +924,42 @@ public final class ShreddedModel {
                       path + "." + attribute.getAttributeName(),
                       attribute,
                       wanted,
+                      dialect,
                       matches,
-                      nested));
+                      nested,
+                      associations,
+                      mapped));
       return;
     }
     if (part instanceof org.hibernate.metamodel.mapping.PluralAttributeMapping plural) {
-      collectColumnMatches(path + "[]", plural.getElementDescriptor(), wanted, matches, nested);
+      collectColumnMatches(
+          path + "[]",
+          plural.getElementDescriptor(),
+          wanted,
+          dialect,
+          matches,
+          nested,
+          associations,
+          mapped);
+      return;
     }
-  }
-
-  private static String unquote(String identifier) {
-    String trimmed = identifier == null ? "" : identifier.trim();
-    if (trimmed.length() > 1) {
-      char first = trimmed.charAt(0);
-      char last = trimmed.charAt(trimmed.length() - 1);
-      if ((first == '"' && last == '"') || (first == '`' && last == '`')) {
-        trimmed = trimmed.substring(1, trimmed.length() - 1);
+    if (part instanceof org.hibernate.metamodel.mapping.EntityAssociationMapping association) {
+      // Addendum 4, change 6: a @JoinColumn is a mapped column, and a lookup key that names one has
+      // to be told so rather than told "no property maps to that column". The foreign key's own
+      // selectables are what the developer wrote in @JoinColumn(name = ...).
+      var foreignKey = association.getForeignKeyDescriptor();
+      if (foreignKey != null) {
+        foreignKey.visitKeySelectables(
+            (position, selectable) -> {
+              if (!selectable.isFormula()
+                  && ColumnRefs.parse(selectable.getSelectionExpression(), path)
+                      .text()
+                      .equals(wanted)) {
+                associations.add(path);
+              }
+            });
       }
     }
-    return trimmed.toLowerCase(java.util.Locale.ROOT);
   }
 
   private static int indexOfProperty(String[] names, String name) {
@@ -1214,7 +1458,7 @@ public final class ShreddedModel {
   }
 
   /** Strips a Hibernate persister's fully qualified default entity name to its simple name. */
-  private static String simpleEntityName(String persisterEntityName) {
+  static String simpleEntityName(String persisterEntityName) {
     int dot = persisterEntityName.lastIndexOf('.');
     return dot < 0 ? persisterEntityName : persisterEntityName.substring(dot + 1);
   }
@@ -1230,14 +1474,6 @@ public final class ShreddedModel {
       return table.name();
     }
     return camelToSnake(type.getSimpleName());
-  }
-
-  private static String columnName(Field field) {
-    var column = field.getAnnotation(jakarta.persistence.Column.class);
-    if (column != null && !column.name().isBlank()) {
-      return column.name();
-    }
-    return camelToSnake(field.getName());
   }
 
   private static String camelToSnake(String name) {

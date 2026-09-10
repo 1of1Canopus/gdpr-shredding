@@ -1,6 +1,7 @@
 package com.housedevinci.shredding.autoconfigure;
 
 import com.housedevinci.shredding.domain.BlindIndex;
+import com.housedevinci.shredding.domain.ColumnRef;
 import com.housedevinci.shredding.domain.EncryptedValue;
 import com.housedevinci.shredding.domain.ErrorCodes;
 import com.housedevinci.shredding.domain.Normalisation;
@@ -592,7 +593,7 @@ public final class ShreddingEventListener
     var runtime = ShreddingRuntime.require();
     String[] names = event.getPersister().getPropertyNames();
     Object[] state = event.getState();
-    var columns = new ArrayList<String>();
+    var columns = new ArrayList<ColumnRef>();
     var values = new ArrayList<byte[]>();
     for (var field : fields) {
       int index = indexOf(names, field.fieldName());
@@ -612,7 +613,7 @@ public final class ShreddingEventListener
                 + field.fieldName()
                 + ": the inserted state holds the read placeholder, not a value");
       }
-      columns.add(field.columnName());
+      columns.add(field.column());
       values.add(
           runtime
               .cipher()
@@ -628,16 +629,16 @@ public final class ShreddingEventListener
     if (columns.isEmpty()) {
       return;
     }
-    String idColumn = singleIdColumn(event.getPersister());
+    ColumnRef idColumn = singleIdColumn(event.getPersister());
     String sql =
         "UPDATE "
             + fields.get(0).table().sql()
             + " SET "
             + columns.stream()
-                .map(c -> quote(c) + " = ?")
+                .map(c -> c.sql() + " = ?")
                 .collect(java.util.stream.Collectors.joining(", "))
             + " WHERE "
-            + quote(idColumn)
+            + idColumn.sql()
             + " = ?";
     // Not cast to EventSource: a StatelessSession insert of an IDENTITY-generated shredded entity
     // reaches this rebind too, and StatelessSessionImpl is not an EventSource.
@@ -733,19 +734,29 @@ public final class ShreddingEventListener
     }
   }
 
-  private static String singleIdColumn(EntityPersister persister) {
-    String[] idColumns = persister.getIdentifierColumnNames();
-    if (idColumns.length != 1) {
-      // ShreddedModel refuses a composite-id shredded entity at startup, so this is unreachable
-      // for a mapped entity; it stays as a typed refusal rather than an array index.
+  /**
+   * The identifier column, taken from the persister's own identifier mapping and never from {@code
+   * getIdentifierColumnNames()}, which returns a name this module would have to unquote by hand
+   * (addendum 4, §4.3). {@code ShreddedModel} refuses a composite-id {@code @Shredded} entity at
+   * startup, so both refusals below are unreachable for a mapped entity - they stay as typed
+   * refusals by their real reason (change 6) rather than as a cast or an array index.
+   */
+  private static ColumnRef singleIdColumn(EntityPersister persister) {
+    var identifier = persister.getIdentifierMapping();
+    if (!(identifier instanceof org.hibernate.metamodel.mapping.BasicValuedModelPart basic)) {
       throw new ShreddingException(
           ErrorCodes.CONFIG,
-          "a @Shredded entity has "
-              + idColumns.length
-              + " identifier columns; this module binds a stored value to a single-column"
-              + " identifier and refuses the mapping at startup.");
+          "a @Shredded entity has a composite or embedded identifier ("
+              + identifier.getClass().getSimpleName()
+              + "). Every stored value is bound to its row's identifier and read back by it; a"
+              + " composite identifier has no single column for that read-back and no canonical"
+              + " byte form to bind to, so the mapping is refused at startup. Use a basic"
+              + " identifier: a numeric id, a UUID, a String or a byte[].");
     }
-    return idColumns[0];
+    return ColumnRefs.of(
+        basic,
+        ShreddedModel.simpleEntityName(persister.getEntityName()) + " identifier",
+        persister.getFactory().getJdbcServices().getDialect());
   }
 
   @Override
@@ -841,10 +852,10 @@ public final class ShreddingEventListener
       org.hibernate.engine.spi.SharedSessionContractImplementor session,
       Object id,
       List<ShreddedModel.ShreddedField> fields,
-      String idColumn) {
+      ColumnRef idColumn) {
     String columns =
         fields.stream()
-            .map(f -> quote(f.columnName()))
+            .map(f -> f.column().sql())
             .collect(java.util.stream.Collectors.joining(", "));
     String sql =
         "SELECT "
@@ -852,7 +863,7 @@ public final class ShreddingEventListener
             + " FROM "
             + fields.get(0).table().sql()
             + " WHERE "
-            + quote(idColumn)
+            + idColumn.sql()
             + " = ?";
     return session.doReturningWork(
         connection -> {
@@ -870,10 +881,6 @@ public final class ShreddingEventListener
             }
           }
         });
-  }
-
-  private static String quote(String identifier) {
-    return "\"" + identifier.replace("\"", "\"\"") + "\"";
   }
 
   /**

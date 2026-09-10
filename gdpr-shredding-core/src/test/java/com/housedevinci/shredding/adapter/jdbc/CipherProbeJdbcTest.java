@@ -119,8 +119,40 @@ class CipherProbeJdbcTest {
   }
 
   private JdbcErasureStore store(List<BlindIndexColumn> columns) {
-    return new JdbcErasureStore(dataSource, ErasureChain.keyed(SECRET, "k1"), columns);
+    return new JdbcErasureStore(dataSource, ErasureChain.keyed(SECRET, "k1"), columns, RESIDUAL);
   }
+
+  /**
+   * These tests have no Hibernate at all - they drive the JDBC adapter against a hand-made table -
+   * so the independent read-back the starter supplies (a residual Hibernate renders from the entity
+   * mapping, design addendum 4 §4.5) has no counterpart here. This one counts the same rows with
+   * plain SQL on the erasure's own connection, which is what the contract requires of it: one
+   * connection, no transaction of its own, no way to write. It is deliberately explicit at every
+   * construction site: {@code JdbcErasureStore} has no default residual, because an erasure whose
+   * own statements are the only thing that ever checks them is the shape S-22 shipped.
+   */
+  private static final com.housedevinci.shredding.adapter.jdbc.BlindIndexResidual RESIDUAL =
+      (connection, column, tenant, subject) -> {
+        String sql =
+            "SELECT count(*) FROM "
+                + column.table().sql()
+                + " WHERE "
+                + column.tenantColumn().sql()
+                + " = ? AND "
+                + column.subjectColumn().sql()
+                + " = ? AND "
+                + column.column().sql()
+                + " IS NOT NULL";
+        try (var ps = connection.prepareStatement(sql)) {
+          ps.setString(1, tenant.value());
+          ps.setString(2, subject.value());
+          try (var rs = ps.executeQuery()) {
+            return rs.next() ? rs.getLong(1) : 0L;
+          }
+        } catch (java.sql.SQLException e) {
+          throw new IllegalStateException(e);
+        }
+      };
 
   private ErasureService service(JdbcErasureStore store) {
     return new ErasureService(
@@ -408,11 +440,13 @@ class CipherProbeJdbcTest {
     var store =
         store(
             List.of(
-                BlindIndexColumn.unresolved(
+                new BlindIndexColumn(
                     com.housedevinci.shredding.domain.TableRef.of("customer"),
-                    "email_bidx",
-                    "customer_id",
-                    "tenant_id")));
+                    com.housedevinci.shredding.domain.ColumnRef.unquoted("email_bidx"),
+                    com.housedevinci.shredding.domain.ColumnRef.unquoted("customer_id"),
+                    com.housedevinci.shredding.domain.ColumnRef.unquoted("tenant_id"),
+                    java.util.Optional.of("tenantId"),
+                    java.util.Optional.of("customerId"))));
     var result = service(store).erase(new ErasureRequest(TENANT, subject, "dpo", "art 17"));
 
     assertThat(result.blindIndexColumnsCleared()).isEqualTo(1);
@@ -622,7 +656,8 @@ class CipherProbeJdbcTest {
     cipher.encrypt(TENANT, s, ROW, "Customer", "email", "a@b.c".getBytes(StandardCharsets.UTF_8));
     service(store).erase(new ErasureRequest(TENANT, s, "dpo", "art 17"));
 
-    assertThatThrownBy(() -> new JdbcErasureStore(dataSource, ErasureChain.unkeyed(), List.of()))
+    assertThatThrownBy(
+            () -> new JdbcErasureStore(dataSource, ErasureChain.unkeyed(), List.of(), RESIDUAL))
         .isInstanceOf(ShreddingException.class)
         .extracting(e -> ((ShreddingException) e).code())
         .isEqualTo(ErrorCodes.ERASURE_KEY_MISMATCH);

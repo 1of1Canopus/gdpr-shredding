@@ -1,5 +1,6 @@
 package com.housedevinci.shredding.autoconfigure;
 
+import com.housedevinci.shredding.domain.ColumnRef;
 import com.housedevinci.shredding.domain.EncryptedValue;
 import com.housedevinci.shredding.domain.ErrorCodes;
 import com.housedevinci.shredding.domain.RowId;
@@ -96,7 +97,7 @@ final class WriteVerification {
   private record Debt(
       String entityName,
       TableRef tableName,
-      String idColumn,
+      ColumnRef idColumn,
       Object id,
       List<ShreddedModel.ShreddedField> fields,
       // S-2, carried into this ledger: a Scope, not a single TenantId - a debt covers every
@@ -117,7 +118,7 @@ final class WriteVerification {
       SharedSessionContractImplementor session,
       String entityName,
       TableRef tableName,
-      String idColumn,
+      ColumnRef idColumn,
       Object id,
       List<ShreddedModel.ShreddedField> fields,
       ShreddingContext.Scope scope,
@@ -215,14 +216,14 @@ final class WriteVerification {
     var chunk = chunkKeys.stream().map(ledger.debts::get).toList();
     Debt first = chunk.get(0);
     var fields = first.fields();
-    StringBuilder sql = new StringBuilder("SELECT ").append(quote(first.idColumn()));
+    StringBuilder sql = new StringBuilder("SELECT ").append(first.idColumn().sql());
     for (var field : fields) {
-      sql.append(", ").append(quote(field.columnName()));
+      sql.append(", ").append(field.column().sql());
     }
     sql.append(" FROM ")
         .append(first.tableName().sql())
         .append(" WHERE ")
-        .append(quote(first.idColumn()))
+        .append(first.idColumn().sql())
         .append(" IN (");
     for (int i = 0; i < chunk.size(); i++) {
       sql.append(i == 0 ? "?" : ", ?");
@@ -390,9 +391,5 @@ final class WriteVerification {
   /** The exact string form of a numeric id: never lossy, and the same string for equal values. */
   private static String canonicalDecimal(BigDecimal value) {
     return value.stripTrailingZeros().toPlainString();
-  }
-
-  private static String quote(String identifier) {
-    return "\"" + identifier.replace("\"", "\"\"") + "\"";
   }
 }

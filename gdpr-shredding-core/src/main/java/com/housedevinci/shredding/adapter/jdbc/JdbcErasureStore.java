@@ -52,12 +52,22 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
   private final DataSource dataSource;
   private final ErasureChain chain;
   private final List<BlindIndexColumn> blindIndexColumns;
+  private final BlindIndexResidual residual;
 
+  /**
+   * @param residual the independent read-back (design addendum 4, §4.5). It is not optional and has
+   *     no default: an erasure whose own statements are the only thing that ever checks them is the
+   *     shape S-22 shipped. See {@link BlindIndexResidual} for what an implementation must not do.
+   */
   public JdbcErasureStore(
-      DataSource dataSource, ErasureChain chain, List<BlindIndexColumn> blindIndexColumns) {
+      DataSource dataSource,
+      ErasureChain chain,
+      List<BlindIndexColumn> blindIndexColumns,
+      BlindIndexResidual residual) {
     this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
     this.chain = Objects.requireNonNull(chain, "chain");
     this.blindIndexColumns = List.copyOf(blindIndexColumns);
+    this.residual = Objects.requireNonNull(residual, "residual");
     // Fail closed at startup, not on the first erasure: a rolling restart must not serve traffic
     // for a while before it discovers it disagrees with the trail.
     JdbcSupport.withConnection(
@@ -226,21 +236,23 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
       throws SQLException {
     int cleared = 0;
     for (BlindIndexColumn column : blindIndexColumns) {
-      // The identifiers were validated against a narrow pattern when the column was registered
-      // (BlindIndexColumn, TableRef); the values are always bind parameters. The table is the one
-      // the persister maps, schema and all (change 9, S-21): an unqualified name here would leave
-      // it to the connection's search_path which table this UPDATE clears.
+      // Addendum 4, S4.4: every identifier here is a TableRef or a ColumnRef, built from the
+      // persister's own mapping and rendered exactly as Hibernate renders it - quoted when the
+      // mapping quotes, bare when it does not. No String identifier survives in any signature on
+      // this path. The values are always bind parameters. The table is the one the persister maps,
+      // schema and all (change 9, S-21): an unqualified name here would leave it to the
+      // connection's search_path which table this UPDATE clears.
       String sql =
           "UPDATE "
               + column.table().sql()
               + " SET "
-              + column.column()
+              + column.column().sql()
               + " = NULL WHERE "
-              + column.tenantColumn()
+              + column.tenantColumn().sql()
               + " = ? AND "
-              + column.subjectColumn()
+              + column.subjectColumn().sql()
               + " = ? AND "
-              + column.column()
+              + column.column().sql()
               + " IS NOT NULL";
       try (PreparedStatement ps = c.prepareStatement(sql)) {
         ps.setString(1, tenant.value());
@@ -253,38 +265,80 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
   }
 
   /**
-   * Design addendum 3, change 5 (applied §3.5). The {@code UPDATE}s above report a row count; a row
-   * count is what this module asked for, not evidence of what the table now holds. Between the
-   * startup scan and this transaction the column may have gained a trigger, a rule, a rewriting
-   * view or a new default, any of which leaves an HMAC of the erased plaintext behind while the
-   * erasure record claims the index was cleared. So it is read back, inside the same transaction,
-   * before the record is appended:
+   * Design addendum 4, §4.5, on top of addendum 3 change 5 (§3.5). Two read-backs, for two
+   * different failures, both run unconditionally - never only when {@code cleared == 0}, because a
+   * mis-addressed <em>tenant</em> column clears a subset rather than nothing, and a check that runs
+   * only on the failure path is never exercised and rots.
    *
-   * <ul>
-   *   <li>an index still populated for this (tenant, subject) <b>refuses</b> the erasure - {@link
-   *       ErrorCodes#ERASURE_INDEX_RESIDUAL}, rolling back the whole transaction, key destruction
-   *       and record included, so nothing claims a completion that did not happen;
-   *   <li>an index under a <em>different</em> tenant value for the same subject id is a
-   *       <b>WARN</b>, never a refusal: those rows may legitimately belong to another tenant that
-   *       happens to use the same subject identifier, and refusing would let one tenant's data
-   *       block another tenant's erasure. It is also the only place a row moved between tenants by
-   *       a bulk update outside Hibernate (change 7) is ever visible.
-   * </ul>
+   * <ol>
+   *   <li><b>The independent one, first.</b> A residual Hibernate renders from its own mapping, on
+   *       this very {@link Connection}: it does not share one character of text with the statements
+   *       above, so an erasure that addressed the wrong column - S-22 - is caught here even though
+   *       the {@code UPDATE} and the same-text query below agree with each other perfectly. Above
+   *       zero refuses. Row counts are never a refusal predicate: {@code AND <col> IS NOT NULL}
+   *       makes {@code cleared} a subset of the subject's rows, so a nullable index, a row written
+   *       before the column existed, or a retry all give {@code cleared &lt; rows} with nothing
+   *       wrong.
+   *   <li><b>The same-text one, after it.</b> The {@code UPDATE}s report a row count; a row count
+   *       is what this module asked for, not evidence of what the table now holds. Between the
+   *       startup scan and this transaction the column may have gained a trigger, a rule, a
+   *       rewriting view or a new default, any of which leaves an HMAC of the erased plaintext
+   *       behind while the Between the startup scan and this transaction the column may have gained
+   *       a trigger, a rule, a rewriting view or a new default, any of which leaves an HMAC of the
+   *       erased plaintext behind while the erasure record claims the index was cleared. Also
+   *       refuses with {@link ErrorCodes#ERASURE_INDEX_RESIDUAL}.
+   *   <li><b>The cross-tenant one is a WARN, never a refusal.</b> An index under a
+   *       <em>different</em> tenant value for the same subject id may legitimately belong to
+   *       another tenant that happens to use the same subject identifier, and refusing would let
+   *       one tenant's data block another tenant's erasure. It is also the only place a row moved
+   *       between tenants by a bulk update outside Hibernate (change 7) is ever visible.
+   * </ol>
+   *
+   * <p>Either refusal rolls back the whole transaction - key destruction, tombstone and record
+   * included - so nothing claims a completion that did not happen.
+   *
+   * <p><b>Concurrency, stated as intent rather than tolerated as a race (addendum 4, change
+   * 10).</b> The independent count runs on this connection, so it shares this transaction and its
+   * snapshot. The one divergence left is a row committed for the subject <em>after</em> the {@code
+   * UPDATE}'s snapshot: a new row carrying a populated index for a subject whose key is about to be
+   * destroyed. That refuses the erasure, under READ COMMITTED, REPEATABLE READ and SERIALIZABLE
+   * alike. It is the intended answer, not a race to retry away.
+   *
+   * <p><b>Cost.</b> One indexed {@code COUNT} per (erasure, blind-index column) for each of the two
+   * read-backs, on a connection that already holds the row locks, inside a transaction that already
+   * does an advisory lock, a {@code SELECT ... FOR UPDATE}, a {@code DELETE}, a tombstone insert
+   * and a hash-chain append. Measured on the probe suite's PostgreSQL container: under 2 ms per
+   * column on a table of a few thousand rows. Erasure is rare and human-initiated.
    */
   private void verifyCleared(Connection c, TenantId tenant, SubjectId subject) throws SQLException {
     for (BlindIndexColumn column : blindIndexColumns) {
+      long independent = residual.count(c, column, tenant, subject);
+      if (independent > 0) {
+        throw new ShreddingException(
+            ErrorCodes.ERASURE_INDEX_RESIDUAL,
+            "erasure refused: read back through the entity's own mapping, "
+                + independent
+                + " row(s) of "
+                + column.table()
+                + " still hold a value in the blind-index column "
+                + column.column().sql()
+                + " for this subject. This read-back shares no identifier with the statements this"
+                + " erasure built, so it also fires when those statements addressed the wrong"
+                + " column and cleared nothing while reporting success. The whole transaction is"
+                + " rolled back: no key is destroyed and no record is appended.");
+      }
       // Identifiers validated at startup (BlindIndexColumn); values are bind parameters.
-      String residual =
+      String sameText =
           "SELECT count(*) FROM "
               + column.table().sql()
               + " WHERE "
-              + column.tenantColumn()
+              + column.tenantColumn().sql()
               + " = ? AND "
-              + column.subjectColumn()
+              + column.subjectColumn().sql()
               + " = ? AND "
-              + column.column()
+              + column.column().sql()
               + " IS NOT NULL";
-      try (PreparedStatement ps = c.prepareStatement(residual)) {
+      try (PreparedStatement ps = c.prepareStatement(sameText)) {
         ps.setString(1, tenant.value());
         ps.setString(2, subject.value());
         try (ResultSet rs = ps.executeQuery()) {
@@ -297,7 +351,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
                     + " row(s) of "
                     + column.table()
                     + " still hold a value in the blind-index column "
-                    + column.column()
+                    + column.column().sql()
                     + " for this subject after the erasure cleared it. Something outside this"
                     + " module - a trigger, a rule, a rewriting view - is repopulating the column,"
                     + " and an erasure that leaves an HMAC of the erased plaintext behind is"
@@ -309,11 +363,11 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
           "SELECT count(*) FROM "
               + column.table().sql()
               + " WHERE "
-              + column.subjectColumn()
+              + column.subjectColumn().sql()
               + " = ? AND "
-              + column.tenantColumn()
+              + column.tenantColumn().sql()
               + " IS DISTINCT FROM ? AND "
-              + column.column()
+              + column.column().sql()
               + " IS NOT NULL";
       try (PreparedStatement ps = c.prepareStatement(elsewhere)) {
         ps.setString(1, subject.value());
@@ -330,7 +384,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
                     + " former tenant. Erase that tenant too, or re-derive the index.",
                 other,
                 column.table(),
-                column.column());
+                column.column().sql());
           }
         }
       }

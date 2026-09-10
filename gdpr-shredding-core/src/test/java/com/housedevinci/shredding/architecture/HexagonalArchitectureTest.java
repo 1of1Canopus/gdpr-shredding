@@ -38,9 +38,9 @@ class HexagonalArchitectureTest {
           .resideInAnyPackage("java..", "javax.crypto..", "com.housedevinci.shredding.domain..");
 
   /**
-   * Design addendum 4, change 13. {@code ColumnRef} is the type S-22's fix hangs on and the one most
-   * likely to be "just given" an {@code Identifier} or a {@code Dialect} field by a later change,
-   * which would drag Hibernate into the domain. Named on its own so the failure says so.
+   * Design addendum 4, change 13. {@code ColumnRef} is the type S-22's fix hangs on and the one
+   * most likely to be "just given" an {@code Identifier} or a {@code Dialect} field by a later
+   * change, which would drag Hibernate into the domain. Named on its own so the failure says so.
    */
   @ArchTest
   static final ArchRule column_ref_imports_nothing_outside_the_jdk =

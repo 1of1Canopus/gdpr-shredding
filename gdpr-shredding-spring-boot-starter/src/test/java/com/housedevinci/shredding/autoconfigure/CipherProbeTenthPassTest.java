@@ -4,10 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.housedevinci.shredding.application.ErasureRequest;
 import com.housedevinci.shredding.application.ErasureService;
-import com.housedevinci.shredding.autoconfigure.tenthpass.joined.JoinedChild;
-import com.housedevinci.shredding.autoconfigure.tenthpass.joined.JoinedChildRepository;
 import com.housedevinci.shredding.autoconfigure.tenthpass.collision.CollisionNote;
 import com.housedevinci.shredding.autoconfigure.tenthpass.collision.CollisionNoteRepository;
+import com.housedevinci.shredding.autoconfigure.tenthpass.joined.JoinedChild;
+import com.housedevinci.shredding.autoconfigure.tenthpass.joined.JoinedChildRepository;
 import com.housedevinci.shredding.autoconfigure.tenthpass.keyword.KeywordNote;
 import com.housedevinci.shredding.autoconfigure.tenthpass.keyword.KeywordNoteRepository;
 import com.housedevinci.shredding.domain.ShreddingException;
@@ -29,17 +29,22 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
-/** Cipher, tenth pass: the surfaces change 9 made live. */
+/**
+ * Cipher, tenth pass: the surfaces change 9 made live, promoted out of {@code src/test-pending}
+ * once design addendum 4 closed S-22 and S-24. Every method here is green by its own assertions - a
+ * real erasure, or a startup refusal this module names - not by the escape hatch it was written
+ * with.
+ */
 @Testcontainers
 class CipherProbeTenthPassTest {
 
   @Container
   static final PostgreSQLContainer<?> POSTGRES =
       new PostgreSQLContainer<>(
-          DockerImageName.parse(
-                  "postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777")
-              .asCompatibleSubstituteFor("postgres"))
-              .withStartupTimeout(java.time.Duration.ofMinutes(2));
+              DockerImageName.parse(
+                      "postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777")
+                  .asCompatibleSubstituteFor("postgres"))
+          .withStartupTimeout(java.time.Duration.ofMinutes(2));
 
   private static String b64(String s) {
     return Base64.getEncoder().encodeToString(s.getBytes(StandardCharsets.UTF_8));
@@ -80,9 +85,9 @@ class CipherProbeTenthPassTest {
 
   /**
    * The second face of the same statement. {@code ShreddedModel.unquote} lowercases before it
-   * compares, so a quoted {@code "Owner"} satisfies {@code subjectColumn="owner"} - and the
-   * erasure then interpolates {@code owner} unquoted, which in PostgreSQL is the *other* column of
-   * that name. The erasure matches on a column that has nothing to do with the subject: it clears
+   * compares, so a quoted {@code "Owner"} satisfies {@code subjectColumn="owner"} - and the erasure
+   * then interpolates {@code owner} unquoted, which in PostgreSQL is the *other* column of that
+   * name. The erasure matches on a column that has nothing to do with the subject: it clears
    * whatever rows happen to hold the label, and misses the ones it was asked for.
    */
   @Test
@@ -139,8 +144,8 @@ class CipherProbeTenthPassTest {
   /**
    * S-21 verification in the shape an enterprise deployment actually has: no {@code @Table(schema)}
    * anywhere, the schema named once by {@code hibernate.default_schema=app3}, and a decoy table of
-   * the same name sitting in {@code public}, which is on the connection's search_path while
-   * {@code app3} is not. The ninth-pass probe only exercised {@code default_schema=public}, where
+   * the same name sitting in {@code public}, which is on the connection's search_path while {@code
+   * app3} is not. The ninth-pass probe only exercised {@code default_schema=public}, where
    * qualified and unqualified address the same table and the bug is invisible.
    */
   @Test
@@ -210,7 +215,8 @@ class CipherProbeTenthPassTest {
     }
   }
 
-  private static long count(DataSource ds, String table, String owner) throws java.sql.SQLException {
+  private static long count(DataSource ds, String table, String owner)
+      throws java.sql.SQLException {
     try (var c = ds.getConnection();
         var ps =
             c.prepareStatement(
@@ -246,12 +252,12 @@ class CipherProbeTenthPassTest {
    * PostgreSQL reserved word that is also a valid scalar expression, so {@code WHERE user = ?}
    * parses, compares the connection's role name against the subject, and matches nothing. The
    * UPDATE clears no row - and verifyCleared's two read-backs are built from the same unquoted
-   * text, so they agree with it. Key destroyed, ciphertext destroyed, record COMPLETE, and the
-   * HMAC of the erased plaintext still sitting in the table as a correlator: S-20's failure
-   * reached through the quoting, not through the binding.
+   * text, so they agree with it. Key destroyed, ciphertext destroyed, record COMPLETE, and the HMAC
+   * of the erased plaintext still sitting in the table as a correlator: S-20's failure reached
+   * through the quoting, not through the binding.
    */
   @Test
-  void probe_a_reserved_word_subject_column_is_not_silently_missed_by_the_erasure() {
+  void probe_a_reserved_word_column_quoted_by_the_mapping_is_cleared() {
     ShreddingException refusal = null;
     ConfigurableApplicationContext context = null;
     try {
@@ -304,12 +310,12 @@ class CipherProbeTenthPassTest {
   /**
    * The third face: {@code ShreddedModel.columnName(Field)} returns the raw text of
    * {@code @Column(name = ...)}, quotes and all, and the starter's own {@code quote()} then doubles
-   * them - so a {@code @Shredded} column the mapping quotes is addressed as the identifier
-   * {@code "Email"} with the quote characters in the name. Startup must refuse that mapping, not
-   * boot and fail on whichever row is written first.
+   * them - so a {@code @Shredded} column the mapping quotes is addressed as the identifier {@code
+   * "Email"} with the quote characters in the name. Startup must refuse that mapping, not boot and
+   * fail on whichever row is written first.
    */
   @Test
-  void probe_a_quoted_shredded_column_is_refused_at_startup_not_at_the_first_write() {
+  void probe_a_quoted_shredded_column_is_settled_at_startup_not_at_the_first_write() {
     ShreddingException refusal = null;
     ConfigurableApplicationContext context = null;
     try {

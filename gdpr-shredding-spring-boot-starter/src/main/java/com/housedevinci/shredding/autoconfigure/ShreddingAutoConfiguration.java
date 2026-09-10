@@ -164,9 +164,21 @@ public class ShreddingAutoConfiguration {
   @Bean
   @ConditionalOnMissingBean
   public JdbcErasureStore shreddingErasureStore(
-      DataSource dataSource, ErasureChain chain, ShreddedModel model) {
+      DataSource dataSource,
+      ErasureChain chain,
+      ShreddedModel model,
+      EntityManagerFactory entityManagerFactory) {
     JdbcSupport.initializeSchema(dataSource);
-    return new JdbcErasureStore(dataSource, chain, model.blindIndexColumns());
+    // Design addendum 4, §4.5: the store's own statements are never the only thing that checks
+    // them. The residual is rendered by Hibernate from the mapping, on the erasure's own
+    // connection - see HibernateBlindIndexResidual for the contract and its two hazards.
+    return new JdbcErasureStore(
+        dataSource,
+        chain,
+        model.blindIndexColumns(),
+        new HibernateBlindIndexResidual(
+            entityManagerFactory.unwrap(org.hibernate.engine.spi.SessionFactoryImplementor.class),
+            model));
   }
 
   @Bean

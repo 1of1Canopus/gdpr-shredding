@@ -22,8 +22,8 @@ import java.util.regex.Pattern;
  * own {@code Identifier.toIdentifier} - and {@link #sql()} renders exactly what Hibernate renders:
  * bare when the mapping is unquoted, {@code "}-wrapped when the mapping quotes. That is why, unlike
  * {@link TableRef#sql()}, this never blanket-quotes: {@code @Column(name = "OWNER_ID")} is an
- * unquoted, upper-case, entirely ordinary mapping whose physical column PostgreSQL folded to
- * {@code owner_id}, and rendering {@code "OWNER_ID"} would address a column that does not exist.
+ * unquoted, upper-case, entirely ordinary mapping whose physical column PostgreSQL folded to {@code
+ * owner_id}, and rendering {@code "OWNER_ID"} would address a column that does not exist.
  *
  * <p><b>Dialect.</b> PostgreSQL only, as {@link TableRef} is. {@code "} is the only quote character
  * this renders, and the starter refuses at startup any dialect that is not a PostgreSQL dialect
@@ -115,7 +115,9 @@ public record ColumnRef(String text, boolean quoted) {
     return new ColumnRef(text, true);
   }
 
-  /** The identifier to interpolate into a statement: bare when unquoted, {@code "}-wrapped when not. */
+  /**
+   * The identifier to interpolate into a statement: bare when unquoted, {@code "}-wrapped when not.
+   */
   public String sql() {
     return quoted ? "\"" + text + "\"" : text;
   }

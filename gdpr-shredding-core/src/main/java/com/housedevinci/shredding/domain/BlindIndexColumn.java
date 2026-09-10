@@ -8,10 +8,14 @@ import java.util.regex.Pattern;
  * Where one blind index lives, so an erasure can null it in the same transaction that destroys the
  * key (control 10).
  *
- * <p>These names are interpolated into SQL identifiers, which no bind parameter can carry, so they
- * are validated here against a deliberately narrow pattern and rejected at startup otherwise. The
- * <em>values</em> compared against {@code subjectColumn} and {@code tenantColumn} are always bind
- * parameters.
+ * <p><b>Design addendum 4 (S-22).</b> All three columns are {@link ColumnRef}s, built in one place
+ * only - from the persister's own selection expression - and never from an annotation's text. What
+ * an annotation writes is a <em>lookup key</em>, matched case-sensitively against the mapped
+ * columns and then thrown away; what reaches SQL is the column Hibernate itself addresses, quoted
+ * if and only if the mapping quotes it. There is no pattern to validate here any more, because
+ * there is no hand-written name left to validate: {@code ColumnRef} refuses what it cannot render.
+ * The <em>values</em> compared against {@code subjectColumn} and {@code tenantColumn} are always
+ * bind parameters.
  *
  * <p><b>Design addendum 3, change 2 (applied §3.2).</b> {@code tenantColumn} is a <em>column</em>
  * name - what the erasure's {@code WHERE} matches on - while the write path reads its value out of
@@ -42,58 +46,29 @@ import java.util.regex.Pattern;
  */
 public record BlindIndexColumn(
     TableRef table,
-    String column,
-    String subjectColumn,
-    String tenantColumn,
+    ColumnRef column,
+    ColumnRef subjectColumn,
+    ColumnRef tenantColumn,
     Optional<String> tenantProperty,
     Optional<String> subjectProperty) {
 
-  private static final Pattern IDENTIFIER = Pattern.compile("[a-z_][a-z0-9_]{0,62}");
   private static final Pattern PROPERTY = Pattern.compile("[A-Za-z_$][A-Za-z0-9_$]{0,127}");
 
   public BlindIndexColumn {
     Objects.requireNonNull(table, "table");
-    column = identifier("column", column);
-    subjectColumn = identifier("subjectColumn", subjectColumn);
-    tenantColumn = identifier("tenantColumn", tenantColumn);
+    Objects.requireNonNull(column, "column");
+    Objects.requireNonNull(subjectColumn, "subjectColumn");
+    Objects.requireNonNull(tenantColumn, "tenantColumn");
     Objects.requireNonNull(tenantProperty, "tenantProperty");
     Objects.requireNonNull(subjectProperty, "subjectProperty");
     tenantProperty.ifPresent(p -> property("tenantProperty", p));
     subjectProperty.ifPresent(p -> property("subjectProperty", p));
   }
 
-  /** A column whose tenant and subject columns have not been resolved to properties yet. */
-  public static BlindIndexColumn unresolved(
-      TableRef table, String column, String subjectColumn, String tenantColumn) {
-    return new BlindIndexColumn(
-        table, column, subjectColumn, tenantColumn, Optional.empty(), Optional.empty());
-  }
-
-  /** The same column, addressed at the table the persister maps (change 9, §3.9b). */
-  public BlindIndexColumn at(TableRef resolvedTable) {
-    return new BlindIndexColumn(
-        resolvedTable, column, subjectColumn, tenantColumn, tenantProperty, subjectProperty);
-  }
-
   /** The same column, with the properties the startup scan resolved both columns to. */
   public BlindIndexColumn resolvedTo(String tenant, String subject) {
     return new BlindIndexColumn(
         table, column, subjectColumn, tenantColumn, Optional.of(tenant), Optional.of(subject));
-  }
-
-  private static String identifier(String what, String value) {
-    Objects.requireNonNull(value, what);
-    String lower = value.toLowerCase(java.util.Locale.ROOT);
-    if (!IDENTIFIER.matcher(lower).matches()) {
-      throw new ShreddingException(
-          ErrorCodes.CONFIG,
-          "@BlindIndex "
-              + what
-              + " must match "
-              + IDENTIFIER.pattern()
-              + " (it becomes a SQL identifier, which cannot be a bind parameter)");
-    }
-    return lower;
   }
 
   private static String property(String what, String value) {

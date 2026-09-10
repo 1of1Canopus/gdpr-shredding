@@ -114,7 +114,7 @@ public final class ShreddingStartupCheck implements InitializingBean {
         .blindIndexFields()
         .forEach(
             index -> {
-              if (index.column().subjectProperty().isEmpty()) {
+              if (index.resolvedColumn().isEmpty() || index.column().subjectProperty().isEmpty()) {
                 throw new ShreddingException(
                     ErrorCodes.CONFIG,
                     "@BlindIndex on "
@@ -122,7 +122,7 @@ public final class ShreddingStartupCheck implements InitializingBean {
                         + "."
                         + index.fieldName()
                         + " has no property resolved for subjectColumn=\""
-                        + index.column().subjectColumn()
+                        + index.subjectColumnKey()
                         + "\". Build the ShreddedModel with ShreddedModel.scan(entities,"
                         + " allowSecondLevelCache, properties, entityManagerFactory) so the column"
                         + " the erasure matches on can be resolved to the property the write path"
@@ -136,7 +136,7 @@ public final class ShreddingStartupCheck implements InitializingBean {
                         + "."
                         + index.fieldName()
                         + " has no property resolved for tenantColumn=\""
-                        + index.column().tenantColumn()
+                        + index.tenantColumnKey()
                         + "\". Build the ShreddedModel with ShreddedModel.scan(entities,"
                         + " allowSecondLevelCache, properties, entityManagerFactory) so the column"
                         + " the erasure matches on can be resolved to the property the write path"
