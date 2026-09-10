@@ -8,6 +8,26 @@ are fine here for now — but before this repo is made public, move them to
 tests, README, CHANGELOG, LICENSE/NOTICE, SECURITY.md, CONTRIBUTING.md, user docs, CI, the
 probe script). See how `agent-guard` did it (2026-09-10).
 
+**S-13 / S-7b (blind index tenant binding) — CLOSED, built (Thor, 2026-09-10).** Design addendum 3
+was approved with seven changes and all seven are built and marked "applied §3.x" in
+`docs/plans/read-path-design.md` ("Addendum 3 as built"): `tenantColumn` resolved from column to
+property through the Hibernate metamodel at startup, exactly one basic `String` property on the
+primary table or a refusal naming what was found (§3.1); the resolution stored on
+`BlindIndexColumn` so the write path and the erasure path read one object (§3.2); null, blank and
+non-`String` tenant column values refused at the write (§3.3); **the write refused when the tenant
+the indexed field's data key is derived under is not the row's tenant column value** (§3.4, the one
+that closes the finding), with the index then derived under that column value; the cleared columns
+read back inside the erasure transaction - still populated refuses with the new `SHRED-ERASURE-004`,
+the same subject under another tenant value WARNs with the count (§3.5); clean break, no
+compatibility path (§3.6); the bulk-update residual stated in `SECURITY-NOTES.md` beside the control
+(§3.7). S-7's startup refusal is relaxed on change 4's terms, which restores the S-2 shape.
+Cipher's repro is promoted out of `src/test-pending/java` and green as a refusal - the shape it used
+is erasable under no keying this module can choose - with `OwnedNote` in the same file showing the
+correctly declared shape erasing key, ciphertext and index together, leaving no index bytes under
+any tenant value the row ever carried. 16 new/rewritten probes across four files. Full tree:
+**251 tests, 0 failures** (core 92, starter 142, sample 17), coverage core 84.8% line / starter
+87.9% line, all JaCoCo gates met. QUESTIONS S-7b and S-13 closed.
+
 **Eighth pass done (Cipher, 2026-09-10, `fa6f477`). NOT MERGEABLE: one HIGH.** S-13 - S-7b, the
 general case of S-7, reproduced rather than argued: with no field declaring a tenant anywhere, the
 blind index is derived under the ambient `TenantSupplier` while the erasure matches on the row's own
@@ -179,7 +199,7 @@ Full `./mvnw -B clean verify` green with Docker up.
 | Module | Tests | Notes |
 |---|---|---|
 | `gdpr-shredding-core` | 92 | includes the CIPHER-01/02/03/04/05/10/15 probes, the Testcontainers PostgreSQL suite, and the sixth pass's `RowIdTest` (7), `EncryptedValueV2Test` (4) and `FieldCipherRowBindingTest` (4) |
-| `gdpr-shredding-spring-boot-starter` | 121 | includes the sixth pass's `FrameworkMatrixTest` (13, the §2 matrix), `LoadedStateHostileMappingsTest` (3, the D4 startup refusals), and the six promoted fifth-pass probes - `CipherProbeFifthPassTest` (3: C-33/C-34/C-35), `CipherProbeEvictionTest` (1: C-36), `CipherProbeBracketUnwindTest` (4); and `ShreddingIntegrationTest` (real Hibernate/Testcontainers coverage of the event listener, the context stack and the auto-configuration bean graph), `CipherProbeSpelTest`'s L12 probe, the third pass's `CipherProbeReadScopeTest` (C-17/18/22/23/C-30), `CipherProbeReverseScanTest` (C-19, isolated context), `CipherProbeMatrixTest`/`CipherProbeMatrix2Test` (the read-path and `@Immutable` sweeps, C-20/21/C-31), the fourth pass's `CipherProbeFrameTest` (C-26/C-27, six probes) and `CipherProbeEmbeddableScanTest` (C-29, two probes: `@Embedded` and `@ElementCollection`), and the fifth pass's `CipherProbeScanDepthTest` (C-37, four probes: two levels of `@Embeddable`, an `@ElementCollection` of basic values, and the map-key index descriptor) and `CipherProbeCompositeIdTest` (C-38, two probes); and the seventh pass's region-residue set - `CipherProbeRegionEpochTest` (6), `CipherProbeRegionResidueTest` (2, promoted from `src/test-pending`) and two more in `CipherProbeReadScopeTest` |
+| `gdpr-shredding-spring-boot-starter` | 142 | includes the sixth pass's `FrameworkMatrixTest` (13, the §2 matrix), `LoadedStateHostileMappingsTest` (3, the D4 startup refusals), and the six promoted fifth-pass probes - `CipherProbeFifthPassTest` (3: C-33/C-34/C-35), `CipherProbeEvictionTest` (1: C-36), `CipherProbeBracketUnwindTest` (4); and `ShreddingIntegrationTest` (real Hibernate/Testcontainers coverage of the event listener, the context stack and the auto-configuration bean graph), `CipherProbeSpelTest`'s L12 probe, the third pass's `CipherProbeReadScopeTest` (C-17/18/22/23/C-30), `CipherProbeReverseScanTest` (C-19, isolated context), `CipherProbeMatrixTest`/`CipherProbeMatrix2Test` (the read-path and `@Immutable` sweeps, C-20/21/C-31), the fourth pass's `CipherProbeFrameTest` (C-26/C-27, six probes) and `CipherProbeEmbeddableScanTest` (C-29, two probes: `@Embedded` and `@ElementCollection`), and the fifth pass's `CipherProbeScanDepthTest` (C-37, four probes: two levels of `@Embeddable`, an `@ElementCollection` of basic values, and the map-key index descriptor) and `CipherProbeCompositeIdTest` (C-38, two probes); and the seventh pass's region-residue set - `CipherProbeRegionEpochTest` (6), `CipherProbeRegionResidueTest` (2, promoted from `src/test-pending`) and two more in `CipherProbeReadScopeTest`; and the eighth pass's blind-index tenant-binding set (addendum 3) - `CipherProbeBlindIndexAmbientTenantTest` (6, promoted from `src/test-pending`), `CipherProbeBlindIndexTenantColumnTest` (5 startup shapes), `CipherProbeBlindIndexResidualTest` (2) and `CipherProbeBlindIndexTenantTest` (3, rewritten from a startup refusal into per-row write refusals) |
 | `gdpr-shredding-sample` | 17 | includes the CIPHER-01 (moved-blob), QUESTIONS #4 (detached-merge, now wrapped in `ShreddingContext.withReadBracket`), CIPHER-08 (stale-scope), the live-actuator and the log-scan probes |
 | **total** | **230** | |
 
@@ -189,9 +209,9 @@ Nothing is skipped and nothing is `@Disabled`.
 
 | Module | Covered / Total | % | Gate |
 |---|---|---|---|
-| `gdpr-shredding-core` | — | 85.3% | 80% |
-| `gdpr-shredding-spring-boot-starter` | — | 88.1% | 80% |
-| `gdpr-shredding-sample` | 63 / 95 | 66.3% | 30% smoke gate (L2) |
+| `gdpr-shredding-core` | — | 84.8% | 80% |
+| `gdpr-shredding-spring-boot-starter` | — | 87.9% | 80% |
+| `gdpr-shredding-sample` | 63 / 95 | 63.2% | 30% smoke gate (L2) |
 
 The JaCoCo executions moved from `gdpr-shredding-core`'s own POM to the parent's
 `<build><plugins>`, so all three modules now inherit them (L2). The starter's own tests previously

@@ -6,6 +6,53 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed (eighth pass at `fa6f477`, S-13 / S-7b: a blind index survives the erasure of the subject it was derived for)
+
+**HIGH.** The index was derived under `Scope.tenantFor(of-field)` - a field's declared tenant, else
+the ambient `TenantSupplier` - while `clearBlindIndexes` matched the row's **stored** `tenantColumn`
+value. An application whose tenant column holds an owning company while the supplier yields the
+acting organisation therefore completed an erasure, destroyed the key, killed the ciphertext,
+reported success, and left `HMAC(secret, tenant | entity | field | plaintext)` in the table: a
+stable cross-row correlator for the erased subject and, over a low-entropy value such as an email
+address, a confirmation oracle for anyone holding the index secret. Fixed per design addendum 3 with
+Cipher's seven changes (`docs/plans/read-path-design.md`, "Addendum 3 as built"):
+
+- `tenantColumn` is a **column** name and is resolved once, at startup, through the entity's own
+  column mapping to the single basic `String` property on the primary table that maps to it. None,
+  two, non-`String`, a formula, the identifier, an encrypted column, or a match only inside an
+  `@Embeddable` are startup refusals (`SHRED-CONFIG-001`) naming entity, index field, column and
+  what was found (§3.1).
+- The resolution lives on `BlindIndexColumn` beside the column it came from, so the write path and
+  the erasure path read one object rather than two independently computed tenants (§3.2).
+- A null, blank or non-`String` tenant column value refuses the write with
+  `SHRED-UNVERIFIED-WRITE`: an index no `WHERE tenantColumn = ?` can match is an index no erasure
+  can destroy (§3.3).
+- **The write is refused when the tenant the indexed field's data key is derived under is not the
+  row's tenant column value** (§3.4). This is what closes the finding: one erasure request names one
+  tenant and one subject, so the key, the ciphertext and the index are reachable together only when
+  all three are under one tenant. The index is then derived under that column value.
+- The erasure reads the cleared columns back inside its own transaction: still populated refuses the
+  erasure with the new **`SHRED-ERASURE-004`** and rolls everything back rather than recording a
+  completion that did not happen; the same subject under a different tenant value is a WARN with the
+  count, never a refusal (§3.5).
+- Clean break, no compatibility path: the branch is unreleased and nothing tries the old keying
+  (§3.6). The residual the module cannot see - a bulk `UPDATE t SET tenant_id = ?` outside Hibernate
+  - is stated in `SECURITY-NOTES.md` beside the control and surfaces in §3.5's WARN (§3.7).
+
+Probes: `CipherProbeBlindIndexAmbientTenantTest` (6, Cipher's repro promoted out of
+`src/test-pending/java`), `CipherProbeBlindIndexTenantColumnTest` (5 startup shapes, including the
+correct camel-case-property configuration that must still boot),
+`CipherProbeBlindIndexResidualTest` (2), `CipherProbeBlindIndexTenantTest` (3, rewritten).
+
+### Changed (S-7's startup refusal relaxed on change 4's terms)
+
+A `@BlindIndex(of = ...)` field may declare its own `@Shredded(tenant = ...)` again. The seventh
+pass refused that mapping at boot because the module could not prove, at scan time, that the
+declared tenant would ever equal the value in `tenantColumn`; it is now checked per row at the
+write, so the shape is allowed exactly when it is erasable. That restores the S-2 shape (one row,
+two tenants, one of them indexed) and gives an application with an acting organisation distinct from
+an owning one a correct way to declare it.
+
 ### Added (QUESTIONS #26: a hard cap on the write-verification ledger)
 
 **Cipher's ruling on the seventh pass, accepted with a number.** Settlement discharges the ledger at

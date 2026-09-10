@@ -65,11 +65,30 @@ email address a full-width index would be an offline dictionary outright. Two co
 
 Do not put a blind index on a field you do not actually query by.
 
-The erasure matches on the row's own `tenantColumn` value, not on any one field's declared tenant
-expression: the value in `tenantColumn` must be the tenant the index was derived under, or the
-erasure cannot find it, so a `@BlindIndex(of = ...)` field may not declare its own
-`@Shredded(tenant = ...)` - startup refuses it (`SHRED-CONFIG-001`) rather than write an index that
-a completed erasure could silently fail to reach (S-7).
+**The tenant binding (S-7, S-13, design addendum 3).** An erasure request names one tenant and one
+subject. For it to reach the data key, the ciphertext and the index, all three have to be under one
+tenant, so:
+
+- the index is derived under **that row's own `tenantColumn` value**, the one value the erasure's
+  `WHERE` can match, read out of the state array by the property `tenantColumn` was resolved to at
+  startup (`tenantColumn` is a *column* name; the resolution must find exactly one basic `String`
+  property mapped to it on the entity's primary table, or startup is refused with
+  `SHRED-CONFIG-001` naming what it found);
+- a **write is refused** (`SHRED-UNVERIFIED-WRITE`) when that value is null or blank, or when it is
+  not the tenant the indexed field's data key is derived under. A tenant column holding something
+  other than the tenant the value's key is under is erasable under no keying this module could
+  choose; refusing it loudly, naming both values, is the outcome. An application whose acting
+  organisation differs from the owning one declares `@Shredded(tenant = ...)` as the owning one -
+  what its tenant column holds - and that shape works;
+- the erasure **reads the cleared columns back inside its own transaction**: an index still
+  populated for the erased subject refuses the erasure (`SHRED-ERASURE-004`) instead of recording
+  it, and an index under a different tenant value for the same subject id is a WARN with the count.
+
+**Residual.** A row whose tenant column is changed by a bulk update outside Hibernate (JPQL or
+native `UPDATE t SET tenant_id = ?`) fires no listener and re-derives nothing, so it keeps an index
+derived under its former tenant; the erasure for its new tenant then refuses rather than reporting
+success, and the erasure for its former tenant reports the leftover in the WARN above. A tenant move
+made *through* Hibernate is refused outright: the tenant is bound into every stored value's header.
 
 ### The read path: the converter accuses, it never authorises (fifth pass, `docs/plans/read-path-design.md`)
 

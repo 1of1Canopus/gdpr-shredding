@@ -873,7 +873,34 @@ property is independently carried by `BatchedWriteVerificationTest`'s seventeen 
 
 ---
 
-## S-7b Blind index tenant binding: the general case, where `tenantColumn` differs from the ambient tenant (design stop taken, 2026-09-10 — for Cipher)
+## S-7b / S-13 Blind index tenant binding — CLOSED (Thor, 2026-09-10)
+
+**Built, all seven of Cipher's changes.** `docs/plans/read-path-design.md`, "Addendum 3 as built",
+marks each one applied §3.1–§3.7 and names its probes; `CHANGELOG.md` carries the user-facing
+summary and `SECURITY-NOTES.md` the control and its residual.
+
+**What the answer turned out to be.** Not "derive under the column value" on its own - Cipher's
+change 4 is right that (a) alone leaves the ciphertext under a third tenant and closes nothing. The
+invariant built is: *for a row to be erasable by one request, the tenant its data key was derived
+under, the tenant its index was derived under and the value in its `tenantColumn` are one value*,
+enforced per row at the write. With that in force, deriving under `state[tenantColumn]` documents
+itself and the two derivations are equal by construction.
+
+**The migration consequence I stopped for is answered by change 6:** clean break, no compatibility
+path, the branch is unreleased, no code tries the old keying.
+
+**One consequence worth a decision (not blocking).** Isis removed `@BlindIndex` from the sample's
+`Customer` under S-7, because that entity is genuinely multi-tenant per write and its `email` field
+needs `tenant = "#{tenantId}"`. Change 4 makes exactly that shape legal again (`tenantId` is what
+the row's tenant column holds), so the sample can demonstrate equality-lookup-over-encrypted-data
+again with no security cost. **Recommended: restore it** as a small, deliberate sample task. Not
+done here: it is product-demo work, not part of this finding, and it touches
+`CustomerRepository`/`CustomerService`/`SampleEndToEndTest`/`LogScanTest` assertions
+(`blindIndexColumnsCleared()` back to 1).
+
+---
+
+## S-7b (historical) Blind index tenant binding: the general case, where `tenantColumn` differs from the ambient tenant (design stop taken, 2026-09-10 — for Cipher)
 
 **Stop taken, no code.** Cipher's S-7 names the special case S-2 opened (an index derived under a
 field's *declared* tenant) and hands the general case to a design stop: an application whose
@@ -897,6 +924,13 @@ not blocked on this.
 ---
 
 ## S-7 (2026-09-10, Isis) — startup refusal closes the declared shape; the general form stays Thor's design stop
+
+**Superseded 2026-09-10 (Thor, addendum 3 change 4): the startup refusal below is relaxed.** A
+`@BlindIndex(of = ...)` field may declare its own tenant again; the write is refused, per row, when
+that tenant is not the row's `tenantColumn` value. Cipher approved the relaxation explicitly ("agreed,
+and change 4 is what makes it safe"). `CipherProbeBlindIndexTenantTest` is rewritten accordingly, and
+the fixture changes Isis made to keep the tree green (`fixture.Gadget`, the sample's `Customer`) are
+no longer required by this module - see the S-13 entry above for the sample recommendation.
 
 Closed for the shape S-7's fix names: `ShreddedModel.scan` refuses startup (`SHRED-CONFIG-001`) when
 a `@BlindIndex(of = ...)` names a `@Shredded` field that itself declares a `tenant` expression -

@@ -194,6 +194,7 @@ There is no fail-open property anywhere in this module.
 | `SHRED-CONFIG-001` | misconfiguration, naming the property |
 | `SHRED-ERASURE-002` | the erasure log has rows but no anchor row |
 | `SHRED-ERASURE-003` | this instance's keyed/unkeyed mode disagrees with the trail |
+| `SHRED-ERASURE-004` | an erasure found a blind index still populated after clearing it; refused, not recorded |
 | `SHRED-INVALID-001` | boundary validation failed |
 | `SHRED-READ-UNSCOPED` | a `@Shredded` converter ran with no read region open - an unwrapped `EntityManager` or hand-written-DAO read, a `Stream<T>` drained after its repository call returned, an `@Async` continuation, or a `StatelessSession` |
 | `SHRED-READ-UNVERIFIED` | a decrypt happened inside an open read region but no entity load ever installed it before the region closed - a projection, or residue from a region an error unwound past - see "How the read path verifies" above |
@@ -266,6 +267,17 @@ It is a **prefilter**. It is truncated (`shredding.blind-index.bits`, default 64
 must re-verify by decrypting the candidates - see `CustomerService.findByEmail` in the sample.
 
 An erasure nulls the erased subject's blind-index columns. That is not configurable.
+
+`tenantColumn` names a **column**, not a property; it is resolved at startup to the single basic
+`String` property of the entity that maps to it (none, two, a non-`String` one, or one visible only
+inside an `@Embeddable` are startup refusals). The index is derived under that row's own tenant
+column value, and a write is refused (`SHRED-UNVERIFIED-WRITE`) when that value is null or blank, or
+when it is not the tenant the indexed field's data key is derived under - one erasure request has to
+reach the key, the ciphertext and the index together. So a query helper computes the index under the
+tenant the row's tenant column holds, which is also the tenant it passes to the erasure.
+
+The erasure reads the columns back inside its own transaction: still populated means the erasure is
+refused (`SHRED-ERASURE-004`), not recorded.
 
 ## The cross-node cache window
 

@@ -788,3 +788,65 @@ erasure; a write whose field tenant and column value disagree refused, naming bo
 startup (change 1); an erasure that finds an index still populated refused rather than recorded
 (change 5); and the blind-index *query* helper still finding a row it wrote, since change 4 moves
 what the query must compute under.
+
+### Addendum 3 as built (2026-09-10, Thor)
+
+All seven changes applied, each marked in the code with the section number below.
+
+**§3.1 — change 1 (column, not property).** `tenantColumn` is resolved to a property through the
+persister's own column mapping, case-insensitively and allowing a quoted identifier, in
+`ShreddedModel.resolveTenantColumns`/`resolveTenantProperty`, once, during the startup scan. It must
+yield **exactly one** property that is basic, `String`-typed, mapped to the entity's primary table
+(the table the erasure's `UPDATE` names), not a formula, not the identifier and not itself
+`@Shredded`; a match found only inside an `@Embeddable` or an `@ElementCollection` is refused with
+that path in the message. Every refusal is `SHRED-CONFIG-001` naming entity, index field,
+`tenantColumn` and what was found. The recommendation as written (`@BlindIndex(tenantColumn =
+"tenant_id")` looked up among property names) would have refused every correct configuration:
+`CipherProbeBlindIndexTenantColumnTest.probe_a_column_name_over_a_camel_case_property_starts_up` is
+that regression, and it boots.
+
+**§3.2 — change 2 (one resolution, one object).** The resolved property lives on `BlindIndexColumn`
+(`tenantProperty`, an `Optional<String>` beside the `tenantColumn` it came from), so the write path
+reads the property and the erasure path reads the column off one object.
+`JdbcErasureStore` is constructed from exactly those objects (`model.blindIndexColumns()`).
+`ShreddingStartupCheck` refuses an unresolved one, so a model built without an
+`EntityManagerFactory` cannot silently write indexes under something nobody resolved. Probe:
+`CipherProbeBlindIndexAmbientTenantTest.probe_one_object_carries_the_column_the_erasure_matches_and_the_property_the_write_reads`.
+
+**§3.3 — change 3 (null, blank, non-`String` at write time).** `ShreddingEventListener.rowTenant`
+refuses with `SHRED-UNVERIFIED-WRITE` (the closer vocabulary, as change 3 allows), naming entity,
+index field and column. Two probes, on a fixture whose tenant column is deliberately nullable.
+
+**§3.4 — change 4 (the one that closes S-13).** `writeBlindIndexes` refuses the write when
+`Scope.tenantFor(index.ofFieldName())` is not equal to the row's `tenantColumn` value, naming both,
+the field and the column; the index is then derived under that column value, so the two derivations
+are equal by construction and (a) and (b) stop being alternatives. Cipher's repro
+(`CipherProbeBlindIndexAmbientTenantTest`) was RED on `c6009aa` and is green as a **refusal**: the
+shape it used - a tenant column holding something other than the tenant the value's key is derived
+under - is erasable under no keying this module can choose, and it never reaches the table.
+`OwnedNote` in the same file is that application shape declared correctly (`@Shredded(tenant =
+"#{tenantId}")`, the owning organisation), and it erases key, ciphertext and index together, with no
+index bytes left under any tenant value the row ever carried. S-7's startup refusal is relaxed on
+change 4's terms; `CipherProbeBlindIndexTenantTest` is rewritten from "this mapping is refused at
+boot" to "this row is refused at the write, and the agreeing row is written and erasable".
+
+**§3.5 — change 5 (verify inside the erasure transaction).** `JdbcErasureStore.verifyCleared`, after
+the `UPDATE`s and before the record is appended, per indexed table: a residual count for this
+(tenant, subject) that is not zero **refuses** the erasure with the new `SHRED-ERASURE-004` and
+rolls the transaction back, key destruction and record included; the same subject under a different
+tenant value (`IS DISTINCT FROM`, so a null tenant column is counted) is a **WARN** with the count,
+never a refusal. Probes: a `BEFORE UPDATE` trigger that puts the index straight back, and a second
+row of the same subject under another tenant.
+
+**§3.6 — change 6 (clean break).** The branch is unreleased and there is no compatibility path: an
+erasure that searches for an index under two keys is an erasure that will keep finding reasons to
+search under a third. Any pre-existing deployment (there are none) would rebuild its index columns.
+Nothing in the code tries the old keying.
+
+**§3.7 — change 7 (the residual the module cannot see).** Stated in `SECURITY-NOTES.md` beside the
+blind-index control, paired with §3.5's WARN, which is where it surfaces. A tenant move made
+*through* Hibernate is refused outright by the subject-immutability check (the tenant is in every
+stored value's header), so the bulk update outside Hibernate is the only way a row's tenant column
+can change under a live index -
+`CipherProbeBlindIndexAmbientTenantTest.probe_a_row_cannot_be_moved_between_tenants_through_hibernate`
+records that, so "the index follows the row" is checked rather than assumed.
