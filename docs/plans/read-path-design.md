@@ -1015,6 +1015,29 @@ naming the mapping; and no erasure records `COMPLETE` unless Hibernate, on the e
 *Auto-quoting (revision correction 1).* `probe_an_auto_quoted_column_boots_and_round_trips`
 *Architecture.* ArchUnit: `ColumnRef`, like every core domain type, imports nothing outside the JDK.
 
+### Addendum 4 as built (2026-09-10, Thor)
+
+Built as designed, with the revision's two corrections applied to the text first (`606ef97`). Three
+things worth writing down because they are not what the design said:
+
+1. **`getCustomReadExpression()` is never null.** Hibernate populates a templated read
+   (`{@}.<selectionExpression>`) and a write (`?`) for *every* column, so change 4's "non-null means
+   a transformer" would have refused every application on its first boot. A `@ColumnTransformer` is
+   detected as a read that is not the plain template of this column's own expression, or a write that
+   is not a bare parameter. Same property, different predicate.
+2. **Spring Boot's default physical naming strategy lower-cases `@Column(name = "OWNER_ID")`.** The
+   unquoted-upper-case shape change 2 exists for only appears under Hibernate's own
+   `PhysicalNamingStrategyStandardImpl`, so `probe_an_unquoted_upper_case_column_is_addressed_folded`
+   pins that strategy. Under Spring Boot's default the expression is `owner_id`, and every other
+   probe covers it.
+3. **§4.5's cost, measured** on the probe suite's PostgreSQL container: 214 ms for the first erasure
+   in a JVM (Hibernate compiling the HQL, once) and 1.3–4.2 ms, median 1.8 ms, for every one after.
+
+`src/test-pending` is removed. 9 of the 17 new probes were red on `606ef97` before the hook; the one
+that could not be — `probe_a_column_name_containing_a_quote_character_is_refused`, which pins
+`ColumnRefs.parse`, a unit with no prior behaviour — is recorded as a deviation in `QUESTIONS.md`
+under S-22.
+
 ### Cipher review of addendum 4
 
 **APPROVED WITH CHANGES (13).** The shape is right: one type, built from the mapping, annotation text

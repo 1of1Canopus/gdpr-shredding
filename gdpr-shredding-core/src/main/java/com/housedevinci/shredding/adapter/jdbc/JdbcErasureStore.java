@@ -283,10 +283,8 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
    *       is what this module asked for, not evidence of what the table now holds. Between the
    *       startup scan and this transaction the column may have gained a trigger, a rule, a
    *       rewriting view or a new default, any of which leaves an HMAC of the erased plaintext
-   *       behind while the Between the startup scan and this transaction the column may have gained
-   *       a trigger, a rule, a rewriting view or a new default, any of which leaves an HMAC of the
-   *       erased plaintext behind while the erasure record claims the index was cleared. Also
-   *       refuses with {@link ErrorCodes#ERASURE_INDEX_RESIDUAL}.
+   *       behind while the erasure record claims the index was cleared. Also refuses with {@link
+   *       ErrorCodes#ERASURE_INDEX_RESIDUAL}.
    *   <li><b>The cross-tenant one is a WARN, never a refusal.</b> An index under a
    *       <em>different</em> tenant value for the same subject id may legitimately belong to
    *       another tenant that happens to use the same subject identifier, and refusing would let
@@ -307,8 +305,11 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
    * <p><b>Cost.</b> One indexed {@code COUNT} per (erasure, blind-index column) for each of the two
    * read-backs, on a connection that already holds the row locks, inside a transaction that already
    * does an advisory lock, a {@code SELECT ... FOR UPDATE}, a {@code DELETE}, a tombstone insert
-   * and a hash-chain append. Measured on the probe suite's PostgreSQL container: under 2 ms per
-   * column on a table of a few thousand rows. Erasure is rare and human-initiated.
+   * and a hash-chain append. Measured on the probe suite's PostgreSQL container: <b>214 ms</b> for
+   * the very first erasure in a JVM - that is Hibernate compiling the HQL, once, not the query -
+   * and <b>1.3-4.2 ms</b> (median 1.8 ms) for every one after it. Erasure is rare and
+   * human-initiated; if it is ever too slow the answer is an index on (tenant, subject), not a
+   * control that switches itself off.
    */
   private void verifyCleared(Connection c, TenantId tenant, SubjectId subject) throws SQLException {
     for (BlindIndexColumn column : blindIndexColumns) {
