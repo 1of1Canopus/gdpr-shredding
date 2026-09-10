@@ -127,6 +127,86 @@ own statements. That is the intended property: this module addresses the table H
 This module's own tables (`shredding_*`) are unqualified deliberately and are expected on the
 runtime role's `search_path`.
 
+### Which column this module's statements address (S-22, S-24)
+
+Every column identifier this module interpolates — the blind-index `UPDATE`'s three columns, the two
+read-backs that verify it, the post-hoc header check, the `IDENTITY` rebind and the
+subject-immutability `SELECT` — is a `ColumnRef` built in **one** place: from the Hibernate
+persister's own selection expression for that property, parsed by Hibernate's static
+`Identifier.toIdentifier`. It renders exactly what Hibernate renders — bare when the mapping is
+unquoted, `"`-wrapped when the mapping quotes — and at startup both renderings, Hibernate's and this
+module's, must reproduce the mapping's expression character for character or startup refuses.
+
+It used to be a `String` taken from `@Column(name = ...)` or from `@BlindIndex(subjectColumn = ...)`,
+lower-cased by a hand-written `unquote`, and then quoted by a hand-written `quote` in the starter and
+not quoted at all in the erasure store. Three consequences, all of them silent:
+
+- a subject column named `user` — a reserved word the mapping must quote — was interpolated as
+  `WHERE user = ?`, which parses, compares the connection's *role name*, and matches nothing. The
+  erasure cleared no row, its own read-back was built from the same text and agreed with it, the key
+  and the ciphertext were destroyed, the record said `COMPLETE`, and the HMAC of the erased plaintext
+  stayed in the table as a correlator;
+- a quoted `"Owner"` and a plain `owner` in the same table fold to one name, so an erasure asked for
+  one addressed the other: a bystander's index cleared, the victim's kept;
+- a `@Shredded` column the mapping quotes was addressed as an identifier with the quote characters
+  *inside* the name, which boots cleanly and fails on whichever row is written first (S-24).
+
+**What the annotations mean now.** `@BlindIndex(subjectColumn = ...)` and `tenantColumn` are
+**lookup keys**, not identifiers: they are matched **case-sensitively** against the text of each
+mapped column and then thrown away. There is no case-insensitive second pass, and none may be added
+— that fold is how the erasure came to address a different column in the first place. The refusal is
+therefore the whole control: it lists the entity's mapped columns verbatim *with their quoting* and
+names the ones that differ from the given text only by case. A key that matches one column exactly
+while another column of the same entity differs from it only by case is also refused: which was meant
+cannot be read from the text. `@Shredded`'s own column is never matched by text at all — it is
+resolved from the property name.
+
+**Refused at startup, each by its real reason** (`SHRED-CONFIG-001`): a `@Formula`, on Hibernate's
+`isFormula()` flag and never on the shape of the expression (`@Formula("owner_id")` is a plain
+identifier); a `Column.assignmentExpression`, by the round-trip assertion; a `@ColumnTransformer` on
+the subject, tenant or index column, which mis-addresses **by value** what the others mis-address by
+name — the identifier is plain, the column stores something else, `WHERE col = ?` matches nothing and
+`SET col = NULL` is not what Hibernate would write; a `@JoinColumn` named as the subject or tenant
+column, said to be an association rather than reported as an unknown column; a composite identifier;
+a name carrying a `"` character, asserted on the *parsed* text; and any dialect that is not
+PostgreSQL, since `ColumnRef` renders `"` and folds by PostgreSQL's rules and no others.
+
+**`hibernate.globally_quoted_identifiers`.** Supported for columns, quoted or unquoted, reproduced
+verbatim — including the `globally_quoted_identifiers_skip_column_definitions=true` pairing Hibernate
+documents for JPA, which leaves column expressions unquoted at boot. `hibernate.auto_quote_keyword`
+is supported the same way. For **tables** the rule is unchanged: supported when the quoted parts are
+lowercase, refused at startup by `TableRef` naming the setting otherwise.
+
+### The erasure verifies itself against something it did not build (S-22, addendum 4 §4.5)
+
+An erasure's `UPDATE` and a read-back written from the same three identifiers share one weakness: if
+the identifiers are wrong, both are wrong together and agree with each other. So after the `UPDATE`,
+**unconditionally** — not only when nothing was cleared, because a mis-addressed *tenant* column
+clears a subset rather than nothing — the erasure runs a residual **Hibernate renders from the entity
+mapping**: subject and tenant as HQL parameters, the index column reached through the persister's own
+property. Above zero refuses with `SHRED-ERASURE-004`, rolls the whole transaction back, destroys no
+key and appends no record.
+
+Row counts are never a refusal predicate. The `UPDATE` ends `AND <col> IS NOT NULL`, so its count is
+a *subset* of the subject's rows: a nullable index, a row written before the column existed, or a
+retry after a partial failure all give fewer cleared rows than rows, with nothing wrong.
+`blindIndexColumnsCleared` is a diagnostic.
+
+**The check runs on the erasure's own connection.** A `StatelessSession` opened with
+`.connection(c)` shares this connection, therefore this transaction and this snapshot, and cannot
+flush — so it can never write a blind index back after the clear, and a pool of one does not deadlock
+against the advisory lock and `SELECT ... FOR UPDATE` this transaction already holds. It never calls
+`beginTransaction()` or `commit()`: with a provided connection `isTransactionInProgress()` already
+returns true, so nothing in the API stops a one-line "fix" that would commit a half-done erasure —
+index cleared, key destroyed, no record appended. Closing the session calls
+`resetConnection(initiallyAutoCommit)`, which is a no-op **only because** `JdbcSupport.inTransaction`
+set `autoCommit=false` on this connection first; that dependency is load-bearing.
+
+**Concurrency, stated as intent.** The one divergence left is a row committed for the subject *after*
+the `UPDATE`'s snapshot. It carries a live index for a subject whose key is about to be destroyed, so
+it **refuses** the erasure — under READ COMMITTED, REPEATABLE READ and SERIALIZABLE alike. That is
+the intended answer, not a race to retry away.
+
 ### The startup listener check proves position, not survival of Hibernate's own defaults (S-11, accepted residual)
 
 **What `ShreddingStartupCheck` does and does not prove.** It proves, against the live

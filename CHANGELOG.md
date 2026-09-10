@@ -6,6 +6,64 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed (tenth pass, S-22 HIGH and S-24 LOW: every column identifier is now the one Hibernate's mapping addresses)
+
+**HIGH.** Design addendum 3 gave the *table* an identifier type (`TableRef`) and left the *columns*
+as bare `String`s: `@Column(name = ...)` text and `@BlindIndex(subjectColumn/tenantColumn)` text,
+lower-cased by a hand-written `unquote`, then quoted by a hand-written `quote` in the starter and
+**not quoted at all** in `JdbcErasureStore`. A column the mapping quotes was therefore addressed as a
+different column, and the erasure's own read-back — built from the same text — agreed with it.
+`WHERE user = ?` against a reserved-word subject column parses, compares the connection's role name
+and matches nothing: no row cleared, key and ciphertext destroyed, record `COMPLETE`, and the HMAC of
+the erased plaintext still in the table. A quoted `"Owner"` beside a plain `owner` cleared a
+bystander's index and kept the victim's. S-24 was the same root one column over: a quoted
+`@Shredded` column booted and failed on the first row written.
+
+- **Added** `ColumnRef(String text, boolean quoted)` in the core domain, JDK-only (ArchUnit names it
+  on its own). It **reproduces** Hibernate's quoting rather than imposing one — bare when the mapping
+  is unquoted, `"`-wrapped when it quotes — because `@Column(name = "OWNER_ID")` is an ordinary
+  unquoted mapping whose physical column PostgreSQL folded, and blanket-quoting it would address a
+  column that does not exist.
+- **Added** `ColumnRefs`, the one place a `ColumnRef` is built: from the persister's own
+  `getSelectionExpression()`, parsed by the *static* `Identifier.toIdentifier(String)` — never
+  `IdentifierHelper.toIdentifier`, whose `normalizeQuoting` adds quoting the mapping never had under
+  `globally_quoted_identifiers`, `auto_quote_keyword`, a leading `_` or a `$`. Startup asserts the
+  parse round-trips through both `Identifier.render(dialect)` and `ColumnRef.sql()`.
+- **Changed** `BlindIndexColumn` to carry three `ColumnRef`s; `ShreddedModel.ShreddedField` to carry
+  its resolved `ColumnRef`; `singleIdColumn` to return one. Every statement now takes a `TableRef`
+  and `ColumnRef`s: no `String` identifier survives in a signature on any SQL path.
+- **Removed** `BlindIndexColumn`'s identifier pattern, `ShreddedModel.columnName(Field)` and
+  `.unquote`, and the two starter `quote()` helpers. There is no hand-written quoting left in the
+  module outside `TableRef`.
+- **Changed** `@BlindIndex(subjectColumn/tenantColumn)` to be a **lookup key**, matched
+  case-sensitively against the mapped columns and never used as an identifier. No case-insensitive
+  second pass exists or may be added. The refusal lists the mapped columns verbatim with their
+  quoting and names the ones differing from the key only by case; a key matching one column exactly
+  while another differs only by case is refused as unreadable.
+- **Changed** `@Shredded`'s column to resolve by **property name**, its annotation text never
+  compared — which closes S-24 by construction rather than by a better refusal.
+- **Added** startup refusals, each by its real reason: a `@Formula` on Hibernate's `isFormula()`
+  flag (never on the shape of the expression); a `Column.assignmentExpression` by the round trip; a
+  `@ColumnTransformer` on the subject, tenant or index column, which mis-addresses *by value*; a
+  `@JoinColumn` named as an axis column, reported as an association; a composite identifier; a `"`
+  in the parsed name; and any non-PostgreSQL dialect.
+- **Added** the independent read-back (`BlindIndexResidual`, implemented by
+  `HibernateBlindIndexResidual`): after the `UPDATE`, **unconditionally**, a residual Hibernate
+  renders from the entity mapping — subject and tenant as HQL parameters, the index column through
+  the persister's own property — run on the erasure's **own** `Connection` through a
+  `StatelessSession`, which shares the transaction and snapshot and cannot flush. Above zero refuses
+  with `SHRED-ERASURE-004` and rolls the whole transaction back. `JdbcErasureStore` has no default
+  residual: an erasure whose only check is the statement it just ran is the shape that shipped.
+- **Changed** the refusal predicate: row counts are never one. `cleared < rows` is normal (`AND
+  <col> IS NOT NULL` makes it a subset) and stays a diagnostic.
+- **Documented** `hibernate.globally_quoted_identifiers` (with and without
+  `_skip_column_definitions`) and `hibernate.auto_quote_keyword` as supported for columns, quoted or
+  unquoted, reproduced verbatim; tables unchanged.
+
+Probes (all in the default build; `src/test-pending` removed):
+`CipherProbeColumnIdentityTest` (11) and `CipherProbeReadBackIndependenceTest` (6), plus the five
+`CipherProbeTenthPassTest` methods promoted and green by their own assertions.
+
 ### Fixed (tenth pass, S-23: `@Shredded` inside an entity inheritance hierarchy was refused by a reason the developer could not act on)
 
 **LOW.** `ShreddedModel.allFields` walks an entity class and every superclass to collect

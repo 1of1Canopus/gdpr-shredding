@@ -8,8 +8,53 @@ are fine here for now — but before this repo is made public, move them to
 tests, README, CHANGELOG, LICENSE/NOTICE, SECURITY.md, CONTRIBUTING.md, user docs, CI, the
 probe script). See how `agent-guard` did it (2026-09-10).
 
+**S-22 (HIGH) and S-24 (LOW) — CLOSED, built (Thor, 2026-09-10).** Thor's design stop from Cipher's
+tenth pass. Designed as **addendum 4** in `docs/plans/read-path-design.md`, reviewed by Cipher twice;
+the revision review's two corrections (the static `Identifier.toIdentifier`, and §4.6 restated as
+"quoted or unquoted, reproduced verbatim") were applied to the addendum text first, in `606ef97`,
+before any code.
+
+*What was built.* `ColumnRef(text, quoted)` in the core domain, JDK-only and named by its own
+ArchUnit rule; `ColumnRefs` as the one place a column identifier is ever constructed, from the
+persister's own selection expression, with a startup round-trip assertion through both
+`Identifier.render(dialect)` and `ColumnRef.sql()`; `BlindIndexColumn`, `ShreddedField` and
+`singleIdColumn` all carrying `ColumnRef`s, so no `String` identifier survives in any SQL signature;
+`BlindIndexColumn`'s identifier pattern, `ShreddedModel.columnName(Field)`, `.unquote` and both
+starter `quote()` helpers deleted. `subjectColumn`/`tenantColumn` are lookup keys, matched
+case-sensitively with no second pass, and `@Shredded`'s column resolves by property name — which is
+what closes S-24 by construction. Startup refuses, each by its real reason: `@Formula` (on the flag),
+`Column.assignmentExpression` (on the round trip), `@ColumnTransformer` on any of the three columns
+(mis-addressed by value), a `@JoinColumn` axis column (as an association), a composite identifier, a
+case-only twin, a `"` in the parsed name, and any non-PostgreSQL dialect. The erasure now verifies
+itself against something it did not build: `BlindIndexResidual` / `HibernateBlindIndexResidual`, an
+unconditional count Hibernate renders from the entity mapping, on the erasure's **own** connection
+through a `StatelessSession` that shares the transaction and snapshot, cannot flush, and never
+commits. Row counts are no longer a refusal predicate.
+
+*Probes.* All 20 Cipher required (18 + the 2 added in the revision review) by their exact names, in
+the default build: `CipherProbeColumnIdentityTest` (11), `CipherProbeReadBackIndependenceTest` (6)
+and the `ColumnRef` ArchUnit rule. **9 of the 17 were RED** on `606ef97` before the hook, including
+`probe_a_partially_null_index_erases_without_refusing` (pins change 8) and
+`probe_the_independence_check_takes_no_second_connection` (pins change 9). The five
+`CipherProbeTenthPassTest` methods are promoted and green by their own assertions;
+`src/test-pending` is removed.
+
+*Deviations, recorded not hidden.* (1) `probe_a_column_name_containing_a_quote_character_is_refused`
+pins `ColumnRefs.parse`, a unit that did not exist before, so it could not be red against prior
+behaviour. (2) Two design assumptions the build corrected: Hibernate populates a templated read
+expression for *every* column (so a `@ColumnTransformer` is detected by comparing against that
+template, not by a null check), and Spring Boot's default physical naming strategy lower-cases
+`@Column(name = "OWNER_ID")` (so the unquoted-upper-case probe pins Hibernate's own standard
+strategy). Both in `QUESTIONS.md` under S-22.
+
+*Full `./mvnw clean verify` (worktree and fresh clone, three consecutive runs each):* BUILD SUCCESS,
+**307 tests** (core 95, starter 195, sample 17), 0 failures, 0 errors, 0 skipped. Line coverage core
+85.6% (1145/1337), starter 87.6% (1594/1820), sample 63.2%; gates 80% / 80% / 30% held. Branch
+coverage core 63.6%, starter 73.1% (no branch gate configured). Cipher re-verifies; not self-marked
+closed.
+
 **S-23 (LOW) and S-25 (LOW, the flake) — CLOSED, built (Isis, 2026-09-10).** Tenth-pass fix-list
-items assigned to Isis; S-22 (HIGH) and S-24 (LOW) are Thor's design stop and untouched here.
+items assigned to Isis; S-22 (HIGH) and S-24 (LOW) were Thor's design stop, closed above.
 
 *S-23.* `ShreddedModel.scan` now refuses at startup, before the converter check, when a `@Shredded`
 field's declaring class is not the entity being scanned and that declaring class is itself

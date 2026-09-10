@@ -1208,6 +1208,61 @@ Hibernate's own statements. This module's own `shredding_*` tables are unqualifi
 build — a decoy `public.schema_note` ahead of `app2` on `search_path`, which the erasure must leave
 untouched — plus `TableRefTest` (7) in the core.
 
+## S-22 (2026-09-10, Thor) — CLOSED. Every column identifier is the one Hibernate's mapping addresses.
+
+Cipher's tenth pass, HIGH, and a design stop: addendum 3 gave the *table* an identifier type and left
+the *columns* as bare `String`s, so the erasure's three columns were interpolated unquoted while every
+statement the starter built quoted them, and `ShreddedModel.unquote` folded case before it compared.
+A reserved-word subject column (`user`) became `WHERE user = ?` — parses, compares the connection's
+role name, matches nothing — and the erasure's own read-back, built from the same text, agreed.
+
+Designed in `docs/plans/read-path-design.md` as **addendum 4**, reviewed by Cipher twice
+(APPROVED WITH CHANGES ×13, then APPROVED WITH TWO CORRECTIONS), both corrections applied in the
+addendum text before any code (`606ef97`).
+
+**Built.** `ColumnRef(text, quoted)` in the core domain, JDK-only, reproducing Hibernate's quoting
+rather than imposing one; `ColumnRefs` the single construction site, parsing with the *static*
+`Identifier.toIdentifier` and asserting the round trip at startup; every statement on `TableRef` +
+`ColumnRef`; every hand quote/unquote helper deleted; annotation text demoted to a case-sensitive
+lookup key; refusals for formula, `assignmentExpression`, `@ColumnTransformer`, `@JoinColumn`,
+composite id, case-only twins, a `"` in the parsed name and a non-PostgreSQL dialect; and the
+independent, unconditional, Hibernate-rendered residual on the erasure's own connection.
+
+**Two things the design assumed that the build found otherwise, both corrected in code, neither
+changing the property.**
+
+1. *`getCustomReadExpression()` is never null.* Hibernate populates a templated read
+   (`{@}.<column>`) and a write (`?`) for **every** column, so change 4's "refuse when either is
+   non-null" would have refused every application. A `@ColumnTransformer` is detected as a read that
+   is not the plain template of this column's own expression, or a write that is not a bare
+   parameter.
+2. *Spring Boot's default physical naming strategy lower-cases `@Column(name = "OWNER_ID")`.* The
+   unquoted-upper-case shape change 2 exists for only appears under Hibernate's own
+   `PhysicalNamingStrategyStandardImpl`, so `probe_an_unquoted_upper_case_column_is_addressed_folded`
+   pins that strategy explicitly. The behaviour under Spring Boot's default is unchanged and covered
+   by every other probe.
+
+**Probes.** `CipherProbeColumnIdentityTest` (11) and `CipherProbeReadBackIndependenceTest` (6), all
+in the default build, 9 of the 17 RED on `606ef97` before the hook. `CipherProbeTenthPassTest`'s five
+promoted out of `src/test-pending`, which is removed. One deviation, recorded rather than hidden:
+`probe_a_column_name_containing_a_quote_character_is_refused` pins a unit (`ColumnRefs.parse`) that
+did not exist before, so it could not be red against prior behaviour — it was written before the
+resolver's callers and is green from its first run.
+
+## S-24 (2026-09-10, Thor) — CLOSED with S-22, by construction.
+
+A `@Shredded` column the mapping quotes (`@Column(name = "\"Email\"")`) used to be read as raw
+annotation text by `ShreddedModel.columnName(Field)` and then quoted again by the starter's own
+`quote()`, producing an identifier with the quote characters *inside* the name: the application
+booted and failed on whichever row was written first.
+
+Closed by change 5, not by a better refusal: `@Shredded`'s column is resolved from Hibernate's
+mapping **by property name**, and its annotation text is never read, never compared and never quoted.
+The mapping therefore settles at startup, and a quoted column simply works.
+
+**Probe.** `CipherProbeTenthPassTest.probe_a_quoted_shredded_column_is_settled_at_startup_not_at_the_first_write`,
+promoted and green by the design's choice — never by a `PSQLException` out of `saveAndFlush`.
+
 ## S-23 (2026-09-10, Isis) — CLOSED. `@Shredded` inside an entity inheritance hierarchy is refused by its real reason.
 
 Tenth pass: `ShreddedModel.allFields` walks an entity class and every superclass, so a `@Shredded`

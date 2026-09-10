@@ -297,8 +297,23 @@ be erasable by one request, the tenant and subject its data key was derived unde
 subject its index was derived under, and the values in its `tenantColumn` and `subjectColumn` are
 one pair.*
 
-The erasure reads the columns back inside its own transaction: still populated means the erasure is
-refused (`SHRED-ERASURE-004`), not recorded.
+`subjectColumn` and `tenantColumn` are matched **case-sensitively** against the columns Hibernate
+maps, and the text is a lookup key only: what reaches SQL is the column the mapping addresses, quoted
+if and only if the mapping quotes it. There is no case-insensitive fallback. If your mapping says
+`owner_id`, write `owner_id`; if it says `@Column(name = "\"Owner\"")`, write `Owner`. Get it wrong
+and startup refuses, listing every column the entity maps — with its quoting — and naming the ones
+that differ from what you wrote only by case. If the entity maps two columns that differ only by case,
+the mapping is refused: which one you meant cannot be read from the text.
+
+The erasure reads the columns back inside its own transaction, twice and unconditionally: once with
+its own statements, and once with a count **Hibernate renders from the entity mapping** on the same
+connection, which shares no identifier with them. Either one still populated means the erasure is
+refused (`SHRED-ERASURE-004`) and the whole transaction rolled back — no key destroyed, no record
+appended. A row committed for that subject *after* the clear refuses the erasure too; that is
+intended, not a race to retry.
+
+`blindIndexColumnsCleared` is a diagnostic, never a verdict: the `UPDATE` skips rows whose index is
+already null, so it is normally smaller than the subject's row count.
 
 ## Schemas
 
@@ -337,7 +352,21 @@ Cluster-wide invalidation ships in Pro alongside the KMS adapters.
   a method call;
 - a missing, short, non-base64 or sample-looking `shredding.master-key`;
 - a missing `shredding.erasure-log.hmac-secret` without `unkeyed=true`, or both at once;
-- `shredding.crypto.max-encryptions-per-key` above 2^32.
+- `shredding.crypto.max-encryptions-per-key` above 2^32;
+- a `@BlindIndex(subjectColumn/tenantColumn)` naming a column this entity does not map, naming one
+  that differs from a mapped column only by case, or naming one mapped by a `@JoinColumn` (an
+  association, not a basic property);
+- a `@Formula`, a `Column.assignmentExpression` or a `@ColumnTransformer` on the subject, tenant or
+  blind-index column. The last one is the subtle one: the identifier is perfectly plain, but the
+  column stores something other than the value this module binds, so `WHERE col = ?` matches nothing
+  and `SET col = NULL` is not what Hibernate would write - a mis-addressed erasure that would still
+  be recorded as complete;
+- a column whose name this module cannot reproduce exactly as Hibernate renders it, or that carries
+  a `"` character;
+- a Hibernate dialect that is not PostgreSQL. This module builds SQL identifiers itself and folds by
+  PostgreSQL's rules; `hibernate.globally_quoted_identifiers` (with or without
+  `_skip_column_definitions`) and `hibernate.auto_quote_keyword` are supported for columns, and for
+  tables when the quoted parts are lowercase.
 
 ## Health
 
