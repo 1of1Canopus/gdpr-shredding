@@ -182,6 +182,21 @@ public final class ShreddingStartupCheck implements InitializingBean {
    * AUTO_FLUSH} are appended because each must see what already happened. One table, the same list
    * {@link ShreddingIntegrator#integrate} registers, so a type added there cannot silently go
    * unchecked here.
+   *
+   * <p><strong>What this check does and does not prove (S-11, accepted residual, Cipher eighth
+   * pass).</strong> It proves, against the live {@code EventListenerRegistry} after the {@code
+   * SessionFactory} is built, that this module's listener is registered on all eight event types
+   * above and is in the position it registered for. It does not prove that the listeners Hibernate
+   * itself seeded are still there. This module composes its integrator last on purpose, so an
+   * integrator composed earlier can call {@code registry.setListeners(type, ...)} and replace a
+   * group's prior contents - Hibernate's own {@code DefaultFlushEventListener} among them - before
+   * this module registers at all; our listener is then added to the emptied group and measures as
+   * correctly positioned, because position is measured against what remains. No check this module
+   * can make from inside the same JVM closes that, and none of its own controls is removed by it:
+   * this module's listener is always registered after the wipe and its presence is checked. What is
+   * lost is Hibernate's own behaviour, which fails loudly. Integrators on the classpath are inside
+   * the trust boundary; review them as you would any other code you run. See {@code
+   * SECURITY-NOTES.md} for the full paragraph.
    */
   private static final java.util.List<TypeCheck<?>> REGISTERED_TYPES =
       java.util.List.of(

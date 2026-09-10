@@ -90,6 +90,29 @@ derived under its former tenant; the erasure for its new tenant then refuses rat
 success, and the erasure for its former tenant reports the leftover in the WARN above. A tenant move
 made *through* Hibernate is refused outright: the tenant is bound into every stored value's header.
 
+### The startup listener check proves position, not survival of Hibernate's own defaults (S-11, accepted residual)
+
+**What `ShreddingStartupCheck` does and does not prove.** It proves, against the live
+`EventListenerRegistry` after the `SessionFactory` is built, that this module's listener is
+registered on all eight event types it registers for and is in the position it registered for -
+first for `PRE_INSERT`, `PRE_UPDATE` and `POST_LOAD`, last for `POST_INSERT`, `POST_UPDATE`,
+`POST_DELETE`, `FLUSH` and `AUTO_FLUSH`. It does not prove that the listeners Hibernate itself
+seeded are still there. This module composes its integrator last on purpose, so an integrator
+composed earlier can call `registry.setListeners(type, ...)` and replace a group's prior contents -
+Hibernate's own `DefaultFlushEventListener` among them - before this module registers at all; our
+listener is then added to the emptied group and measures as correctly positioned, because position
+is measured against what remains. No check this module can make from inside the same JVM closes
+that, and none of its own controls is removed by it: this module's listener is always registered
+after the wipe and its presence is checked. What is lost is Hibernate's own behaviour, which fails
+loudly - not this module's own write- or read-path checks (control 20 and the read-path controls
+above are unaffected by this residual, which is why it stays a residual and not a design stop; the
+one control an earlier integrator's `FLUSH` wipe removes is Hibernate's own flushing, which is an
+application that does not work rather than an erasure that does not erase). Integrators on the
+classpath are inside the trust boundary; review them as you would any other code you run.
+`CipherProbeEarlierIntegratorWipesHibernateDefaultsTest` demonstrates and asserts this: after
+another integrator wipes `FLUSH`'s prior listeners, this module's own listener is still present and
+still last on `FLUSH`, and the startup check therefore passes.
+
 ### The read path: the converter accuses, it never authorises (fifth pass, `docs/plans/read-path-design.md`)
 
 Five review passes found the same shape of defect in five different places — C-17, C-18, C-20, C-26,

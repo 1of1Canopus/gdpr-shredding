@@ -4,7 +4,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.housedevinci.shredding.autoconfigure.fixture.Widget;
 import com.housedevinci.shredding.autoconfigure.fixture.WidgetRepository;
-import com.housedevinci.shredding.domain.ShreddingException;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
@@ -34,31 +33,27 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Cipher, seventh pass (e2c2bdd). S-6's post-boot self-check
- * ({@code ShreddingStartupCheck.refuseIfVerifierNotRegisteredFirst}) closes "the composition
- * actually reached Hibernate" for five of the seven event types {@code ShreddingIntegrator}
- * registers, and closes "still in the position it was registered in" for exactly one.
+ * Cipher, seventh and eighth pass. S-11: an accepted residual, ruled on and written up in {@code
+ * SECURITY-NOTES.md} beside the startup listener check and in {@code
+ * ShreddingStartupCheck.REGISTERED_TYPES}'s own javadoc.
  *
- * <ul>
- *   <li>{@code FLUSH}, {@code AUTO_FLUSH} and {@code POST_DELETE} are not checked at all. Those
- *       three are S-1's settlement machinery: the first settlement point and the discharge of a row
- *       deleted in the same flush.
- *   <li>{@code PRE_INSERT} and {@code PRE_UPDATE} are checked for presence but not for being first,
- *       though the integrator prepends them precisely so "the scope is pushed before anything else
- *       can trigger a bind"; {@code POST_INSERT} and {@code POST_UPDATE} are checked for presence
- *       but not for being last, though the integrator appends them precisely so the post-hoc check
- *       "sees what actually reached the database, after every other listener has had its turn".
- * </ul>
+ * <p>{@code ShreddingStartupCheck} proves that this module's own listener is registered on all
+ * eight event types it registers for, in the position it registered for. It cannot prove that the
+ * listeners Hibernate itself seeded are still there, because this module composes its integrator
+ * last on purpose: an integrator composed earlier can call {@code registry.setListeners(type, ...)}
+ * and replace a group's prior contents - Hibernate's own {@code DefaultFlushEventListener} among
+ * them - before this module ever registers, and our listener is then added to the emptied group and
+ * measures as correctly positioned, because position is measured against what remains.
  *
- * <p>A self-check that verifies some of what it registered is not a self-check; it is the same
- * "best effort, not a proof" S-6 was raised to remove, moved one level in. This probe displaces the
- * one listener that costs the most - {@code FLUSH} - with another library's {@code
- * setListeners(...)}, which is an ordinary {@code EventListenerRegistry} call, and the application
- * starts without a word. The fix is to check every type the integrator touches, at the position it
- * registered for.
+ * <p>This is not this module's own control failing: what the attack removes is Hibernate's own
+ * seeded listener, never ours. Our listener is registered after the wipe and its presence - and its
+ * position, last on {@code FLUSH} - is exactly what {@code refuseIfVerifierNotRegisteredFirst}
+ * proves, on all eight types. The application starts, and it should: no control this module makes
+ * is disabled by an earlier integrator wiping Hibernate's own default, and the startup check
+ * correctly reports that this module's own listener is where it needs to be.
  */
 @Testcontainers
-class CipherProbeSettlementListenerDisplacedTest {
+class CipherProbeEarlierIntegratorWipesHibernateDefaultsTest {
 
   @Container
   static final PostgreSQLContainer<?> POSTGRES =
@@ -107,7 +102,7 @@ class CipherProbeSettlementListenerDisplacedTest {
   }
 
   @Test
-  void probe_a_displaced_settlement_listener_is_not_detected_after_boot() {
+  void our_listener_is_still_present_and_last_on_flush_after_an_earlier_integrator_wipes_it() {
     SpringApplicationBuilder builder =
         new SpringApplicationBuilder(DisplacingApp.class)
             .web(WebApplicationType.NONE)
@@ -120,23 +115,24 @@ class CipherProbeSettlementListenerDisplacedTest {
                 "spring.datasource.username=" + POSTGRES.getUsername(),
                 "spring.datasource.password=" + POSTGRES.getPassword());
 
-    String outcome;
+    // The application starts: DisplacingIntegrator wiped Hibernate's own seeded FLUSH listener,
+    // not this module's - ours is composed last and registers into the (now emptied) group
+    // afterwards, so it is still present and still last, which is what the startup check proves.
     try (var ctx = builder.run()) {
-      outcome = "STARTED";
-    } catch (RuntimeException e) {
-      outcome = "STARTUP-REFUSED " + codeOf(e);
-    }
-    System.out.println("DISPLACED FLUSH LISTENER -> " + outcome);
+      var sessionFactory =
+          ctx.getBean(jakarta.persistence.EntityManagerFactory.class)
+              .unwrap(SessionFactoryImplementor.class);
+      EventListenerRegistry registry =
+          sessionFactory.getServiceRegistry().getService(EventListenerRegistry.class);
+      var flushListeners = new java.util.ArrayList<FlushEventListener>();
+      registry.getEventListenerGroup(EventType.FLUSH).listeners().forEach(flushListeners::add);
 
-    assertThat(outcome).startsWith("STARTUP-REFUSED");
-  }
-
-  private static String codeOf(Throwable thrown) {
-    for (Throwable t = thrown; t != null; t = t.getCause()) {
-      if (t instanceof ShreddingException s) {
-        return s.code();
-      }
+      assertThat(flushListeners)
+          .describedAs("Hibernate's own seeded FLUSH listener was wiped by DisplacingIntegrator")
+          .noneMatch(l -> l.getClass().getSimpleName().contains("DefaultFlushEventListener"));
+      assertThat(flushListeners.get(flushListeners.size() - 1))
+          .describedAs("this module's own listener is still last on FLUSH")
+          .isInstanceOf(ShreddingEventListener.class);
     }
-    return thrown.getClass().getSimpleName();
   }
 }
