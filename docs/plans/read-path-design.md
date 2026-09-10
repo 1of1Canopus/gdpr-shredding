@@ -990,3 +990,173 @@ mixed-case quoted column (`"Owner"`) with **no** mapped lowercase twin — the s
 today's "more than one property" rule; a quoted column whose name contains a dot; and a read-back
 independence probe that mutates the erasure's rendered SQL and asserts the verification still
 refuses. One test per path in §4b, per the framework integration rule.
+
+### Cipher review of addendum 4
+
+**APPROVED WITH CHANGES (13).** The shape is right: one type, built from the mapping, annotation text
+demoted to a lookup key, every helper that quoted or unquoted by hand deleted, every statement
+signature refusing a bare `String`. That closes S-22's root and S-24 with it. But §4a is built on a
+factual error about what `getSelectionExpression()` returns, and as written it refuses the very
+column its own required probe says must work; and §4d's check (i), as specified, refuses ordinary
+erasures. Both are load-bearing, so this is not a nod-through.
+
+#### The factual error, first, because changes 1-3 all follow from it
+
+`SelectableMappingImpl.from(...)` sets `columnExpression = selectable.getText(dialect)` for a
+column, and `org.hibernate.mapping.Column.getText(Dialect)` is
+`assignmentExpression != null ? assignmentExpression : getQuotedName(dialect)`, where
+`getQuotedName(Dialect)` is `dialect.openQuote() + name + dialect.closeQuote()` when `quoted`
+(hibernate-core 7.4.5, the version this branch resolves through Spring Boot 4.1.1). So
+`getSelectionExpression()` for `@Column(name = "\"Owner\"")` is literally `"Owner"`, **quote
+characters included** — it is a SQL fragment, not a name. `getSelectableName()` is no better: its
+`SelectablePath` is built from the same expression, or from `column.getQuotedName(dialect)`. There
+is no unquoted name on the runtime mapping.
+
+1. **`ColumnRef` carries `(text, quoted)`, and the parse is Hibernate's, not ours.** §4a's "`sql()`
+   … admits no quote character in the name" applied to the raw selection expression refuses every
+   quoted column — including the `"Owner"` probe §4a's own probe list requires. The only two ways
+   out are to unquote by hand (the `ShreddedModel.unquote` §4b deletes, back again, and it is where
+   S-22 hid) or to use Hibernate's own parse/render pair. Use the pair:
+   `jdbcEnvironment.getIdentifierHelper().toIdentifier(selectionExpression)` gives an `Identifier`
+   with `getText()` and `isQuoted()`; `Identifier.render(dialect)` renders it back. The refusal of a
+   quote character then applies to `getText()`, where it belongs, and the injection guard is
+   unweakened. Drop the "mirroring `TableRef`" framing wherever it means *re-rendering*: `TableRef`
+   imposes a quoting decision, `ColumnRef` must reproduce Hibernate's.
+2. **Quote if and only if the mapping quotes. Do not blanket-quote, and do not refuse mixed case.**
+   `@Column(name = "OWNER_ID")` — unquoted, upper case, ordinary code — has `quoted=false`, text
+   `OWNER_ID`, and the column PostgreSQL actually created is `owner_id`. Rendering `"OWNER_ID"`
+   addresses a column that does not exist: startup passes and the erasure fails at erasure time.
+   `sql()` must render exactly what Hibernate renders — bare when the mapping is unquoted, quoted
+   when it is quoted. And unlike `TableRef.part`, `ColumnRef` must **not** refuse a non-lowercase
+   unquoted name: that is a legal mapping addressing a folded column, and refusing it makes the
+   module unusable on a large share of real entities. Mixed case is refused only where it is quoted
+   *and* the module cannot render it verbatim.
+3. **Refuse a formula on `isFormula()`, and on `assignmentExpression`, not on the text's shape.**
+   §4a refuses "a selection expression that is not a plain identifier". `SelectableMapping.isFormula()`
+   is a flag: test the flag. Today a `@Formula` arrives as a template containing `$PlaceHolder$`, so
+   a shape test happens to work; that is a Hibernate internal, not a control, and
+   `@Formula("owner_id")` is one refactor away from being a plain identifier. The second
+   non-identifier door §4a misses entirely is `Column.assignmentExpression`: when it is set,
+   `getText(dialect)` returns arbitrary SQL and never touches the name. Refuse both, naming the
+   property.
+4. **`@ColumnTransformer` is S-22's consequence through a door `ColumnRef` leaves open.** A subject
+   or tenant column with `@ColumnTransformer(read = …, write = …)` has a perfectly plain identifier
+   and stores something other than the value this module binds, so `WHERE subject_col = ?` matches
+   nothing — mis-addressed by value instead of by name, with the same recorded `COMPLETE`. On the
+   index column, a write expression also means `SET col = NULL` is not what Hibernate would write.
+   Refuse at startup any of the three columns whose `SelectableMapping` has a non-null
+   `getCustomReadExpression()` or custom write expression, naming the transformer.
+5. **`@Shredded`'s column is resolved from the property, not matched from text at all.** §4b deletes
+   `ShreddedModel.columnName(Field)`, which is right, but a `@Shredded` field *is* a mapped basic
+   attribute (it carries the converter), so the persister already has its `BasicValuedModelPart`
+   under the property name. Resolve it by property name and never compare annotation text for this
+   one. That closes S-24 by construction rather than by a better refusal.
+6. **Associations and the composite id are refused by their real reason.** `subjectColumn` or
+   `tenantColumn` naming a `@JoinColumn` resolves to a `ToOneAttributeMapping`, not a
+   `BasicValuedModelPart`, so under §4b it falls into "no column of that name, here are the ones I
+   map" — which is false and sends the developer looking for a typo. Say the column is mapped by an
+   association and that this module binds a basic property. Same standard for a composite
+   `getIdentifierMapping()` in `singleIdColumn`. This is S-23's standard applied ahead of time.
+7. **The case-sensitive lookup key stays — the refusal message is the whole control.** The trap is
+   real and symmetric: `subjectColumn="OWNER_ID"` against a mapping that stores `owner_id`, and
+   `subjectColumn="owner_id"` against a mapping that stores `OWNER_ID` for the same physical column,
+   both refuse. Fail-closed is correct and no case-insensitive second pass may be added, not even as
+   a warning — a second pass is the fold, back again. But the refusal must (a) list the mapped
+   columns verbatim with their quoting, (b) say the match is case-sensitive against the *mapping*
+   and not against the database, and (c) name the mapped columns that differ from the given text
+   **only by case**. Without (c) the operator compares forty names by eye and guesses.
+8. **§4d check (i) is specified wrong and would refuse legitimate erasures.** The `UPDATE` in
+   `JdbcErasureStore.clearBlindIndexes` ends `AND <col> IS NOT NULL`, so its row count is the
+   subject's rows *with a populated index* — always a subset of "the subject's rows". A nullable
+   indexed field, a row written before the index column existed, a retry after a partial failure:
+   each gives `cleared < count` with nothing wrong, and "mismatch → refuse" turns that into a
+   fail-closed denial of erasure. The invariant to verify is not an equality of counts. It is:
+   **after the `UPDATE`, a count rendered by Hibernate over the entity, with subject and tenant
+   bound as parameters and the index column read through the persister's own reference, returns
+   zero; anything above zero refuses.** That is §4d (ii) done properly and it subsumes (i): a
+   mis-addressed `UPDATE` clears nothing, Hibernate's count still sees the row, the erasure refuses.
+   Keep a count of the subject's rows if you want it, as a logged diagnostic, never as a refusal
+   predicate.
+9. **The independent count runs on the erasure's own connection and transaction, and must not be
+   able to write.** A `Session` taken from the pool is a second connection, and every property §4d
+   wants dies on it: it cannot see the uncommitted `UPDATE`; it takes a later snapshot, so under
+   READ COMMITTED a concurrent commit makes the two disagree for no reason; it may carry a different
+   `search_path`, which re-opens S-21's decoy on the verification side; and it is requested while
+   this transaction holds `pg_advisory_xact_lock` and `SELECT … FOR UPDATE` rows, so a pool of one
+   deadlocks. Worse, a stateful auto-flushing session flushes pending entity state at the query and
+   can write blind indexes back **after** the clear. Required: Hibernate's SQL executed on
+   `Connection c` — a `StatelessSession` built with `.connection(c)`, or the rendered SQL run on `c`
+   — never a second connection, never a session that can flush. If Hibernate cannot be made to
+   render onto this connection, stop and say so; do not quietly take a second one.
+10. **Concurrency, stated as intent rather than tolerated as a race.** With change 9 applied both
+    statements share one snapshot, so the only remaining divergence is a row committed for the
+    subject after the `UPDATE`'s snapshot. With change 8 applied the answer is already right: a new
+    row carrying a populated index for a subject whose key has just been destroyed **must** refuse
+    the erasure. Write that into the design as the intended behaviour under READ COMMITTED,
+    REPEATABLE READ and SERIALIZABLE, so nobody later "fixes" it into a retry.
+11. **Ruling on the open point: unconditional. Not "only when `cleared=0`".** Three reasons.
+    (a) `cleared=0` is not the only wrong answer — a mis-addressed *tenant* column clears a subset,
+    not nothing, and the conditional check never fires on the case that costs a tenant their
+    isolation. (b) A check that runs only on the failure path is never exercised by production or by
+    a happy-path test, and it rots; every control in this module that mattered was one that ran
+    every time. (c) The cost is one `COUNT` per (erasure, blind-index column), on indexed columns,
+    on a connection that already holds the row locks, inside a transaction that already does an
+    advisory lock, a `SELECT … FOR UPDATE`, a `DELETE`, a tombstone insert and a hash-chain append.
+    Erasure is rare and human-initiated. Measure it and put the number in the design. If it is ever
+    too slow the answer is an index on `(tenant, subject)`, not a control that switches itself off.
+12. **`hibernate.globally_quoted_identifiers=true` is a named path, decided here.** It quotes every
+    identifier, so every column expression *and* every table expression arrives quoted, which
+    changes the answer for the whole module at once. The design must say what happens — supported,
+    or refused at startup by an accurate message — and one probe must boot an application with it
+    set. Discovering it at the first erasure is the S-24 pattern.
+13. **`ColumnRef` stays JDK-only.** It is core domain: no `Identifier`, no `Dialect`, no Hibernate
+    type on the record. The parse and the classification happen in the starter; the record carries
+    `(String text, boolean quoted)` and renders with a `"` literal, PostgreSQL being the only
+    dialect this module supports — state that in its javadoc as `TableRef` states it for tables, and
+    state what happens if another dialect boots.
+
+#### Probes I require
+
+All in the default build, none in `src/test-pending/java` when the work lands; `-Pprobes-pending`
+empty afterwards. Cipher's five in `CipherProbeTenthPassTest` promoted and green **by their real
+assertions**, plus:
+
+*Identifier resolution (one per §4b path, per the framework integration rule).*
+`probe_a_quoted_mixed_case_column_boots_and_is_addressed_quoted` — `@Column(name = "\"Owner\"")` as
+`subjectColumn`, **no** mapped lowercase twin, a legacy `owner` column present in the table: write,
+erase, the index clears and the legacy column is untouched (change 2).
+`probe_an_unquoted_upper_case_column_is_addressed_folded` — `@Column(name = "OWNER_ID")`: the
+rendered SQL carries `owner_id` unquoted, never `"OWNER_ID"`, and the erasure clears (change 2).
+`probe_a_reserved_word_column_quoted_by_the_mapping_is_cleared` — the S-22 repro `KeywordNote`,
+green by `blindIndexColumnsCleared=1` and residual zero.
+`probe_a_column_lookup_key_differing_only_by_case_is_refused_naming_the_case_only_match` (change 7).
+`probe_a_formula_column_is_refused_by_its_flag`, with a `@Formula("owner_id")` variant that is a
+plain identifier (change 3).
+`probe_a_column_transformer_on_the_subject_column_is_refused_at_startup`, and the same on the index
+column (change 4).
+`probe_a_join_column_named_as_the_subject_column_is_refused_as_an_association` (change 6).
+`probe_a_column_name_containing_a_quote_character_is_refused` — asserted on the parsed text.
+`probe_a_quoted_column_whose_name_contains_a_dot_is_addressed_whole` — Thor's, kept.
+`probe_a_quoted_shredded_column_is_settled_at_startup_not_at_the_first_write` — S-24, green by the
+design's choice, never by a `PSQLException` out of `saveAndFlush` (change 5).
+`probe_a_composite_identifier_is_refused_by_its_real_reason` — the `singleIdColumn` path (change 6).
+`probe_globally_quoted_identifiers_boots_or_is_refused_by_its_real_reason` (change 12).
+
+*Read-back independence.*
+`probe_a_mis_addressed_erasure_is_caught_by_the_hibernate_rendered_residual` — swap the erasure's
+`ColumnRef` for a decoy so the `UPDATE` matches nothing: `SHRED-ERASURE-004` (`ErrorCodes.ERASURE_INDEX_RESIDUAL`), whole
+transaction rolled back, no key destroyed, no record appended, no `COMPLETE`. This is the probe that
+fails the moment the residual is ever rebuilt from the erasure's own text.
+`probe_a_partially_null_index_erases_without_refusing` — two rows for the subject, one with a null
+index: `cleared=1`, no refusal. Red against §4d check (i) as written; it pins change 8.
+`probe_the_independence_check_takes_no_second_connection` — `maximum-pool-size=1`, the erasure
+completes (change 9).
+`probe_the_independence_check_cannot_flush_pending_writes` — a session dirty with an insert for the
+erased subject at erasure time: no index is written after the clear (change 9).
+`probe_a_row_inserted_for_the_subject_after_the_clear_refuses_the_erasure` (change 10).
+
+*Architecture.* An ArchUnit assertion that `ColumnRef`, like every other core domain type, imports
+nothing outside the JDK (change 13).
+
+I review the revised addendum before any code. Changes 1, 2, 8 and 9 are the ones that decide
+whether this closes S-22 or moves it; the rest are the surfaces the fix opens.
