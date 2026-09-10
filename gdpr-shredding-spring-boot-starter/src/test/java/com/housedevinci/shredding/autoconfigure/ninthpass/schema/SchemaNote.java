@@ -13,8 +13,8 @@ import jakarta.persistence.Table;
 
 /**
  * Cipher, ninth pass, K1 lesson: the blind-index table lives in a schema of its own. When this
- * fixture was written the erasure interpolated {@code BlindIndexColumn.table()} unqualified, so what
- * it updated - and what {@code verifyCleared} read back - depended on the connection's {@code
+ * fixture was written the erasure interpolated {@code BlindIndexColumn.table()} unqualified, so
+ * what it updated - and what {@code verifyCleared} read back - depended on the connection's {@code
  * search_path}, and this mapping was refused at startup by accident, blaming a secondary table that
  * does not exist (S-21). Since design addendum 3 change 9 the table comes from the persister,
  * schema and all, and this mapping boots, writes and erases.
