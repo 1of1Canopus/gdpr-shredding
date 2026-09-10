@@ -8,6 +8,26 @@ are fine here for now — but before this repo is made public, move them to
 tests, README, CHANGELOG, LICENSE/NOTICE, SECURITY.md, CONTRIBUTING.md, user docs, CI, the
 probe script). See how `agent-guard` did it (2026-09-10).
 
+**Eighth pass done (Cipher, 2026-09-10, `fa6f477`). NOT MERGEABLE: one HIGH.** S-13 - S-7b, the
+general case of S-7, reproduced rather than argued: with no field declaring a tenant anywhere, the
+blind index is derived under the ambient `TenantSupplier` while the erasure matches on the row's own
+`tenant_id` value, so an application whose tenant column holds an owning company while the supplier
+yields the acting organisation leaves an HMAC of the erased plaintext behind on every erasure, with
+the proof reporting success (`CipherProbeBlindIndexAmbientTenantTest`, `src/test-pending/java`, RED;
+the surviving bytes are recomputable from the index secret). Fixed by design addendum 3, which is
+**APPROVED WITH CHANGES** - seven numbered, in `docs/plans/read-path-design.md` under "Cipher review
+of addendum 3"; changes 1 and 4 are load-bearing and change 4 is the one that closes the probe, since
+option (a) as recommended does not. Addendum 2 as built survived the attack: six changes all present,
+nested entries three deep, brackets inside entries and entries inside brackets, discarded inner
+entries and reused threads all behave. Two LOW seams in the region deque (S-14 `unwindTo` empties the
+whole deque for a token it cannot find; S-15 the S-4a deviation, ruled: widen the sweep), four INFO
+(S-16 ledger cap accepts 0/-1, S-17 the `BigDecimal` placeholder renders as a megabyte - Cipher's own
+seventh-pass prescription, S-18 `#27`'s branch is still unreachable and now claims not to be, S-19
+the read-region SPI is published as ordinary API). **S-11 is ruled an accepted residual** with exact
+wording for `SECURITY-NOTES.md`, and its probe is to be rewritten green and moved out of
+`src/test-pending/java` - no design stop. 236 tests green, core 85.3% / starter 88.4%. Full detail
+and the eight-line fix list: `docs/SECURITY-REVIEW-feat-shredding-core.md`, "Eighth pass (fa6f477)".
+
 **Seventh pass corrections, done (Isis, 2026-09-10).** S-7 (HIGH), S-8 (MEDIUM), S-9, S-10, S-11
 (LOW), S-12 (INFO), and QUESTIONS #26/#27 all closed; see the CHANGELOG's "Fixed"/"Added"/"Changed"
 entries for the seventh pass and #26/#27. S-8 is rebuilt on top of Thor's entry-epoch mechanism

@@ -684,3 +684,107 @@ index (today it survives). The S-7 `Folder` shape: cleared, no startup refusal n
 `UPDATE` moves: re-derived under the new value. A null or blank value at write: refused.
 `tenantColumn` unmapped, on an embeddable, non-`String`, or named by column rather than property:
 startup refusal, one probe each. And the proof's cleared-index count non-zero wherever one existed.
+
+### Cipher review of addendum 3 (2026-09-10)
+
+**APPROVED WITH CHANGES.** Seven, numbered. The property is stated correctly and it is the right
+property. The survey of options is honest and (c) and (d) are refused for the right reasons. But (a)
+as recommended does **not** close the finding it is written for, and I have the repro to show it -
+`CipherProbeBlindIndexAmbientTenantTest.probe_a_blind_index_under_the_ambient_tenant_survives_that_subjects_erasure`
+(`src/test-pending/java`, RED on `fa6f477`, no field declaring a tenant anywhere, nothing refused at
+startup, the surviving bytes recomputable as
+`HMAC(secret, org-a | Note | email | victim@example.test)` by the second probe in the same file).
+Changes 1 and 4 are the load-bearing ones; do not start building before they are settled.
+
+**1. `tenantColumn` is a column name, not a property name; the startup refusal as written refuses
+every correct configuration.** "Refuse at startup when `tenantColumn` is not a mapped basic `String`
+property" reads the annotation's value in the wrong namespace. `@BlindIndex(tenantColumn =
+"tenant_id")` names the column the erasure's `UPDATE ... WHERE tenant_id = ?` matches on; the state
+array and `persister.getPropertyNames()` are keyed by *property* names (`tenantId`). Written
+literally, either every existing mapping fails startup, or the lookup misses and the write derives
+under something unstated. The fix must resolve column to property through the persister's own
+column mapping, case-insensitively and allowing for a quoted identifier, and refuse at startup
+unless that resolution yields **exactly one** property that is basic, `String`-typed, mapped to the
+entity's primary table, not a formula and not inside an embeddable. Name entity, index field,
+`tenantColumn` and what was found, in the message.
+
+**2. Resolve once, share the result, so the two sides cannot drift again.** S-7 exists because the
+tenant the write derives under and the tenant the erasure matches on are computed in two places from
+two different inputs. Adding a third input - a property index into a state array - without binding
+it to the first two just moves the seam. `BlindIndexColumn` (it already carries table, column,
+subject column, tenant column) is where the resolved property name/index belongs, computed once
+during the startup scan and used by both `writeBlindIndexes` and `JdbcErasureStore`. One object, one
+resolution, and a test that asserts the write path and the erasure path read the same field of it.
+
+**3. Refuse null, blank and non-`String` at write time.** As the addendum says, plus the type: an
+index no `WHERE tenantColumn = ?` can match is an index no erasure can destroy. Typed error, naming
+entity, index field, column. `SHRED-UNVERIFIED-WRITE` is the closer vocabulary than
+`SHRED-CONFIG-001` for a runtime refusal, but I do not insist; pick one and use it consistently.
+
+**4. (a) alone does not close S-7b. The write must also refuse when the field's own resolved tenant
+and the row's `tenantColumn` value disagree.** This is the change that decides the addendum. Work
+the repro through the recommendation as written: the ciphertext of `email` is encrypted under the
+data key for `(org-a, subject)` - the field's resolved tenant, the ambient supplier here - while
+the index is now derived under `state[tenantColumn]` = `org-b`. An erasure for `(org-a, subject)`
+destroys the data key and kills the ciphertext, and its `UPDATE ... WHERE tenant_id = 'org-a'`
+matches no row: **the index still survives**, exactly as it does today. An erasure for
+`(org-b, subject)` clears the index and destroys a key the ciphertext was never encrypted under:
+the value stays readable. Making the derivation agree with the match column was never the broken
+link - the broken link is that one erasure request has to reach all three of them.
+
+  The invariant to enforce is therefore: *for a row to be erasable by one request, the tenant its
+  data key was derived under, the tenant its index was derived under, and the value in its
+  `tenantColumn` are one value.* Derive under `state[tenantColumn]` by all means - it documents
+  itself, "key it under what the erasure will match" - but pair it with a write-time refusal when
+  `Scope.tenantFor(index.ofFieldName())` is not equal to that value, message naming both, the field
+  and the column. With that refusal the two derivations are equal by construction and (a) and (b)
+  stop being alternatives.
+
+  On "(b) makes a legitimate shape unusable instead of correct": the shape it calls legitimate - a
+  tenant column holding something other than the tenant the value's key was derived under - is not
+  erasable under *any* keying this module can choose, because the erasure is asked for one tenant
+  and one subject. Refusing it at the write, loudly, naming both values, is the correct outcome and
+  not a degradation. An application that genuinely needs an acting organisation distinct from an
+  owning one must declare the `@Shredded` tenant as the owning one, which is what its tenant column
+  holds, and that shape then works.
+
+**5. Verify inside the erasure transaction rather than assume, in two parts.** After the `UPDATE`s
+and before the record is appended, per indexed table:
+
+  - `SELECT count(*) WHERE tenantColumn = ? AND subjectColumn = ? AND idx IS NOT NULL` must be zero,
+    and the erasure is **refused** if it is not. It should be trivially zero - which is the point: it
+    is the only runtime evidence that the `UPDATE` this module issued did what its row count claimed,
+    against a table that may carry a trigger, a rule, a view or a rewritten column since the scan.
+  - `SELECT count(*) WHERE subjectColumn = ? AND tenantColumn <> ? AND idx IS NOT NULL` is a **WARN**
+    with the count, never a refusal: those rows may legitimately belong to a different tenant that
+    happens to use the same subject identifier, and refusing would make one tenant's data block
+    another tenant's erasure. But when they are the same person - change 7's bulk-update residual,
+    among others - this line is the only place anyone will ever see it. Word it as "this subject also
+    has N blind index value(s) under other tenant values, which this erasure does not destroy".
+
+**6. No compatibility path for rows written under the old keying.** The branch is unreleased. Do not
+build an erasure that tries the old tenant as well as the new one: an erasure that searches for an
+index under two keys is an erasure that will keep finding reasons to search under a third. State in
+the addendum that the change is a clean break, and that any pre-existing deployment (there are none)
+would rebuild its index columns.
+
+**7. State the residual the module cannot see, and pair it with change 5.** A bulk `UPDATE t SET
+tenant_id = ?` in JPQL or native SQL fires no `onPreUpdate` and re-derives nothing, so a row moved
+that way keeps an index under its old tenant and becomes unreachable to its own erasure again. The
+module cannot detect it at write time; change 5's second half surfaces it at erasure time, which is the
+moment anyone can act on it. `SECURITY-NOTES.md` states it beside the blind-index control, in one sentence: *a row whose
+tenant column is changed by a bulk update outside Hibernate keeps an index derived under its former
+tenant, and the erasure refuses rather than reporting success.*
+
+**On relaxing S-7's startup refusal.** Agreed, and change 4 is what makes it safe: with the
+write-time equality refusal in force, a `@Shredded(tenant = ...)` on an indexed field is allowed
+exactly when its value is the value in the row's tenant column, checked per row per write rather
+than guessed at scan time. Keep the startup refusal until change 4 is green.
+
+**Probe list.** The addendum's six are right. Add: the `CipherProbeBlindIndexAmbientTenantTest`
+shape above (no declared tenant anywhere, ambient tenant differing from the column) cleared by the
+erasure; a write whose field tenant and column value disagree refused, naming both (change 4); a
+`tenantColumn` naming a column that maps to two properties, and one that maps to none, refused at
+startup (change 1); an erasure that finds an index still populated refused rather than recorded
+(change 5); and the blind-index *query* helper still finding a row it wrote, since change 4 moves
+what the query must compute under.

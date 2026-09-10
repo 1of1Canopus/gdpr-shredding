@@ -2366,3 +2366,289 @@ a property and an accident of Hibernate's exception conversion. Do not exclude t
 
 Not a finding this pass. Blocked on design addendum 2, reviewed above: **APPROVED WITH CHANGES**, six
 numbered. `CipherProbeRegionResidueTest` stays in `src/test-pending/java` until R1 is green.
+
+## Eighth pass (fa6f477)
+
+**Verdict: NOT MERGEABLE.** One HIGH is present on the branch, and it is not a new one: it is the
+half of S-7 that the seventh pass sent to Thor as a design stop (S-7b) and that Isis's startup
+refusal deliberately does not reach. It is now reproduced rather than argued -
+`CipherProbeBlindIndexAmbientTenantTest` (`src/test-pending/java`, RED) - and under the no-allowance
+rule a reproduced HIGH on the branch decides the verdict whoever it is assigned to. Design addendum
+3, which fixes it, is reviewed in `docs/plans/read-path-design.md` under "Cipher review of addendum
+3": **APPROVED WITH CHANGES**, seven of them, two load-bearing - the recommendation as written does
+not close the finding.
+
+Everything else on this pass is small. Addendum 2 as built holds up under attack: the six changes
+are all present, the epoch is compared for equality only, `NO_ENTRY` is real, the sweep is
+conditional and the predicate is in one place with four callers. Three entries deep, a
+`withReadBracket` inside an entry and an entry inside a `withReadBracket`, a discarded inner entry
+and a thread reused after a leaked region all behave. Two seams in the region deque were found, both
+fail-closed, both LOW. S-7, S-8, S-9, S-10 and S-12 are closed and re-verified; #26 refuses and is
+typed; #27 does not do what its own javadoc says it now does.
+
+### Numbers
+
+| | |
+|---|---|
+| build | `./mvnw -B clean verify` BUILD SUCCESS, exit 0 |
+| tests | 236 green (core 92, starter 127, sample 17); 0 failures, 0 errors, 0 skipped |
+| line coverage (jacoco.csv) | core 85.3% (1041/1221), starter 88.4% (1297/1468); gate 80% |
+| `-Pprobes-pending` before this pass | 128 starter tests, exactly 1 red: `CipherProbeSettlementListenerDisplacedTest` (S-11) |
+| `-Pprobes-pending` after this pass | starter 140 tests, 7 red: S-11's, plus 6 new probe methods of mine in 4 classes, all listed below |
+| probes diffed against `14da2f7` | 66 probe methods then, 73 now; one removed - S-7's own, rewritten as a startup refusal per the `#25`/C-38 precedent, ruled acceptable below. No assertion narrowed anywhere else |
+| Docker | up throughout; Testcontainers PostgreSQL pinned by digest; no test skipped |
+
+### Closed items re-verified
+
+- **S-7 (the declared-tenant half)** - `ShreddedModel` refuses at startup a `@BlindIndex` whose
+  `of=` field declares its own `@Shredded(tenant=...)`, naming entity, index field, `of` field, its
+  expression and the `tenantColumn`. `CipherProbeBlindIndexTenantTest` green. The probe *is* a
+  rewrite of the one the seventh pass shipped RED: the `Folder` fixture no longer boots, so the
+  original assertion is unbuildable, which is the same situation `#25` ruled on for S-1. Accepted as
+  a rewrite and not as a narrowing - but on the explicit condition that the property the original
+  probe carried is carried by the addendum 3 work, not retired with the fixture. It is not carried
+  today: see S-13.
+- **S-8** - `unwindTo(token, refuseUndrainedIntermediates)`; an intermediate region holding an
+  undrained decode refuses at `SHRED-READ-UNVERIFIED` after every region is popped and every epoch
+  restored, and `discardRegion` passes `false` so the in-flight exception still wins.
+  `CipherProbeSeventhPassTest` green, promoted out of `test-pending`.
+- **S-9** - `WriteVerification.normalise` is injective over every identifier type JPA allows:
+  `canonicalDecimal` = `stripTrailingZeros().toPlainString()`, no `longValue()` truncation anywhere.
+  `CipherProbeLedgerKeyTest` green.
+- **S-10** - all four placeholders derived from `SecureRandom` at class initialisation;
+  `describe()` prints a fixed literal and never the live token; the javadoc says "compared by value"
+  and the reference-identity sentence is gone. Attacked as instructed: they are never persisted (the
+  `Pre*` listeners test the state array before `writeBlindIndexes`, and the converter tests before it
+  encrypts), they are never serialised by this module, and nothing anywhere requires two JVMs to
+  agree on them - the comparison is always within the JVM that produced the marker. One consequence
+  of the seventh pass's own prescription is a defect: S-17.
+- **S-12** - renamed to `CipherProbePropertyAccessSequenceTest`, which is what it tests.
+- **#26** - `shredding.write-verification.max-outstanding`, default 50 000, counted on distinct
+  debts, refusing with `SHRED-UNVERIFIED-WRITE` and naming both the property and the remedy.
+  `CipherProbeWriteVerificationCapTest` green. The value is not validated: S-16.
+- **#27** - built as described, and it does not have the effect described: S-18.
+
+### S-13 (HIGH) A blind index survives its subject's erasure whenever the tenant column holds something else
+
+`CipherProbeBlindIndexAmbientTenantTest.probe_a_blind_index_under_the_ambient_tenant_survives_that_subjects_erasure`
+(`src/test-pending/java`, RED). This is S-7b, Thor's design stop, reproduced.
+
+`Note` declares no tenant expression on any field, so `ShreddedModel`'s S-7 refusal has nothing to
+look at and the application boots. `writeBlindIndexes` derives under `Scope.tenantFor("email")`,
+which falls through to the ambient `TenantSupplier` - `org-a`. The application writes `org-b` into
+the row's `tenant_id` column, which is the column `@BlindIndex(tenantColumn = "tenant_id")` names
+and the only thing `JdbcErasureStore.clearBlindIndexes` matches on. Erasing `(org-a, note-…)`
+destroys the data key, kills the ciphertext, appends a chained record reporting success - and the
+`UPDATE ... WHERE tenant_id = 'org-a'` matches no row.
+
+What is left in the table is `[6, -22, -99, -124, -116, -19, 34, 69]`, and the second probe in the
+same file recomputes exactly those bytes as
+`blindIndex.compute(TenantId.of("org-a"), "Note", "email", "victim@example.test")`. So the surviving
+value is a stable cross-row correlator for an erased subject and, for a low-entropy plaintext such
+as an email address, a confirmation oracle for anyone holding
+`shredding.blind-index.hmac-secret` - which is the thing blind-index columns are erased to prevent.
+The erasure proof says it succeeded.
+
+Nothing in this shape is exotic: an application whose tenant column holds an owning company while
+the request-scoped supplier yields the acting organisation reaches it on its first write, and no
+startup check, write check or erasure check says a word.
+
+**Fix: DESIGN STOP already taken - build design addendum 3 with the seven changes in my review of
+it.** Changes 1 and 4 are load-bearing and change 4 is the one that actually closes this probe;
+(a) as recommended does not. Thor builds, Isis does not. `CipherProbeBlindIndexAmbientTenantTest`
+and the probe list at the end of that review are the acceptance set.
+
+### S-14 (LOW) Closing a region that is no longer on the stack destroys every region that is
+
+`CipherProbeEighthPassRegionTest.probe_closing_a_swept_region_does_not_destroy_the_callers_live_region`
+(`src/test-pending/java`, RED).
+
+`unwindTo` pops until it finds `token`, and when `token` is on the deque at all it is correct. When
+it is not, the loop runs to the bottom and empties the deque - including the live entry region of
+the frame that is still running. Reachable without any error condition, by construction, from
+addendum 2's own sweep: a component inside a repository call opens a region with the deprecated
+`openRegion()`, a nested repository call sweeps that region away (correctly - change 3), and the
+component then closes what it opened. Its `closeRegion` refuses, as designed; the caller's own
+region is gone as collateral, so the caller's next decode is `SHRED-READ-UNSCOPED` and its own close
+refuses too. The same lever is available to any caller passing a token from another frame, which is
+exactly what the module's own tests do (`discardRegion(-1L)`, four `@AfterEach` blocks).
+
+Fail-closed: no plaintext crosses, a well-behaved call is refused instead. But "another region may
+never destroy this one" is the ownership rule at the top of `ShreddingContext`, and this is the path
+that breaks it.
+
+**Fix (Isis).** `ShreddingContext.unwindTo`: scan the deque for `token` first and pop nothing when
+it is absent - return `null`, which is already `closeRegion`'s refusal and `discardRegion`'s no-op.
+The deque is at most a handful of entries, so the scan is free, and S-8's intermediate refusal is
+unchanged for the case where the token is present. That removes the `discardRegion(-1L)` idiom's
+only reason to work, so add a package-private `ShreddingContext.resetForTests()` (same package as
+all four callers) and use it in those `@AfterEach` blocks. Probe: the one above, plus
+`CipherProbeRegionEpochTest` and `CipherProbeRegionResidueTest` staying green.
+
+### S-15 (LOW) Regions opened outside an entry accumulate on a pooled thread for its lifetime
+
+`CipherProbeEighthPassRegionTest.probe_raw_regions_do_not_accumulate_on_a_pooled_thread`
+(`src/test-pending/java`, RED). This is QUESTIONS S-4a, which Thor left for me to rule on.
+
+`sweepForeignRegions` pops while `stack.peek().epoch != inForce`. With no entry in force `inForce`
+is `NO_ENTRY`, and a region left behind by `openRegion()` also carries `NO_ENTRY`, so it compares
+equal, stops the sweep and is never removed. It cannot serve a decode - §2.4 holds - but it stays on
+the deque for the life of the thread, one node and one `HashMap` per leak, on request threads that
+live for the life of the process; and it makes `inReadBracket()` return `true` on that thread
+forever, which is a method this module publishes as an accusation other code may consult.
+
+**Ruling on S-4a: widen the predicate, as Thor proposed.** My change 3 said "sweep only regions
+whose epoch is not the epoch in force at entry; never one whose epoch equals it", and it was written
+to protect the nested case - a caller's live region must survive its callee's entry. Applied
+literally to `NO_ENTRY == NO_ENTRY` it protects nothing, because with no entry in force there is no
+live region to protect: everything on that deque is residue by definition.
+
+**Fix (Isis).** Extract `currentRegion()`'s predicate as `private static boolean isCurrent(Region
+region, long inForce)` = `inForce != NO_ENTRY && region.epoch == inForce`, use it in
+`currentRegion()`, and make the sweep `while (!stack.isEmpty() && !isCurrent(stack.peek(),
+inForce))`. The nested case is unchanged (the caller's region *is* current, the loop stops at it);
+the `NO_ENTRY`-in-force case now clears the deque, which is the correct reading of "a region opened
+outside either entry is residue by construction". WARN content unchanged - it already names only the
+count and the first `entity.field`, never a value, which I checked. Probe: the one above.
+
+### S-16 (INFO) The ledger cap accepts zero and negative and turns every write into a refusal
+
+`CipherProbeLedgerCapConfigTest.probe_a_ledger_cap_of_zero_is_refused_at_startup` and
+`probe_a_negative_ledger_cap_is_refused_at_startup` (`src/test-pending/java`, both RED: the context
+starts).
+
+`shredding.write-verification.max-outstanding=0` boots cleanly and then refuses the application's
+first write of any `@Shredded` entity with `SHRED-UNVERIFIED-WRITE`, by a message that reports the
+cap as `0` and advises chunking a `StatelessSession` import the application is not running. `-1` is
+the same. `ShreddingProperties.WriteVerificationProperties` has no validation and
+`ShreddingStartupCheck` passes the value straight into `WriteVerification.configureMaxOutstanding`.
+The module's own definition of done: "misconfiguration fails fast at startup with a message naming
+the property".
+
+**Fix (Isis).** Refuse at boot in `ShreddingStartupCheck.afterPropertiesSet`, before
+`configureMaxOutstanding`, when the value is below 1: `SHRED-CONFIG-001`, naming
+`shredding.write-verification.max-outstanding`, its value and the default. While there: the field it
+configures is a `static volatile` shared by every Spring context in the JVM, like
+`ShreddingRuntime`; one line of javadoc saying so is enough, it is not a second finding.
+
+### S-17 (INFO) The `BigDecimal` placeholder renders as a megabyte, and the seventh pass asked for it
+
+`CipherProbePlaceholderRenderingTest.probe_the_big_decimal_placeholder_renders_in_a_bounded_number_of_characters`
+(`src/test-pending/java`, RED: 1 000 559 characters).
+
+S-10's fix is right and my prescription for it - "a `BigDecimal` at a scale of the order of 10^6" -
+was careless. The unguessability that S-3's value comparison needs comes from the 64 random bits of
+the unscaled value; the scale contributes nothing to it and decides only what the marker renders as.
+`toString()` is 29 characters, `toPlainString()` is 1 000 559. A refused load is documented, by this
+module, to leave the marker in a detached entity and to be copied around by ordinary application
+code, so any renderer that plain-prints it - Jackson with `WRITE_BIGDECIMAL_AS_PLAIN`, a
+`DecimalFormat`, `String.format("%f", …)` - turns one refused field into a megabyte and a refused
+page of two hundred rows into two hundred of them.
+
+**Fix (Isis).** Draw the scale in the low thousands instead (`1_000 + random.nextInt(1_000)` is
+still a precision no application's own data carries), keep the 64 random unscaled bits, keep
+`LOCAL_DATE` as it is. Probe: the two above. Correct the S-10 javadoc's "of the order of 10^6".
+
+### S-18 (INFO) The "still outstanding at completion" refusal is still unreachable, and now says it is not
+
+No probe: an unreachable branch is what the finding is about. Evidence is JaCoCo on this build -
+`WriteVerification.java` lines 299, 300 and 301 have `ci=0`, `mi=4/3/7`: no test in the repository
+executes the body of that refusal, on a run where every other branch of `beforeCompletion` is
+covered.
+
+`#27` changed `settle` to discharge each debt only after its own check passes, which is a real
+improvement and the right shape regardless. But the branch it was meant to make reachable is
+`beforeCompletion`'s "`settle` returned and the ledger is not empty", and `settle` cannot do that:
+it returns only after every chunk of every group has been verified, and every verified debt is
+removed as it goes; anything else throws out of `settle` itself, past the branch. The seventh pass's
+own note - "a settlement that threw and was caught leaves entries for `beforeCompletion` to find" -
+was wrong on this point: what `beforeCompletion` then finds, it hands to `settle`, which throws
+again from inside `settle`. The branch is defence in depth against a future settlement path, which
+is a good reason to keep it, and JaCoCo exclusion is still refused.
+
+**Fix (Isis).** Either a test that reaches it - if one exists I have not found it and I will withdraw
+this - or correct the two claims to what is true: the javadoc on `settle` and the CHANGELOG entry for
+`#27` say the branch is now reachable; they must say that `settle` empties the ledger or throws, so
+the branch is unreachable by construction today, is kept as a belt for the next settlement path, and
+is deliberately not excluded from coverage. QUESTIONS `#27` gets the same correction.
+
+### S-19 (INFO) The read-region SPI is published to applications as ordinary API
+
+No probe: nothing mechanical distinguishes "public because another package needs it" from "public
+because users should call it" until the module says which is which. Stated with the evidence instead.
+
+`ShreddingContext` publishes `enterRegion()`, `recordDecoded(FrameKey, byte[])`, `drain(FrameKey)`
+and `pendingKeysFor(String, String)` as public static methods on a public class, because the
+converter and the event listener live in other packages. The consequences are visible in this pass's
+own work: `enterRegion()` hands any caller the real entry epoch that `openRegion()` was deprecated
+for not handing out, so the S-4 shape the addendum closed - a user `@PostLoad` method opening a
+region that then takes the call's decodes - is available again by calling the other method; and
+`pendingKeysFor` followed by `drain` lets any code on the thread take a decrypted value out of the
+region before `onPostLoad` can verify it against its row, which both bypasses that verification and
+makes the legitimate read refuse. Neither is a privilege escalation - it is all first-party code in
+one JVM, already able to do worse - and the library's definition of done is the standard it fails:
+"everything not meant for users is package-private or `@Internal`".
+
+**Fix (Isis).** Javadoc, not restructuring: an `@apiNote` on those four methods saying they are this
+module's internal SPI, called by `Shredded*Converter` and `ShreddingEventListener`, not API for
+applications, and subject to change without a major version; `withReadBracket` is the one supported
+entry and it stays as it is. One line in `README.md`'s API section listing what is stable.
+
+### Ruling on S-11: accepted residual, with wording, and no design stop
+
+Isis's analysis is right and I checked it: this module composes its integrator **last** on purpose,
+so any check it makes about a listener group's contents is made after every earlier integrator has
+had its turn, and a group an earlier integrator emptied with `setListeners` looks, to us,
+indistinguishable from a group that was always that size. Our own listener is appended into it and
+measures as correctly positioned relative to what remains. That is structural.
+
+I am not taking a design stop for it, and here is why. What the attack removes is *Hibernate's own*
+seeded listener, never ours - ours is registered after the wipe and its presence is what
+`refuseIfVerifierNotRegisteredFirst` proves, on all eight types. No control of this module is
+disabled: `POST_LOAD`'s default gone still leaves our verifier first and installing; `FLUSH`'s
+default gone means Hibernate stops flushing, which is an application that does not work rather than
+an erasure that does not erase. And the actor is an integrator on the classpath - code running in
+this JVM, which can reflect into `ShreddingContext` and defeat any check the module writes. A new
+snapshot mechanism would buy detection of one path against an actor who has ten.
+
+**Ruling: accepted residual. Isis writes this into `SECURITY-NOTES.md` beside control 11, and the
+same paragraph, condensed, into the javadoc of `REGISTERED_TYPES`:**
+
+> **What the startup listener check does and does not prove.** `ShreddingStartupCheck` proves,
+> against the live `EventListenerRegistry` after the `SessionFactory` is built, that this module's
+> listener is registered on all eight event types it registers for and is in the position it
+> registered for - first for `PRE_INSERT`, `PRE_UPDATE` and `POST_LOAD`, last for `POST_INSERT`,
+> `POST_UPDATE`, `POST_DELETE`, `FLUSH` and `AUTO_FLUSH`. It does not prove that the listeners
+> Hibernate itself seeded are still there. This module composes its integrator last on purpose, so
+> an integrator composed earlier can call `registry.setListeners(type, …)` and replace a group's
+> prior contents - Hibernate's own `DefaultFlushEventListener` among them - before this module
+> registers at all; our listener is then added to the emptied group and measures as correctly
+> positioned, because position is measured against what remains. No check this module can make from
+> inside the same JVM closes that, and none of its own controls is removed by it: this module's
+> listener is always registered after the wipe and its presence is checked. What is lost is
+> Hibernate's own behaviour, which fails loudly. Integrators on the classpath are inside the trust
+> boundary; review them as you would any other code you run.
+
+**Fix (Isis).** The wording above, in both places. Then rewrite
+`CipherProbeSettlementListenerDisplacedTest` to assert the true, documented outcome the way `#18`
+did for C-21 - our listener is still present and still last on `FLUSH` after
+`DisplacingIntegrator` runs, and the startup check therefore passes - rename it to say so
+(`CipherProbeEarlierIntegratorWipesHibernateDefaultsTest` or shorter), and `git mv` it into
+`src/test/java` green. `src/test-pending/java` is a staging area, not a home for a permanently red
+probe.
+
+### Fix list
+
+| # | severity | who | item |
+|---|---|---|---|
+| S-13 | HIGH | Thor | build design addendum 3 with the seven changes in its review; changes 1 and 4 are load-bearing |
+| S-14 | LOW | Isis | `unwindTo` pops nothing for a token that is not on the deque; add `resetForTests()` and use it in the four `@AfterEach` blocks |
+| S-15 | LOW | Isis | widen the sweep to `!isCurrent(peek(), inForce)` (ruling on S-4a) |
+| S-16 | INFO | Isis | refuse `shredding.write-verification.max-outstanding < 1` at startup, naming the property |
+| S-17 | INFO | Isis | `BIG_DECIMAL` placeholder scale in the low thousands; correct the S-10 javadoc |
+| S-18 | INFO | Isis | a test that reaches the completion refusal, or correct the javadoc, CHANGELOG and QUESTIONS `#27` to say it is unreachable by construction |
+| S-19 | INFO | Isis | `@apiNote` on the four SPI methods; README API section |
+| S-11 | LOW | Isis | the accepted-residual wording above, and the probe rewritten green and moved out of `test-pending` |
+
+Re-verification when all eight are in: every probe named above green, plus the whole default build
+and `-Pprobes-pending` with nothing red.
