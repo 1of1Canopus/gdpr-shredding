@@ -492,7 +492,7 @@ public final class ShreddingContext {
    */
   public static void closeRegion(long token) {
     long epochAtClose = EPOCH.get();
-    Region region = unwindTo(token);
+    Region region = unwindTo(token, true);
     if (region == null) {
       throw new ShreddingException(
           ErrorCodes.READ_UNVERIFIED,
@@ -553,7 +553,7 @@ public final class ShreddingContext {
    * failure worth reporting - the original exception is.
    */
   public static void discardRegion(long token) {
-    unwindTo(token);
+    unwindTo(token, false);
   }
 
   /**
@@ -566,10 +566,23 @@ public final class ShreddingContext {
    * closed, but wrong, and wrong for the whole rest of the thread's life. The nested probes in
    * {@code CipherProbeRegionEpochTest} and {@code CipherProbeReadScopeTest} fail immediately if a
    * second unwind path is ever added without the restore.
+   *
+   * <p><strong>S-8 (Cipher seventh pass).</strong> Every region this pops on the way to {@code
+   * token} is an <em>intermediate</em> region - one whose own close was skipped: the {@code C-32}
+   * {@link StackOverflowError} window, or a nested {@code withReadBracket} body that returned
+   * normally without ever closing the region it opened. Discarding one that still holds a decode
+   * nothing ever drained, in silence, on the outer call's <em>normal</em> return path, is exactly
+   * the accounting {@code SHRED-READ-UNVERIFIED} exists to make loud - so when {@code
+   * refuseUndrainedIntermediates} is set, the first such region found is logged at {@code WARN} and
+   * refuses, once every region down to {@code token} has been popped and every epoch restored, so a
+   * retry still starts clean. {@link #discardRegion(long)} passes {@code false}: on that path the
+   * original exception already in flight is the failure worth reporting, and this must not replace
+   * it or stop the unwind partway through.
    */
-  private static Region unwindTo(long token) {
+  private static Region unwindTo(long token, boolean refuseUndrainedIntermediates) {
     Deque<Region> stack = REGIONS.get();
     Region found = null;
+    Region undrainedIntermediate = null;
     while (!stack.isEmpty()) {
       Region region = stack.pop();
       restoreEpoch(region);
@@ -577,9 +590,34 @@ public final class ShreddingContext {
         found = region;
         break;
       }
+      if (refuseUndrainedIntermediates
+          && undrainedIntermediate == null
+          && !region.pending.isEmpty()) {
+        undrainedIntermediate = region;
+      }
     }
     if (stack.isEmpty()) {
       REGIONS.remove();
+    }
+    if (undrainedIntermediate != null) {
+      String first = undrainedIntermediate.firstPendingName();
+      log.warn(
+          "shredding: closing a read region unwound past an inner region with {} decrypted"
+              + " @Shredded value(s) that no verifier ever drained, the first being {}",
+          undrainedIntermediate.total(),
+          first);
+      throw new ShreddingException(
+          ErrorCodes.READ_UNVERIFIED,
+          "closing a read region unwound past an inner region that closed with "
+              + undrainedIntermediate.total()
+              + " decrypted @Shredded value(s) that no verifier ever drained, the first being "
+              + first
+              + ". Every decrypt inside a read region must be reached by a managed entity load,"
+              + " which ShreddingEventListener.onPostLoad verifies against the row once it is"
+              + " hydrated; an inner region left open with an undrained decode - an Error unwinding"
+              + " past its own close, or a bracket body that returned normally without closing the"
+              + " region it opened - is refused here rather than discarded in silence when the"
+              + " outer region closes.");
     }
     return found;
   }

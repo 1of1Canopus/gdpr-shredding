@@ -6,7 +6,22 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
-### Fixed (seventh pass at `14da2f7`, S-4: region residue, the entry epoch)
+### Fixed (seventh pass at `e2c2bdd`, S-8: `closeRegion` discarded an inner region's undrained decode in silence)
+
+**MEDIUM.** `unwindTo` popped every region above the one being closed without ever looking at its
+pending map, so a decrypted `@Shredded` value an inner region's own close never drained - the `C-32`
+`StackOverflowError` window, or a nested `withReadBracket` body that returned normally without
+closing the region it opened - was dropped in silence on the outer call's *normal* return path, and
+the outer call returned its result: exactly the accounting `SHRED-READ-UNVERIFIED` exists to make
+loud, silently skipped for every region but the one actually being closed. `unwindTo` now takes a
+`refuseUndrainedIntermediates` flag: `closeRegion` passes `true` and, once every region down to its
+own token has been popped and every epoch restored (so a retry still starts clean), refuses with the
+same message shape as its own region's unpaid-debt check if any intermediate region it passed
+through still held one; `discardRegion` passes `false` and keeps dropping unchecked, because on that
+path the original exception already in flight is the failure worth reporting. Rebuilt on top of
+Thor's entry-epoch mechanism (`95efeac`/`ff294bc`) rather than the deprecated `openRegion()`.
+
+### Fixed (seventh pass at `e2c2bdd`, S-7: a blind index derived under a declared tenant survives that tenant's erasure)
 
 **A read region left on a pooled thread by a call that never closed it could serve the next call's
 decrypts.** `recordDecoded`, `drain`, `pendingKeysFor` and `closeRegion` all asked one question -

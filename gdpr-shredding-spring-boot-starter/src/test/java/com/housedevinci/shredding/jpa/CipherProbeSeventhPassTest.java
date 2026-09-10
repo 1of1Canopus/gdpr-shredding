@@ -50,12 +50,15 @@ class CipherProbeSeventhPassTest {
    * result. The accounting that {@code SHRED-READ-UNVERIFIED} exists to make loud - "this call
    * decrypted something and nothing proved which row it belonged to" - is simply not performed for
    * any region below the one being closed. {@code discardRegion} may drop unchecked, because the
-   * original exception is the failure worth reporting; {@code closeRegion} may not.
+   * original exception is the failure worth reporting; {@code closeRegion} may not. Built on {@code
+   * enterRegion()} (the addendum-2 epoch mechanism's entry point) rather than the deprecated,
+   * unpaired {@code openRegion()}, since the inner region here is meant to be a legitimate,
+   * epoch-stamped entry whose own close was simply never reached - not an ownerless region (S-4).
    */
   @Test
   void probe_an_inner_regions_undrained_decode_is_discarded_in_silence_by_the_outer_close() {
-    long outer = ShreddingContext.openRegion();
-    ShreddingContext.openRegion(); // an inner region whose own close never runs
+    long outer = ShreddingContext.enterRegion();
+    ShreddingContext.enterRegion(); // an inner entry whose own close never runs
     ShreddingContext.recordDecoded(KEY, "SEVENTH-SECRET".getBytes(StandardCharsets.UTF_8));
 
     assertThatThrownBy(() -> ShreddingContext.closeRegion(outer))
