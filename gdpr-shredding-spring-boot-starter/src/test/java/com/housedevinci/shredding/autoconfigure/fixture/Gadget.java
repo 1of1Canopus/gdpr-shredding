@@ -52,7 +52,13 @@ public class Gadget {
   @Column(name = "installed_on")
   LocalDate installedOn;
 
-  @Shredded(subject = "#{ownerId}", tenant = "#{tenantId}")
+  // S-7 (Cipher seventh pass): no explicit tenant expression here, deliberately - the field a
+  // @BlindIndex names in of= may not declare its own @Shredded(tenant=...), because
+  // writeBlindIndexes would derive the index under that declared tenant while the erasure that is
+  // meant to destroy it matches on this row's own tenant_id column value, and startup now refuses
+  // that shape (SHRED-CONFIG-001). Falls back to the row's primary tenant, i.e. balance's - which
+  // is tenant_id, the same column the erasure matches on.
+  @Shredded(subject = "#{ownerId}")
   @Convert(converter = MetadataConverter.class)
   @Column(name = "metadata")
   String metadata;

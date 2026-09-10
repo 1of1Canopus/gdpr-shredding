@@ -1,6 +1,5 @@
 package com.housedevinci.shredding.sample;
 
-import com.housedevinci.shredding.api.BlindIndex;
 import com.housedevinci.shredding.api.Shredded;
 import jakarta.persistence.Column;
 import jakarta.persistence.Convert;
@@ -17,6 +16,15 @@ import jakarta.persistence.Table;
  *
  * <p>{@code email} and {@code phone} are encrypted under this customer's own data key. Erasing the
  * customer destroys that key; this row, and every row that points at {@code customerId}, survives.
+ *
+ * <p>Neither field carries a {@code @BlindIndex}. S-7 (Cipher seventh pass): a {@code @BlindIndex}
+ * whose {@code of} field declares its own {@code @Shredded(tenant=...)} is refused at startup - the
+ * index would be derived under that declared tenant, but the erasure meant to destroy it matches
+ * only the row's own {@code tenant_id} column, and the module cannot prove the two always agree
+ * from a SpEL expression alone. This sample is genuinely multi-tenant per write, with no ambient
+ * {@code TenantSupplier} configured, so every {@code @Shredded} field here has to declare its own
+ * {@code tenant = "#{tenantId}"} - which rules a blind index out for it. See {@code README.md} and
+ * {@code SECURITY-NOTES.md} for the equality-lookup feature on a single-ambient-tenant application.
  */
 @Entity
 @Table(name = "customer")
@@ -41,11 +49,6 @@ public class Customer {
   @Convert(converter = CustomerPhoneConverter.class)
   @Column(name = "phone")
   private String phone;
-
-  /** Prefilter for equality lookups on {@link #email}; nulled by an erasure. */
-  @BlindIndex(of = "email", subjectColumn = "customer_id", tenantColumn = "tenant_id")
-  @Column(name = "email_bidx")
-  private byte[] emailBidx;
 
   protected Customer() {}
 
@@ -82,10 +85,6 @@ public class Customer {
 
   public String getPhone() {
     return phone;
-  }
-
-  public byte[] getEmailBidx() {
-    return emailBidx == null ? null : emailBidx.clone();
   }
 
   /**

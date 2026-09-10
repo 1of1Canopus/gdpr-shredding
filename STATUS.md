@@ -1,5 +1,21 @@
 # STATUS — GDPR Shredding free core
 
+**Before going public: apply the public-repository convention**
+(`15-regulated-spring/specs/SHARED-CONVENTIONS.md`, "Public repositories"). This repo is
+still private, so `SPEC.md`/`STATUS.md`/`QUESTIONS.md`/security reviews/plans/`RELEASING.md`
+are fine here for now — but before this repo is made public, move them to
+`15-regulated-spring/internal/gdpr-shredding/` and scrub names from what stays (code,
+tests, README, CHANGELOG, LICENSE/NOTICE, SECURITY.md, CONTRIBUTING.md, user docs, CI, the
+probe script). See how `agent-guard` did it (2026-09-10).
+
+**Seventh pass corrections, in progress (Isis, 2026-09-10).** S-7 (HIGH), S-9, S-10, S-11 (LOW)
+closed; see the CHANGELOG's four "Fixed (seventh pass at `e2c2bdd`, ...)" entries. `CipherProbeSeventhPassTest`
+carries both S-8 and S-10's probes in one file and stays in `src/test-pending/java` until S-8 is
+also green (S-8 is being rewritten on top of Thor's epoch mechanism, `95efeac`, per Dollar's
+instruction - `unwindTo` gets the refusal, not a new inline pop loop). S-12 (rename) and #26/#27
+still open. S-4 R1 and the general form of S-7 remain design stops for Thor, unaffected by this
+pass's corrections.
+
 **Seventh pass done (Cipher, 2026-09-10, `e2c2bdd`). NOT MERGEABLE: one HIGH.** S-7 - a
 `@BlindIndex` derived under a `@Shredded` field's *declared* tenant survives that tenant's erasure,
 so a completed erasure leaves an HMAC of the erased plaintext in the table. Opened by S-2's own fix.

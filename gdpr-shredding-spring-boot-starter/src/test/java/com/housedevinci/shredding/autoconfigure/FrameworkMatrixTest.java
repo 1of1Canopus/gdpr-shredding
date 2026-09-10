@@ -203,7 +203,9 @@ class FrameworkMatrixTest {
     assertThat(Placeholders.isPlaceholder(new String(Placeholders.STRING))).isTrue();
     assertThat(Placeholders.isPlaceholder(new BigDecimal(Placeholders.BIG_DECIMAL.toPlainString())))
         .isTrue();
-    assertThat(Placeholders.isPlaceholder(LocalDate.of(-999_999_999, 1, 1))).isTrue();
+    // S-10 (Cipher seventh pass): the marker used to be exactly LocalDate.MIN, an ordinary
+    // application value; it no longer is, and LocalDate.MIN is no longer taken for it.
+    assertThat(Placeholders.isPlaceholder(LocalDate.of(-999_999_999, 1, 1))).isFalse();
   }
 
   // -- §2 row 21: a forged placeholder in the column ---------------------------------------------

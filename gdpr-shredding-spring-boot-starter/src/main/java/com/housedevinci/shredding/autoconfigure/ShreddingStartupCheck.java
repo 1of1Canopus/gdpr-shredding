@@ -108,15 +108,50 @@ public final class ShreddingStartupCheck implements InitializingBean {
   }
 
   /**
-   * S-6 (Cipher sixth pass). {@code ShreddingHibernateCustomizer} composes with whatever {@code
-   * IntegratorProvider} another library or the application already installed, so this module's
-   * listener is never silently discarded - but composing is a best effort, not a proof: nothing
-   * checked, until now, that the composition actually reached Hibernate and that this module's
-   * {@code POST_LOAD} listener is still the first one called. Run once, after the {@code
-   * SessionFactory} is actually built (this bean depends on {@code EntityManagerFactory}, so Spring
-   * has already finished building it by the time this runs), against the real, live {@code
-   * EventListenerRegistry} rather than assumed from the customizer having run without an exception.
+   * S-6 (Cipher sixth pass), widened by S-11 (Cipher seventh pass). {@code
+   * ShreddingHibernateCustomizer} composes with whatever {@code IntegratorProvider} another library
+   * or the application already installed, so this module's listener is never silently discarded -
+   * but composing is a best effort, not a proof: nothing checked, until S-6, that the composition
+   * actually reached Hibernate and that this module's {@code POST_LOAD} listener is still the first
+   * one called. Run once, after the {@code SessionFactory} is actually built (this bean depends on
+   * {@code EntityManagerFactory}, so Spring has already finished building it by the time this
+   * runs), against the real, live {@code EventListenerRegistry} rather than assumed from the
+   * customizer having run without an exception.
+   *
+   * <p><strong>S-11.</strong> S-6's check covered five of the seven event types {@link
+   * ShreddingIntegrator} registers - {@code PRE_INSERT}, {@code PRE_UPDATE}, {@code POST_INSERT},
+   * {@code POST_UPDATE} for presence only, {@code POST_LOAD} for presence and position - and left
+   * {@code FLUSH}, {@code AUTO_FLUSH} and {@code POST_DELETE}, S-1's settlement machinery,
+   * unchecked at all: another library's ordinary {@code registry.setListeners(EventType.FLUSH,
+   * ...)} silently removes this module's settlement listener and the application starts. Presence
+   * is also not the position the integrator registered for: {@code PRE_*} and {@code POST_LOAD} are
+   * prepended because the scope must be pushed, and the verifier must install, before anything else
+   * runs; {@code POST_INSERT}, {@code POST_UPDATE}, {@code POST_DELETE}, {@code FLUSH} and {@code
+   * AUTO_FLUSH} are appended because each must see what already happened. One table, the same list
+   * {@link ShreddingIntegrator#integrate} registers, so a type added there cannot silently go
+   * unchecked here.
    */
+  private static final java.util.List<TypeCheck<?>> REGISTERED_TYPES =
+      java.util.List.of(
+          TypeCheck.first(EventType.PRE_INSERT),
+          TypeCheck.first(EventType.PRE_UPDATE),
+          TypeCheck.first(EventType.POST_LOAD),
+          TypeCheck.last(EventType.POST_INSERT),
+          TypeCheck.last(EventType.POST_UPDATE),
+          TypeCheck.last(EventType.POST_DELETE),
+          TypeCheck.last(EventType.FLUSH),
+          TypeCheck.last(EventType.AUTO_FLUSH));
+
+  private record TypeCheck<T>(EventType<T> type, boolean mustBeFirst) {
+    static <T> TypeCheck<T> first(EventType<T> type) {
+      return new TypeCheck<>(type, true);
+    }
+
+    static <T> TypeCheck<T> last(EventType<T> type) {
+      return new TypeCheck<>(type, false);
+    }
+  }
+
   private void refuseIfVerifierNotRegisteredFirst() {
     var sessionFactory = entityManagerFactory.unwrap(SessionFactoryImplementor.class);
     EventListenerRegistry registry =
@@ -128,52 +163,60 @@ public final class ShreddingStartupCheck implements InitializingBean {
               + " read-path checks are Hibernate event listeners; without a registry none of them"
               + " can be registered at all.");
     }
-    refuseUnlessRegistered(registry, EventType.PRE_INSERT);
-    refuseUnlessRegistered(registry, EventType.PRE_UPDATE);
-    refuseUnlessRegistered(registry, EventType.POST_INSERT);
-    refuseUnlessRegistered(registry, EventType.POST_UPDATE);
-    refuseUnlessFirst(registry, EventType.POST_LOAD);
+    for (TypeCheck<?> check : REGISTERED_TYPES) {
+      refuseUnlessAtPosition(registry, check);
+    }
   }
 
-  private <T> void refuseUnlessRegistered(EventListenerRegistry registry, EventType<T> type) {
-    var group = registry.getEventListenerGroup(type);
+  private <T> void refuseUnlessAtPosition(EventListenerRegistry registry, TypeCheck<T> check) {
+    var group = registry.getEventListenerGroup(check.type());
+    T first = null;
+    T last = null;
+    boolean present = false;
     for (T candidate : group.listeners()) {
+      if (first == null) {
+        first = candidate;
+      }
+      last = candidate;
       if (candidate == shreddingEventListener) {
-        return;
+        present = true;
       }
     }
-    throw new ShreddingException(
-        ErrorCodes.CONFIG,
-        "shredding: this module's listener is not registered on "
-            + type.eventName()
-            + ". A second HibernatePropertiesCustomizer that sets"
-            + " hibernate.integrator_provider without composing with the one this module installs -"
-            + " see ShreddingAutoConfiguration.shreddingHibernateCustomizer - replaces it instead of"
-            + " adding to it, and every write and read-path check this module makes is silently"
-            + " off.");
-  }
-
-  private <T> void refuseUnlessFirst(EventListenerRegistry registry, EventType<T> type) {
-    var group = registry.getEventListenerGroup(type);
-    T first = null;
-    for (T candidate : group.listeners()) {
-      first = candidate;
-      break;
+    if (!present) {
+      throw new ShreddingException(
+          ErrorCodes.CONFIG,
+          "shredding: this module's listener is not registered on "
+              + check.type().eventName()
+              + ". A second HibernatePropertiesCustomizer that sets"
+              + " hibernate.integrator_provider without composing with the one this module installs"
+              + " - see ShreddingAutoConfiguration.shreddingHibernateCustomizer - or another"
+              + " integrator's own registry.setListeners(...) replacing this module's listener"
+              + " outright, removes it instead of adding to it, and every write and read-path check"
+              + " this module makes is silently off.");
     }
-    if (first == shreddingEventListener) {
+    T expected = check.mustBeFirst() ? first : last;
+    if (expected == shreddingEventListener) {
       return;
     }
     throw new ShreddingException(
         ErrorCodes.CONFIG,
-        "shredding: this module's listener is not first on "
-            + type.eventName()
+        "shredding: this module's listener is registered on "
+            + check.type().eventName()
+            + " but is not "
+            + (check.mustBeFirst() ? "first" : "last")
             + " ("
-            + (first == null ? "no listener at all" : first.getClass().getName())
-            + " is). It has to run before any other POST_LOAD listener - a user @PostLoad method, an"
-            + " @EntityListeners bean, or another library's own integrator - or that listener sees"
-            + " the read placeholder instead of the decrypted value (Cipher item 8). Another"
-            + " integrator prepended after this module's own installed; see"
+            + expected.getClass().getName()
+            + " is). "
+            + (check.mustBeFirst()
+                ? "It has to run before any other listener on this type - a user @PostLoad method,"
+                    + " an @EntityListeners bean, or another library's own integrator - or that"
+                    + " listener sees the read placeholder instead of the decrypted value, or binds"
+                    + " before the scope is pushed (Cipher item 8)."
+                : "It has to run after every other listener on this type - the post-hoc header"
+                    + " check and the settlement machinery must see what actually reached the"
+                    + " database, after every other listener has had its turn.")
+            + " Another integrator prepended or reordered after this module's own installed; see"
             + " ShreddingAutoConfiguration.shreddingHibernateCustomizer for how to compose instead"
-            + " of prepending around it.");
+            + " of displacing it.");
   }
 }

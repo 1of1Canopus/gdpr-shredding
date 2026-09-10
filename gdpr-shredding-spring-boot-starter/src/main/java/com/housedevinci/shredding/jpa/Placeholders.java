@@ -46,13 +46,22 @@ public final class Placeholders {
   public static final byte[] BYTES = randomBytes();
 
   /**
-   * {@code LocalDate} columns. A date no application writes, and in any case this exact instance -
-   * an equal {@code LocalDate.MIN} obtained elsewhere is not this object.
+   * {@code LocalDate} columns. S-10 (Cipher seventh pass): this used to be exactly {@link
+   * LocalDate#MIN}, an ordinary application value for an open-ended validity range - so an
+   * application storing {@code LocalDate.MIN} in a {@code @Shredded LocalDate} field had every
+   * insert and update of that entity refused, permanently, by a message calling its own data this
+   * module's marker. Compared by value (S-3), the marker has to be as unguessable as {@link
+   * #STRING} and {@link #BYTES} already are: a date drawn from {@link SecureRandom} within the
+   * first few thousand days after {@code LocalDate.MIN}, never {@code LocalDate.MIN} itself.
    */
-  public static final LocalDate LOCAL_DATE = LocalDate.of(-999_999_999, 1, 1);
+  public static final LocalDate LOCAL_DATE = randomLocalDate();
 
-  /** {@code BigDecimal} columns. Same rule: this instance, not this value. */
-  public static final BigDecimal BIG_DECIMAL = new BigDecimal("-0.00000000000000000000000000001");
+  /**
+   * {@code BigDecimal} columns. S-10: same rule as {@link #LOCAL_DATE} - a value drawn from {@link
+   * SecureRandom} at a scale of the order of 10^6, a precision no application's own {@code
+   * BigDecimal} data plausibly carries, rather than a single fixed literal.
+   */
+  public static final BigDecimal BIG_DECIMAL = randomBigDecimal();
 
   private Placeholders() {}
 
@@ -80,9 +89,15 @@ public final class Placeholders {
     return false;
   }
 
-  /** The marker's rendering, for a message that has to name it without printing a real value. */
+  /**
+   * S-10: a fixed literal, not {@link #STRING}. {@code describe()} exists so a message can name
+   * "this module's read placeholder" without printing a real, potentially sensitive value; printing
+   * the actual per-JVM {@link #STRING} token into every such exception message and log line handed
+   * that token to anyone with log access, for no reason - nothing needs the real token to read the
+   * message.
+   */
   public static String describe() {
-    return STRING;
+    return "[SHRED-PLACEHOLDER]";
   }
 
   private static String randomToken() {
@@ -99,5 +114,21 @@ public final class Placeholders {
     byte[] raw = new byte[16];
     new SecureRandom().nextBytes(raw);
     return raw;
+  }
+
+  /** {@link LocalDate#MIN} plus a random offset of one to nine thousand days. */
+  private static LocalDate randomLocalDate() {
+    int offsetDays = 1 + new SecureRandom().nextInt(9000);
+    return LocalDate.MIN.plusDays(offsetDays);
+  }
+
+  /** A random, positive unscaled value at a scale on the order of 10^6. */
+  private static BigDecimal randomBigDecimal() {
+    SecureRandom random = new SecureRandom();
+    byte[] raw = new byte[8];
+    random.nextBytes(raw);
+    java.math.BigInteger unscaled = new java.math.BigInteger(1, raw).or(java.math.BigInteger.ONE);
+    int scale = 1_000_000 + random.nextInt(1_000);
+    return new BigDecimal(unscaled, scale);
   }
 }

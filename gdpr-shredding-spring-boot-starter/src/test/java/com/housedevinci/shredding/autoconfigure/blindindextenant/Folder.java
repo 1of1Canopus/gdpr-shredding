@@ -1,4 +1,4 @@
-package com.housedevinci.shredding.autoconfigure.seventhpending;
+package com.housedevinci.shredding.autoconfigure.blindindextenant;
 
 import com.housedevinci.shredding.api.BlindIndex;
 import com.housedevinci.shredding.api.Shredded;

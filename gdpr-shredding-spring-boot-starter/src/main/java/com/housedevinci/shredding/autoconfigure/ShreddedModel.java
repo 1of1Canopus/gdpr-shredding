@@ -278,6 +278,39 @@ public final class ShreddedModel {
                   + "\", which is not a @Shredded field of "
                   + entityName);
         }
+        // S-7: writeBlindIndexes derives the index under the of-field's own declared tenant
+        // (Scope.tenantFor), but the erasure that is supposed to destroy it matches on the row's
+        // tenantColumn value - the ambient tenant, not any one field's declared one. If the
+        // of-field declares its own tenant expression, this module cannot know at scan time
+        // whether that expression's runtime value will ever equal tenantColumn's, so it cannot
+        // prove the index is reachable by the erasure that is meant to destroy it. Refused rather
+        // than written: a completed erasure must not be able to leave an HMAC of the erased
+        // plaintext behind.
+        ShreddedField ofField =
+            shreddedFieldsHere.stream()
+                .filter(f -> f.fieldName().equals(annotation.of()))
+                .findFirst()
+                .orElseThrow();
+        if (ofField.tenant() != null) {
+          throw config(
+              "@BlindIndex on "
+                  + where
+                  + " indexes "
+                  + entityName
+                  + "."
+                  + annotation.of()
+                  + ", which declares its own @Shredded(tenant=\""
+                  + ofField.tenant().source()
+                  + "\"). writeBlindIndexes derives the index under that declared tenant, but the"
+                  + " erasure matches the index's tenantColumn=\""
+                  + annotation.tenantColumn()
+                  + "\" against the row's own column value - not against any field's declared"
+                  + " tenant expression - so this module cannot prove the index will ever be"
+                  + " reachable by the erasure meant to destroy it. The value in tenantColumn must"
+                  + " be the tenant the index was derived under, or the erasure cannot find it. Do"
+                  + " not declare a tenant on a @Shredded field that a @BlindIndex names in of=, or"
+                  + " index a field that does not need its own tenant instead.");
+        }
         field.setAccessible(true);
         indexes.add(
             new BlindIndexField(

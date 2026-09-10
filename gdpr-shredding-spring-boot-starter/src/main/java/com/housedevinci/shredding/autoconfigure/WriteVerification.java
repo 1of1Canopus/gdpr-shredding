@@ -5,6 +5,7 @@ import com.housedevinci.shredding.domain.ErrorCodes;
 import com.housedevinci.shredding.domain.RowId;
 import com.housedevinci.shredding.domain.ShreddingException;
 import com.housedevinci.shredding.jpa.ShreddingContext;
+import java.math.BigDecimal;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
@@ -292,15 +293,39 @@ final class WriteVerification {
    * the type Hibernate bound: a {@code bigint} id bound as {@code Long} can return as {@code Long}
    * or as {@code BigInteger}, an {@code int} column as {@code Integer}. Both sides of the
    * comparison go through here so settlement matches rows rather than boxes.
+   *
+   * <p><strong>S-9 (Cipher seventh pass).</strong> Must be injective over every identifier type JPA
+   * allows. It used to map every {@link Number} through {@code longValue()}, which truncates a
+   * {@link BigDecimal}, {@code Double} or {@code Float} id: {@code 1} and {@code 1.5} normalised to
+   * the same key, so the second row's debt silently replaced the first's in {@code owe}'s {@code
+   * Map.put}, and that row committed with its stored header never compared against anything - S-1's
+   * property, reopened by an identifier type. Every {@link Number} now goes through the exact same
+   * {@link BigDecimal} canonicalisation - never a truncation - so it matches regardless of which
+   * concrete {@code Number} subtype the bind side and the JDBC read-back side each happen to use
+   * for the same value (a {@code bigint} column, for example, can come back as {@code Long} or as
+   * {@code BigInteger} depending on the driver).
    */
   private static Object normalise(Object id) {
     return switch (id) {
       case null -> null;
-      case Number n -> n.longValue();
+      case Byte n -> canonicalDecimal(BigDecimal.valueOf(n.longValue()));
+      case Short n -> canonicalDecimal(BigDecimal.valueOf(n.longValue()));
+      case Integer n -> canonicalDecimal(BigDecimal.valueOf(n.longValue()));
+      case Long n -> canonicalDecimal(BigDecimal.valueOf(n));
+      case java.math.BigInteger n -> canonicalDecimal(new BigDecimal(n));
+      case BigDecimal n -> canonicalDecimal(n);
+      case Float n -> canonicalDecimal(BigDecimal.valueOf(n.doubleValue()));
+      case Double n -> canonicalDecimal(BigDecimal.valueOf(n));
+      case Number n -> canonicalDecimal(BigDecimal.valueOf(n.longValue()));
       case UUID u -> u;
       case byte[] b -> java.util.Arrays.toString(b);
       default -> id.toString();
     };
+  }
+
+  /** The exact string form of a numeric id: never lossy, and the same string for equal values. */
+  private static String canonicalDecimal(BigDecimal value) {
+    return value.stripTrailingZeros().toPlainString();
   }
 
   private static String quote(String identifier) {

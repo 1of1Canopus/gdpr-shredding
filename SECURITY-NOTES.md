@@ -65,6 +65,12 @@ email address a full-width index would be an offline dictionary outright. Two co
 
 Do not put a blind index on a field you do not actually query by.
 
+The erasure matches on the row's own `tenantColumn` value, not on any one field's declared tenant
+expression: the value in `tenantColumn` must be the tenant the index was derived under, or the
+erasure cannot find it, so a `@BlindIndex(of = ...)` field may not declare its own
+`@Shredded(tenant = ...)` - startup refuses it (`SHRED-CONFIG-001`) rather than write an index that
+a completed erasure could silently fail to reach (S-7).
+
 ### The read path: the converter accuses, it never authorises (fifth pass, `docs/plans/read-path-design.md`)
 
 Five review passes found the same shape of defect in five different places — C-17, C-18, C-20, C-26,

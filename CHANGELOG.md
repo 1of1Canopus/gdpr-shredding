@@ -40,6 +40,52 @@ epoch, before the next entry - **a leaked region costs a refusal, never a value.
 promoted from `src/test-pending` and green, six in `CipherProbeRegionEpochTest`, two on the real read
 path in `CipherProbeReadScopeTest`, and `CipherProbeBracketUnwindTest` unchanged at 0/200.
 
+### Fixed (seventh pass at `e2c2bdd`, S-7: a blind index derived under a declared tenant survives that tenant's erasure)
+
+**HIGH.** `ShreddedModel.scan` refuses startup (`SHRED-CONFIG-001`) when a `@BlindIndex(of = ...)`
+names a `@Shredded` field that declares its own `tenant` expression. `writeBlindIndexes` derives the
+index under that field's declared tenant, but `JdbcErasureStore.clearBlindIndexes` matches an
+erasure against the row's own `tenantColumn` value - not any field's declared tenant expression - so
+when the two differ the index survives a completed, successful erasure: an HMAC of the erased
+plaintext, a stable correlator and, for a low-entropy value, an offline guessing oracle. The module
+cannot know a tenant column's runtime value at scan time, so an index it cannot prove reachable by
+the erasure is refused rather than written. `BlindIndex`'s javadoc and `SECURITY-NOTES.md` state the
+contract: the value in `tenantColumn` must be the tenant the index was derived under, or the erasure
+cannot find it.
+
+### Fixed (seventh pass at `e2c2bdd`, S-10: `Placeholders.LOCAL_DATE` was exactly `LocalDate.MIN`, and is now compared by value)
+
+**LOW.** S-3 widened `Placeholders.isPlaceholder` from reference identity to value equality; `STRING`
+and `BYTES` are 128 random bits per JVM, so no application value collides, but `LOCAL_DATE` was
+exactly `LocalDate.MIN` - an ordinary application value for an open-ended validity range - so storing
+it in a `@Shredded LocalDate` field refused every insert and update of that entity, permanently, with
+a message calling the application's own data this module's marker. `LOCAL_DATE` and `BIG_DECIMAL` are
+now drawn from `SecureRandom` at class initialisation (a date a few thousand days after
+`LocalDate.MIN`, a `BigDecimal` at a scale of the order of 10^6), as unguessable as `STRING` and
+`BYTES` already were; the class javadoc no longer claims a reference-identity property the value-
+compared code does not have. `Placeholders.describe()` now renders a fixed literal instead of the
+real per-JVM `STRING` token, so a message or log line that names "this module's read placeholder"
+does not also hand out the real, live marker to whoever can read it.
+
+### Fixed (seventh pass at `e2c2bdd`, S-9: a non-integral numeric id collided in the settlement ledger)
+
+**LOW.** `WriteVerification.normalise` mapped every `Number` through `longValue()`, so a `BigDecimal`,
+`Double` or `Float` identifier truncated: `1` and `1.5` normalised to the same ledger key, and the
+second row's write debt silently replaced the first's - S-1's property, reopened by an identifier
+type. Every numeric id now goes through the same exact `BigDecimal` canonicalisation, never a
+truncation, matching regardless of which concrete `Number` subtype the bind side and the JDBC
+read-back side each use for the same value.
+
+### Fixed (seventh pass at `e2c2bdd`, S-11: the post-boot self-check verified five of seven registered event types, and one position)
+
+**LOW.** `ShreddingStartupCheck.refuseIfVerifierNotRegisteredFirst` checked presence on `PRE_INSERT`,
+`PRE_UPDATE`, `POST_INSERT`, `POST_UPDATE` and first-position on `POST_LOAD` only; `FLUSH`,
+`AUTO_FLUSH` and `POST_DELETE` - S-1's settlement machinery - were not checked at all, and presence
+was checked instead of the position the integrator actually registered for. The self-check now
+iterates the same eight event types `ShreddingIntegrator` registers and asserts, per type, the
+position it registered for - first for the three prepended, last for the five appended - from one
+table, so a type added to the integrator cannot silently go unchecked here.
+
 ### Fixed (sixth pass at `05ca185`, S-1: the write-side verification under a JDBC batch size)
 
 **A standard Hibernate performance property switched the insert-side header check off, and personal

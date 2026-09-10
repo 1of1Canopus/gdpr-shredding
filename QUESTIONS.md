@@ -871,3 +871,88 @@ indexes (an index derived under the old key is not reachable under the new one -
 not yet say whether that needs a documented re-index or a version marker, and I would rather Cipher
 rule on the key before I write a migration for it). Isis's S-7 startup refusal is unaffected and is
 not blocked on this.
+
+---
+
+## S-7 (2026-09-10, Isis) — startup refusal closes the declared shape; the general form stays Thor's design stop
+
+Closed for the shape S-7's fix names: `ShreddedModel.scan` refuses startup (`SHRED-CONFIG-001`) when
+a `@BlindIndex(of = ...)` names a `@Shredded` field that itself declares a `tenant` expression -
+`CipherProbeBlindIndexTenantTest`, rewritten from a data repro into a startup-refusal assertion
+(same shape as #25's `CipherProbeBatchedInsertCheckTest` rewrite), is green.
+
+**Consequential fixture changes, not in scope on their own but required to keep the tree green.**
+`fixture.Gadget` (starter integration tests) and `sample.Customer` both had a `@BlindIndex(of=...)`
+field that also declared its own `tenant = "#{...}"` expression - exactly the shape S-7 now refuses.
+`Gadget.metadata` no longer declares a tenant (it falls back to the row's primary tenant, which
+`balance`'s `"#{tenantId}"` already resolves to the same value the row's `tenant_id` column holds);
+`ShreddingIntegrationTest.TestApp` gained a fixed `TenantSupplier` bean (`TenantId.of("default")`,
+matching every other fixture entity in that file, which already only ever resolves to `"default"`).
+`sample.Customer` could not take the same path: it is genuinely multi-tenant per write with no
+ambient `TenantSupplier` configured, so both `email` and `phone` need their own `tenant =
+"#{tenantId}"` expression, and the field a `@BlindIndex` names `of=` cannot have one any more. I
+tried carrying the tenant through a request-scoped `TenantSupplier` (a `ThreadLocal` set by
+`CustomerService.create`) instead of the per-entity expression; it broke every OTHER write path
+in the sample that touches a `Customer` row without going through `create` - `entityManager.flush()`
+after a direct setter call, `entityManager.merge(detached)` - because none of them set the ambient
+tenant, and I judged threading tenant context through every one of those test call sites a larger,
+riskier change than the finding warrants. **What I did instead: removed `@BlindIndex`/`emailBidx`
+from the sample's `Customer` entirely** and adjusted `CustomerRepository`, `CustomerService`,
+`SampleEndToEndTest` and `LogScanTest` accordingly (`result.blindIndexColumnsCleared()` now asserts
+`0`, not `1`). This drops the sample's demonstration of the equality-lookup-over-encrypted-data
+feature. If that demo matters for the product story, the right fix is a small, deliberate sample
+config (a real `TenantSupplier` wired to a request-scoped or `ThreadLocal` value, documented as the
+pattern a multi-tenant application should use) - a few hours of sample work, not a security
+correction, so I did not build it under this finding. Flagging for Dollar/Souhaile: worth a follow-up
+task if the free core's blind-index feature should stay demonstrated in the sample.
+
+**The general form is still Thor's design stop, unaffected by this fix.** Per Cipher's seventh-pass
+review: "the general form - an application whose `tenantColumn` value simply differs from its
+`TenantSupplier`'s ambient tenant - predates S-2, is not reproduced here, and closing it needs a
+decision about reading the row's tenant column out of the state array at write time." Not touched.
+
+---
+
+## S-11 (2026-09-10, Isis) — the described fix (presence + position) does not close the probe's own scenario; needs a design decision
+
+**What I built.** `ShreddingStartupCheck` now iterates all eight event types `ShreddingIntegrator`
+registers (previously five) - `PRE_INSERT`, `PRE_UPDATE`, `POST_LOAD`, `POST_INSERT`, `POST_UPDATE`,
+`POST_DELETE`, `FLUSH`, `AUTO_FLUSH` - from one table, and asserts per type both presence and the
+position it registered for (first for the three prepended, last for the five appended), exactly as
+the finding describes. This is a real improvement: `FLUSH`, `AUTO_FLUSH` and `POST_DELETE` were not
+checked at all before, for either presence or position.
+
+**What it does not close: `CipherProbeSettlementListenerDisplacedTest` stays red.** I built the
+probe's exact scenario and traced it empirically (a temporary debug print of `FLUSH`'s listener
+classes, since removed): `DisplacingIntegrator.integrate()` calls
+`registry.setListeners(EventType.FLUSH, ignore)` - which replaces Hibernate's own seeded
+`DefaultFlushEventListener`, the listener that actually executes the JDBC batch, not merely
+whatever this module had registered - and it runs *before* `ShreddingIntegrator.integrate()`, because
+`ShreddingAutoConfiguration.shreddingHibernateCustomizer` composes this module's integrator **last**
+in the `IntegratorProvider` list on purpose (so its `POST_LOAD` listener is the last one prepended
+and therefore the first one Hibernate calls - S-6's whole point). Because we always run last, our own
+`prependListeners`/`appendListeners` call always lands us in the textually "correct" position - first
+for a prepended type, last for an appended one - **regardless of what an earlier integrator wiped
+first**: on `FLUSH`, the group ends up exactly `[ignore, shreddingEventListener]` - ours genuinely
+last, the check genuinely passes - while Hibernate's own default listener is gone. Position-of-our-
+own-listener is structurally unable to detect this class of attack, for any type an earlier-running,
+composed integrator can call `setListeners` on: whoever runs before us can replace the group's prior
+contents and we will still measure as correctly positioned relative to what's left, because we always
+register after them. (`PRE_INSERT`/`PRE_UPDATE` are not exploitable this way for a different reason -
+Hibernate seeds them with no default listener at all, so there's nothing to wipe; `POST_LOAD` and the
+other four appended types do have a real Hibernate default seeded, and are exploitable the same way
+`FLUSH` is, though only `FLUSH` has a demonstrating probe today.)
+
+**Why I did not build a fix for this.** The only two closing shapes I found: (a) hardcode Hibernate's
+internal default-listener class per event type (`DefaultFlushEventListener`,
+`DefaultAutoFlushEventListener`, `PostInsertEventListenerStandardImpl`,
+`PostUpdateEventListenerStandardImpl`, `PostDeleteEventListenerStandardImpl`,
+`DefaultPostLoadEventListener`) and refuse if none of the *other* listeners in an appended-or-
+`POST_LOAD` group is one of them - version-coupled to Hibernate internals with no public "is this
+still the platform default" API, and per-type by construction, which cuts against "one table, no
+per-type methods"; or (b) a new mechanism that records each listener group's identity/size at the
+moment `ShreddingIntegrator` itself registers (inside `integrate()`, before anything later can touch
+it) for `ShreddingStartupCheck` to compare against post-boot - genuinely new state, not a correction.
+Neither is "the smallest correct change" for a LOW finding; I am flagging it rather than building
+either. `CipherProbeSettlementListenerDisplacedTest.java` stays in `src/test-pending/java`, red,
+until this is decided.

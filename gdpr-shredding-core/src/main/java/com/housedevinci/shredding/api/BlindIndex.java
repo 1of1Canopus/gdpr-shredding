@@ -18,7 +18,12 @@ import java.lang.annotation.Target;
  * survives an erasure keeps the erased subject searchable and linkable forever.
  *
  * <p>{@link #subjectColumn()} and {@link #tenantColumn()} name the columns the erasure matches on;
- * they become SQL identifiers, so they are validated at startup against a narrow pattern.
+ * they become SQL identifiers, so they are validated at startup against a narrow pattern. The value
+ * in {@link #tenantColumn()} must be the tenant the index was derived under, or the erasure cannot
+ * find it: the {@link #of()} field may not declare its own {@code @Shredded(tenant=...)}, because
+ * that would key the index under a tenant the erasure - which matches on the row's own {@code
+ * tenantColumn} value, not on any one field's declared tenant expression - can never prove
+ * reachable. Refused at startup rather than written.
  */
 @Documented
 @Retention(RetentionPolicy.RUNTIME)

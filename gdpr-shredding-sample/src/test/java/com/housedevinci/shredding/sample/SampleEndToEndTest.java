@@ -93,13 +93,14 @@ class SampleEndToEndTest {
 
     // 2. the application still reads it
     assertThat(service.byCustomerId(customerId).get(0).getEmail()).isEqualTo("alice@example.com");
-    assertThat(service.findByEmail("acme", "  ALICE@Example.com ")).hasSize(1);
 
     // 3. erase
     var result = service.erase("acme", customerId, "dpo", "art 17 request");
     assertThat(result.complete()).isTrue();
     assertThat(result.keysDestroyed()).isEqualTo(1);
-    assertThat(result.blindIndexColumnsCleared()).isEqualTo(1);
+    // S-7 (Cipher seventh pass): Customer carries no @BlindIndex - the tenant every @Shredded
+    // field here has to declare (there is no ambient TenantSupplier in this sample) rules one out.
+    assertThat(result.blindIndexColumnsCleared()).isEqualTo(0);
 
     // 4. the row is still there and the field reads as the sentinel
     var after = service.byCustomerId(customerId);
@@ -107,7 +108,6 @@ class SampleEndToEndTest {
     assertThat(after.get(0).getEmail()).isEqualTo(ErasedValue.MARKER);
     assertThat(after.get(0).getPhone()).isEqualTo(ErasedValue.MARKER);
     assertThat(after.get(0).getCustomerId()).isEqualTo(customerId);
-    assertThat(after.get(0).getEmailBidx()).isNull();
 
     // 5. the audit rows are untouched and still name the customer
     assertThat(audit.findByCustomerId(customerId))
@@ -118,9 +118,6 @@ class SampleEndToEndTest {
     var report = verifier.verify();
     assertThat(report.status()).isEqualTo(ErasureChainVerifier.Status.INTACT);
     assertThat(report.intact()).isTrue();
-
-    // 7. the blind index no longer finds them
-    assertThat(service.findByEmail("acme", "alice@example.com")).isEmpty();
   }
 
   /**

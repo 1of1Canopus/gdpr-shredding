@@ -95,7 +95,15 @@ class ShreddingIntegrationTest {
   @EnableAutoConfiguration
   @EntityScan(basePackageClasses = Widget.class)
   @EnableJpaRepositories(basePackageClasses = WidgetRepository.class)
-  static class TestApp {}
+  static class TestApp {
+    // S-7: Gadget.metadata, the field its own @BlindIndex names in of=, no longer declares its own
+    // tenant expression (a field a @BlindIndex indexes may not). It falls back to the ambient
+    // tenant, and every fixture entity in this file already always resolves to "default" anyway.
+    @org.springframework.context.annotation.Bean
+    ShreddingEventListener.TenantSupplier tenantSupplier() {
+      return () -> TenantId.of("default");
+    }
+  }
 
   @Autowired WidgetRepository widgets;
   @Autowired GadgetRepository gadgets;

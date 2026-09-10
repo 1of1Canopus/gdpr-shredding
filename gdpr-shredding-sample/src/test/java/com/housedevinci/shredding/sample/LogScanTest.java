@@ -74,7 +74,6 @@ class LogScanTest {
     String customerId = "cust-logscan-" + System.nanoTime();
     service.create("acme", customerId, EMAIL, PHONE);
     service.byCustomerId(customerId);
-    service.findByEmail("acme", EMAIL);
     service.erase("acme", customerId, "dpo", "art 17");
     service.byCustomerId(customerId);
     verifier.verify();

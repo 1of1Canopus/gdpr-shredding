@@ -172,7 +172,10 @@ class CipherProbeSecondIntegratorTest {
     // the fix has to be "compose the providers, then check after the SessionFactory is built that
     // this module's listener is registered and is first on POST_LOAD" - not "hope we win the race".
     assertThat(OBSERVED).as("the other library's integrator never ran at all").isNotEmpty();
-    assertThat(OBSERVED).noneMatch(seen -> seen.equals(Placeholders.describe()));
+    // S-10 (Cipher seventh pass): describe() is now a fixed literal, not the real per-JVM token -
+    // the property this asserts is about the real token never leaking, so it compares against
+    // Placeholders.STRING itself, not describe()'s rendering of it.
+    assertThat(OBSERVED).noneMatch(seen -> seen.equals(Placeholders.STRING));
     assertThat(outcome).doesNotStartWith("REFUSED");
   }
 
