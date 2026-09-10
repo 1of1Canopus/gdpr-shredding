@@ -961,8 +961,11 @@ naming the mapping; and no erasure records `COMPLETE` unless Hibernate, on the e
   blanket-quoted, and a non-lowercase *unquoted* name is legal and stays bare so PostgreSQL folds it (applied §4.2). No `"` in `text`.
   Javadoc as `TableRef`'s: PostgreSQL only, any other dialect refused at startup.
 - **§4.2 The parse is Hibernate's** (applied §4.1). Built only from the persister's `BasicValuedModelPart` (`getIdentifierMapping()`'s for
-  the id). `getSelectionExpression()` is a dialect-quoted fragment, so it is parsed by `identifierHelper().toIdentifier(expr)` into
-  `(getText(), isQuoted())` and never unquoted by hand; startup asserts both round-trips, `Identifier.render(dialect)` and `ColumnRef.sql()`
+  the id). `getSelectionExpression()` is a dialect-quoted fragment, so it is parsed by the *static*
+  `org.hibernate.boot.model.naming.Identifier.toIdentifier(String)` — never `IdentifierHelper.toIdentifier`, whose `normalizeQuoting` *adds*
+  quoting the mapping never had under `globally_quoted_identifiers`, `auto_quote_keyword`, a leading `_` or a `$`, and would make the
+  round-trip below refuse a valid application by the wrong reason (applied, revision correction 1) — into
+  `(getText(), isQuoted())`, and never unquoted by hand; startup asserts both round-trips, `Identifier.render(dialect)` and `ColumnRef.sql()`
   equal to the original expression. Refused there, naming property and reason: `isFormula()` as a *flag*, `Column.assignmentExpression`, and
   a custom read or write expression (`@ColumnTransformer`) on any of the three columns — it mis-addresses by value as S-22 did by name
   (applied §4.3, §4.4).
@@ -981,11 +984,21 @@ naming the mapping; and no erasure records `COMPLETE` unless Hibernate, on the e
   counts are never a refusal predicate — `AND <col> IS NOT NULL` makes `cleared` a subset of the subject's rows, so a nullable index or a
   retry is normal; `cleared` stays a logged diagnostic. The count runs on the erasure's own `Connection` through a `StatelessSession` bound
   to it: never a second connection, never a session that can flush (applied §4.9); if Hibernate cannot render onto it, stop and say so.
+  Check A confirmed (revision review): `sessionFactory.withStatelessOptions().connection(c).openStatelessSession()` shares the connection, the
+  transaction and the snapshot by design, and cannot flush. Two hazards written down here: **(a)** `beginTransaction()` or
+  `getTransaction().commit()` is never called on that session — it would commit the erasure's own connection half-done (index cleared, key
+  destroyed, no record appended, no residual verified) and `isTransactionInProgress()` already returns true, so nothing stops the one-liner;
+  the session is closed before the record is appended. **(b)** `LogicalConnectionProvidedImpl.afterCompletion()` calls
+  `resetConnection(initiallyAutoCommit)`, a no-op **only because `JdbcSupport.inTransaction` set `autoCommit=false` first** — that dependency
+  is stated, and the two probes below pin it.
   Intended under READ COMMITTED, REPEATABLE READ and SERIALIZABLE: a row committed for the subject after the `UPDATE`'s snapshot refuses the
   erasure and is not a race to retry away (applied §4.10). Cost is one indexed `COUNT` per (erasure, blind-index column), measured and the
   number recorded here.
-- **§4.6 `hibernate.globally_quoted_identifiers=true`, decided here** (applied §4.12): columns supported, every expression arrives quoted and
-  §4.2 reproduces it verbatim; tables supported when the quoted parts are lowercase, else refused at startup by `TableRef` naming the setting.
+- **§4.6 `hibernate.globally_quoted_identifiers=true`, decided here** (applied §4.12; restated, revision correction 2): columns supported
+  **quoted or unquoted, reproduced verbatim** — `globally_quoted_identifiers_skip_column_definitions=true` is the pairing Hibernate documents
+  for JPA and it leaves column expressions unquoted at boot, so "every expression arrives quoted" would be false and, with correction 1, need
+  not be true: §4.2 reproduces whatever the expression is. Tables are unchanged: supported when the quoted parts are lowercase, else refused
+  at startup by `TableRef` naming the setting.
 
 **Probes, written before the hook**, all in the default build (`-Pprobes-pending` empty afterwards), Cipher's five in
 `CipherProbeTenthPassTest` promoted and green by their real assertions, plus, one per §4.3 path:
@@ -998,7 +1011,8 @@ naming the mapping; and no erasure records `COMPLETE` unless Hibernate, on the e
 `probe_a_composite_identifier_is_refused_by_its_real_reason` · `probe_globally_quoted_identifiers_boots_or_is_refused_by_its_real_reason`
 *Read-back independence.* `probe_a_mis_addressed_erasure_is_caught_by_the_hibernate_rendered_residual` · `probe_a_partially_null_index_erases_without_refusing`
 `probe_the_independence_check_takes_no_second_connection` · `probe_the_independence_check_cannot_flush_pending_writes`
-`probe_a_row_inserted_for_the_subject_after_the_clear_refuses_the_erasure`
+`probe_a_row_inserted_for_the_subject_after_the_clear_refuses_the_erasure` · `probe_the_independence_check_never_commits_the_erasures_transaction`
+*Auto-quoting (revision correction 1).* `probe_an_auto_quoted_column_boots_and_round_trips`
 *Architecture.* ArchUnit: `ColumnRef`, like every core domain type, imports nothing outside the JDK.
 
 ### Cipher review of addendum 4
