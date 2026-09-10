@@ -8,6 +8,45 @@ are fine here for now — but before this repo is made public, move them to
 tests, README, CHANGELOG, LICENSE/NOTICE, SECURITY.md, CONTRIBUTING.md, user docs, CI, the
 probe script). See how `agent-guard` did it (2026-09-10).
 
+**E-1 (MEDIUM), E-2 (LOW), E-3 (LOW), E-4 (INFO) — CLOSED, built (Isis, 2026-09-11).** Cipher's
+eleventh pass (`704f23b`) fix list, verdict MERGE WITH FIXES.
+
+*E-1.* `HibernateBlindIndexResidual`'s constructor captures the return of `built.put(key, residual)`
+and, when a second entity resolves to the same `(table, index column)` key with a different residual
+query, refuses at startup (`SHRED-CONFIG-001`) naming both entities, the shared table and the shared
+column. Rejected alternative (per the finding): widening the key to the whole `BlindIndexColumn` —
+it would make the lookup miss precisely when the erasure's own columns are wrong, turning a
+mis-address into "no entity mapping is registered", the wrong message for the right problem.
+
+*E-2.* `PostgreSqlReservedKeywords` vendors PostgreSQL's two reserved key-word classes (`pg_get_keywords()`
+catcode `R` and `T`, 101 words) from PostgreSQL 16.14 — the version this module's tests pin — as a
+checksum-verified resource file, not `Dialect.getKeywords()` (which would refuse an ordinary column
+named `value` or `name`). `ColumnRefs.of` refuses, after the round trip, any unquoted `ColumnRef`
+whose text is one of those words, naming `Entity.property`, the column and the fix.
+
+*E-3.* `.withStartupTimeout(Duration.ofMinutes(2))` added to the four containers outside the starter
+(`CipherProbeJdbcTest` in core; `SampleEndToEndTest`, `LogScanTest`, `CipherProbeActuatorEndToEndTest`
+in sample); `spring.jpa.properties.hibernate.dialect=...PostgreSQLDialect` pinned via
+`@DynamicPropertySource` in those same three sample contexts.
+
+*E-4.* `BlindIndex`'s Javadoc and `TableRef`'s `IDENTIFIER` pattern comment rewritten: `subjectColumn`/
+`tenantColumn` are lookup keys, never SQL identifiers, and there is no pattern they are validated
+against any more.
+
+*Probes.* `probe_two_entities_on_one_table_do_not_share_one_independent_read_back` and
+`probe_an_unquoted_reserved_word_column_is_refused_at_startup_naming_the_mapping`, both RED against
+`704f23b` under `-Pprobes-pending`, promoted into
+`gdpr-shredding-spring-boot-starter/src/test/java/.../CipherProbeEleventhPassStartupRefusalsTest.java`
+(E-1's assertion changed from "erasure refused" to "startup refused", per the finding's stated
+refusal route); both green in the default build. `src/test-pending` has no `.java` anywhere in the
+repository. E-3 has no probe — its check is the repo-wide grep in the finding, which now returns
+nothing.
+
+*Full `./mvnw clean verify`, three consecutive runs:* BUILD SUCCESS each time, Docker up throughout,
+0 skipped. **327 tests** (core 109, starter 201, sample 17), 0 failures, 0 errors. Line coverage core
+85.64% (1145/1337), starter 87.55% (1631/1863); gates 80%/80% held. Dollar/Cipher re-verifies; not
+self-marked closed.
+
 **S-22 (HIGH) and S-24 (LOW) — CLOSED, built (Thor, 2026-09-10).** Thor's design stop from Cipher's
 tenth pass. Designed as **addendum 4** in `docs/plans/read-path-design.md`, reviewed by Cipher twice;
 the revision review's two corrections (the static `Identifier.toIdentifier`, and §4.6 restated as

@@ -6,6 +6,65 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed (eleventh pass at `704f23b`, E-1 MEDIUM: two entities on one table could silently share one independent read-back)
+
+**MEDIUM.** `HibernateBlindIndexResidual` keyed its residual queries on `(table, blind-index column)`
+only, never on the subject/tenant axis a mapping matches on. Two entities mapped to the same table
+that index the same physical column collided in one `LinkedHashMap`; the second `put` silently
+overwrote the first and `Map.copyOf` said nothing. From then on the erasure's independent read-back —
+design addendum 4, §4.5, the check that exists precisely because the erasure's own statements cannot
+verify themselves — verified one of the two blind indexes with the *other* entity's HQL, which
+matches on the wrong subject column. An erasure could record `COMPLETE` with that entity's blind
+index still populated.
+
+- **Changed** `HibernateBlindIndexResidual`'s constructor: captures the return of `built.put(key,
+  residual)` and, when a second entity resolves to the same `(table, column)` with a different
+  residual, refuses at startup (`SHRED-CONFIG-001`) naming both entities, the shared table and the
+  shared column. Two entities over one table indexing the same column is a mapping this module has
+  not been shown to erase correctly, so it is refused rather than silently checked by half a net.
+  Probe: `probe_two_entities_on_one_table_do_not_share_one_independent_read_back`.
+
+### Fixed (eleventh pass at `704f23b`, E-2 LOW: an unquoted reserved-word column mapping booted and refused every later erasure, blaming a trigger)
+
+**LOW.** `@Column(name = "user")`, unquoted, against a physical column PostgreSQL already reserves,
+round-trips cleanly through `ColumnRefs.of` — the parse and the render agree, so startup accepted the
+mapping. Hibernate's own SQL is alias-qualified and unaffected; this module's `WHERE`/`SET` are not,
+so a bare `user` there is read as `CURRENT_USER`, matching nothing. The independent read-back (S-22's
+net) caught the miss and refused the transaction every time, correctly — but with a message
+(`SHRED-ERASURE-004`) that blames "a trigger, a rule, a rewriting view" and never names the mapping
+that actually caused it. Every erasure of that entity was, and stayed, impossible.
+
+- **Added** `PostgreSqlReservedKeywords`, vendored from `pg_get_keywords()` (catcode `R` "reserved"
+  and `T` "reserved, can be function or type name") against PostgreSQL 16.14, the version this
+  module's tests pin — the two classes that cannot appear as a bare `ColId`, the exact grammar
+  position an unqualified column reference occupies. 101 words, checksum-verified at class-init so a
+  hand-edited or corrupted list fails loudly. Deliberately **not** `Dialect.getKeywords()`, which
+  mixes reserved and non-reserved words and would refuse an ordinary column named `value` or `name`.
+- **Changed** `ColumnRefs.of`: after the round trip, refuses an **unquoted** `ColumnRef` whose text
+  folds to one of PostgreSQL's reserved key words, naming `Entity.property`, the column, and the fix
+  (`@Column(name = "\"user\"")`). Probe:
+  `probe_an_unquoted_reserved_word_column_is_refused_at_startup_naming_the_mapping`; the fail-closed
+  net for the case that survives past a mapping this module cannot see (a legacy row written by
+  another system) stays pinned by
+  `CipherProbeEleventhPassTest#probe_an_unquoted_reserved_word_subject_column_never_reports_a_completion_it_did_not_do`.
+
+### Fixed (eleventh pass at `704f23b`, E-3 LOW: S-25's startup timeout and dialect pin were applied to the starter only)
+
+- **Changed** four `PostgreSQLContainer` declarations outside the starter (`gdpr-shredding-core`'s
+  `CipherProbeJdbcTest`; `gdpr-shredding-sample`'s `SampleEndToEndTest`, `LogScanTest`,
+  `CipherProbeActuatorEndToEndTest`) to carry `.withStartupTimeout(Duration.ofMinutes(2))`.
+- **Changed** the same three sample test contexts to pin
+  `spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect` via
+  `@DynamicPropertySource`, closing the "Unable to determine Dialect" flake under container-count
+  load the same way the tenth pass closed it in the starter.
+
+### Fixed (eleventh pass at `704f23b`, E-4 INFO: `@BlindIndex` Javadoc and `TableRef`'s pattern comment still described the pre-addendum-4 behaviour)
+
+- **Changed** `BlindIndex`'s Javadoc and `TableRef`'s `IDENTIFIER` pattern comment: `subjectColumn`/
+  `tenantColumn` are lookup keys, matched case-sensitively against Hibernate's own mapping and then
+  thrown away — they never become SQL identifiers and there is no pattern they are validated against
+  any more, unlike `TableRef`'s own schema/name.
+
 ### Fixed (tenth pass, S-22 HIGH and S-24 LOW: every column identifier is now the one Hibernate's mapping addresses)
 
 **HIGH.** Design addendum 3 gave the *table* an identifier type (`TableRef`) and left the *columns*

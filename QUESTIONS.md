@@ -1325,3 +1325,32 @@ time, 289/289 tests, 0 failures; `CipherProbeCompositeIdTest` green (2/2) all th
 failure observed. Container count unchanged (33 static `@Container` declarations before and after —
 this fix removes the race, not the container count; the singleton collapse above is what would
 reduce it, and is deferred).
+
+## E-1, E-2, E-3, E-4 (2026-09-11, Isis) — CLOSED. Cipher's eleventh-pass fix list at `704f23b`.
+
+No deviation from what the finding asked for on E-1, E-3 or E-4. Two decisions worth recording.
+
+**E-1: the collision key stays narrow.** The finding itself names and rejects the obvious
+alternative — widening `HibernateBlindIndexResidual`'s `Key` from `(table, index column)` to the
+whole `BlindIndexColumn` (adding subject/tenant column) so two entities never collide. I did not
+revisit that: widening the key makes the lookup *miss* precisely when the erasure's own subject or
+tenant column addressing is wrong, which is the one case this check exists to catch, turning a
+mis-address into "no entity mapping is registered" — a message about the wrong problem. The narrow
+key plus a startup refusal on collision (built) keeps the check meaningful for every mapping it does
+accept.
+
+**E-1's probe, promoted with its assertion changed.** The pending probe
+`probe_two_entities_on_one_table_do_not_share_one_independent_read_back` asserted
+`SHRED-ERASURE-004` (the erasure refuses) against the un-fixed code, because at pending-probe time
+neither fix shape had been chosen yet. The finding names both shapes as closing it and recommends
+the refusal: "a refusal is the honest one, since two entities over one table with different subject
+columns is a mapping this module has not been shown to erase correctly." I built the startup
+refusal, so on promotion the assertion changed to a startup-time `SHRED-CONFIG-001`, not
+`SHRED-ERASURE-004` — the probe still proves the same property (both entities' erasures are
+protected, not one silently mis-checked), just earlier, at the point the finding says it belongs.
+
+**File naming.** The pending file held both E-1 and E-2's probes under one class,
+`CipherProbeEleventhPassPendingTest`. On promotion (`git mv` into `src/test`) I renamed the class to
+`CipherProbeEleventhPassStartupRefusalsTest`, since "Pending" would be stale and misleading for a
+promoted, green probe class, and both surviving probes now assert the same shape (a startup
+refusal). No probe name from the fix list changed.

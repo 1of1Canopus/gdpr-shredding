@@ -207,6 +207,49 @@ the `UPDATE`'s snapshot. It carries a live index for a subject whose key is abou
 it **refuses** the erasure — under READ COMMITTED, REPEATABLE READ and SERIALIZABLE alike. That is
 the intended answer, not a race to retry away.
 
+**Two entities cannot share one of these checks (S-22, addendum 4 revision correction, E-1).** The
+check above is keyed on `(table, index column)` — deliberately not on the subject/tenant axis, since
+that axis is exactly what a mis-addressed erasure gets wrong. Two entities mapped to the same table
+that index the same physical column resolve to the same key; without a collision check the second
+one silently overwrites the first, and the erasure of one entity is then verified with the *other*
+entity's query — the one net addendum 4 built specifically because the erasure's own statements
+cannot check themselves, pointed at the wrong subject column for one of the two. This module has not
+been shown to erase that mapping correctly, so the constructor refuses at startup
+(`SHRED-CONFIG-001`), naming both entities, the shared table and the shared column, rather than
+keeping only one of the two independent read-backs. Widening the key to every column of the blind
+index (table, index column, subject column, tenant column) was rejected: it would make the lookup
+miss precisely when the erasure's own columns are wrong, turning a mis-address into "no entity
+mapping is registered" — the wrong message for the right problem.
+
+### An unquoted reserved-word column mapping must be refused at startup, not discovered erasure by erasure (E-2)
+
+The round trip in `ColumnRefs.of` proves this module reproduces the expression Hibernate's mapping
+holds; it says nothing about whether that expression survives being interpolated **unqualified**.
+Hibernate's own SQL always qualifies a column with its table alias (`n1_0.user`), where PostgreSQL's
+grammar allows a reserved word after the dot. This module's `UPDATE` and `WHERE` do not qualify, so a
+bare reserved word there is parsed as the keyword itself — `user` as `CURRENT_USER` — and matches
+nothing. The independent read-back (S-22, addendum 4 §4.5) still catches the miss and refuses the
+whole transaction, so no key is destroyed and no record is falsely appended — but every erasure of
+that entity then fails, forever, with `SHRED-ERASURE-004`, whose message blames "a trigger, a rule, a
+rewriting view" and never names the mapping that actually caused it. An Article 17 request that
+cannot be executed, mis-diagnosed as a database problem.
+
+`ColumnRefs.of` now refuses at startup (`SHRED-CONFIG-001`) any **unquoted** `ColumnRef` whose text
+folds to one of PostgreSQL's reserved key words, naming `Entity.property`, the column, and the fix
+(`@Column(name = "\"user\"")`). This cannot break a working application: Hibernate itself cannot
+*write* such a column unquoted (`INSERT ... (user, ...)` is a syntax error at `user`), so any
+application in this state is already broken for writes — the mapping can only exist against a legacy
+table written by something other than this application.
+
+**The keyword list, and why it is not `Dialect.getKeywords()`.** Hibernate's dialect keyword list
+mixes reserved and non-reserved words; refusing on it would refuse a column named `value` or `name`,
+which is ordinary and works unquoted today. `PostgreSqlReservedKeywords` instead vendors PostgreSQL's
+own two reserved categories — `pg_get_keywords()` catcode `R` ("reserved") and `T` ("reserved, can be
+function or type name"), the classes that cannot appear as a bare `ColId`, the exact grammar position
+an unqualified column reference occupies — generated against PostgreSQL 16.14, the version this
+module's tests pin. The list is a resource file, checked against a recorded SHA-256 at class-init, so
+a hand-edited or corrupted copy is refused rather than silently under- or over-refusing mappings.
+
 ### The startup listener check proves position, not survival of Hibernate's own defaults (S-11, accepted residual)
 
 **What `ShreddingStartupCheck` does and does not prove.** It proves, against the live
