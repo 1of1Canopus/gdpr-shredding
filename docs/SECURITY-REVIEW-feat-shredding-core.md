@@ -2151,3 +2151,218 @@ their fixtures in `…autoconfigure.propaccess`, `…autoconfigure.propseq` and 
 Run them with `./mvnw -Pprobes-pending test`: six classes, seven `probe_` methods, all seven failing
 on 75af7ea. They do not affect the default build, which is still 197 tests, 0 failures, 85.26 % /
 84.98 % / 66.32 %.
+
+## Seventh pass (e2c2bdd)
+
+**Verdict: NOT MERGEABLE.** One HIGH, opened by S-2's own fix: a `@BlindIndex` derived under a
+`@Shredded` field's *declared* tenant survives that tenant's erasure, so a completed, successful
+erasure leaves an HMAC of the erased plaintext in the table. Four further corrections below, all
+reproduced. S-4 R1 is not counted as a finding this pass: it is blocked on design addendum 2, which
+is reviewed in `docs/plans/read-path-design.md` under "Cipher review of addendum 2" - **APPROVED
+WITH CHANGES**, six of them.
+
+### Numbers
+
+| | |
+|---|---|
+| build | `./mvnw clean verify` BUILD SUCCESS |
+| tests | 220 green (core 92, starter 111, sample 17); 0 failures, 0 errors, 0 skipped |
+| line coverage | core 83.31%, starter 88.35% (gate 80%); sample 61.63% (own documented 30% smoke gate) |
+| probes red under `-Pprobes-pending` | 6 of 65: five new, plus `CipherProbeRegionResidueTest` R1 (blocked, not a finding) |
+| Docker | up; no test skipped |
+| probes diffed against `05ca185` | javadoc and formatting only; no assertion narrowed. `CipherProbeBatchedInsertCheckTest` is a genuine rewrite per QUESTIONS #25 - see S-12 |
+
+### Closed items re-verified
+
+S-1 by `BatchedWriteVerificationTest` (17 tests, settlement measured by the SQL actually prepared)
+and `CipherProbeBatchedInsertCheckTest`; S-2 by `CipherProbeTenantExpressionTest`; S-3 by
+`CipherProbePlaceholderCopyTest` and `FrameworkMatrixTest`; S-4's data-loss half by
+`CipherProbeRegionResidueTest` R2; S-5 by `CipherProbePropertyAccessTest`; S-6 by
+`CipherProbeSecondIntegratorTest`. All green, all on the current tree, none narrowed.
+
+### S-7 (HIGH) A blind index keyed under a declared tenant survives that tenant's erasure
+
+`CipherProbeBlindIndexTenantTest.probe_a_blind_index_under_a_declared_tenant_survives_that_tenants_erasure`
+(`src/test-pending/java`, RED).
+
+S-2 made "two `@Shredded` fields of one entity declaring different tenants" a supported shape, and
+`ShreddingEventListener.writeBlindIndexes` now derives an index under
+`scope.tenantFor(index.ofFieldName())` - that field's declared tenant. The erasure that destroys
+that index does not use the field's declared tenant and cannot see it:
+`JdbcErasureStore.clearBlindIndexes` issues `UPDATE t SET idx = NULL WHERE tenant_col = ? AND
+subject_col = ?`, matching the row's own `tenantColumn` value against the tenant the erasure was
+asked for. Before S-2 every field of a row was indexed under the ambient tenant, which is the value
+an application puts in its tenant column, and the two always agreed.
+
+Repro: `Folder` has `title` declaring `#{'org-a'}`, `email` declaring `#{'org-b'}`, a `tenant_id`
+column holding `org-a`, and `@BlindIndex(of = "email", tenantColumn = "tenant_id")`. Erasing
+`(org-b, owner)` destroys the data key, renders `email` permanently unreadable, reports success -
+and `email_idx` is still populated, because the `UPDATE` matched no row. What survives a completed
+erasure is `HMAC(index secret, org-b | Folder | email | normalised plaintext)`: a stable correlator
+for the erased subject across every row that held that value, and, for a low-entropy plaintext such
+as an email address, an offline confirmation oracle for anyone holding
+`shredding.blind-index.hmac-secret`. Destroying it is the entire reason blind-index columns are
+erased at all, and the proof of erasure does not say it was skipped.
+
+**Fix (Isis).** `ShreddedModel.scan`, in the same loop that already validates `@BlindIndex(of=...)`
+against the entity's `@Shredded` fields, refuses at startup with `SHRED-CONFIG-001` when the `of`
+field declares its own `tenant` expression, naming the entity, the index field, the `of` field and
+the expression: the module cannot know a tenant column's runtime value at scan time, so it cannot
+prove the index will be reachable by the erasure, and an index it cannot prove erasable is refused
+rather than written. Test `a_blind_index_on_a_field_with_its_own_tenant_expression_fails_startup`,
+and turn the probe above into the assertion that startup refuses. State the underlying contract in
+`BlindIndex`'s javadoc and in `SECURITY-NOTES.md` in one line: *the value in `tenantColumn` must be
+the tenant the index was derived under, or the erasure cannot find it.*
+
+**DESIGN STOP (Thor), separate and smaller.** The general form - an application whose
+`tenantColumn` value simply differs from its `TenantSupplier`'s ambient tenant - predates S-2, is not
+reproduced here, and closing it needs a decision about reading the row's tenant column out of the
+state array at write time and what to do when it is not a mapped basic property. One page before any
+code; the startup refusal above is not blocked on it.
+
+### S-8 (MEDIUM) `closeRegion` discards an intermediate region's undrained decode in silence
+
+`CipherProbeSeventhPassTest.probe_an_inner_regions_undrained_decode_is_discarded_in_silence_by_the_outer_close`
+(RED).
+
+`ShreddingContext.unwindTo` pops every region above the token being closed and never looks at their
+pending maps. So a decrypted `@Shredded` value that no verifier installed - an inner region whose own
+close was skipped, which is the C-32 `StackOverflowError` state and also a `withReadBracket` body
+inside a repository call that threw an `Error` - is dropped without a word on the *normal* return
+path of the outer call, and the outer call returns its result. `SHRED-READ-UNVERIFIED` exists to make
+exactly that loud.
+
+**Fix (Isis).** `closeRegion` refuses when any region it unwinds past is non-empty, with the same
+message shape and the same first `entity.field` naming as its own region's refusal; `discardRegion`
+keeps dropping unchecked, because on that path the original exception is the failure worth reporting.
+This is change 5 of the addendum-2 review and should land before the epoch, not after.
+
+### S-9 (LOW) A non-integral numeric identifier collides in the settlement ledger
+
+`CipherProbeLedgerKeyTest.probe_two_distinct_numeric_identifiers_collide_in_the_settlement_ledger`
+(RED).
+
+`WriteVerification.normalise` maps every `Number` through `longValue()`. JPA permits a `BigDecimal`,
+`Double` or `Float` identifier, and for those the mapping is lossy: `1` and `1.5` are one key. It is
+used on both sides of settlement. In `owe` the ledger key is a `Map.put`, so the second row's debt
+silently replaces the first's and that row commits with its stored header never compared against
+anything - S-1's property, reopened by an identifier type. In `verifyChunk` the result map collides
+the same way, so one row's debt is verified against another row's stored bytes.
+
+**Fix (Thor).** `normalise` must be injective over every identifier type JPA allows: exact for
+integral values (`byte`/`short`/`int`/`long`/`BigInteger`), `BigDecimal#toPlainString` or the
+equivalent for the rest, and never a truncation. Test
+`two_identifiers_that_differ_below_the_decimal_point_are_two_debts`.
+
+### S-10 (LOW) `Placeholders.LOCAL_DATE` is `LocalDate.MIN`, and is now compared by value
+
+`CipherProbeSeventhPassTest.probe_a_legitimate_local_date_min_is_taken_for_the_read_placeholder`
+(RED).
+
+S-3 widened `isPlaceholder` from reference identity to value equality, correctly. `STRING` and
+`BYTES` are 128 random bits per JVM, so no application value collides with them. `LOCAL_DATE` and
+`BIG_DECIMAL` are fixed constants, and `LOCAL_DATE` is exactly `LocalDate.MIN` - an ordinary
+application value for an open-ended validity range. An application storing it in a `@Shredded
+LocalDate` field has every insert and update of that entity refused with `SHRED-PLACEHOLDER-001`,
+permanently, by a message telling it that its own data is this module's marker. The class javadoc
+still claims the pre-S-3 property for those two constants ("this exact instance - an equal
+`LocalDate.MIN` obtained elsewhere is not this object"), which the code no longer has: a doc stating
+a security property the code lacks is its own defect.
+
+**Fix (Isis).** Derive both markers from `SecureRandom` at class initialisation, inside a range no
+application writes - a `LocalDate` drawn from the first few thousand days of the minimum year, a
+`BigDecimal` at a scale of the order of 10^6 - so that a value-compared marker is as unguessable as
+`STRING` and `BYTES` already are. Correct the javadoc on both fields to say "compared by value" and
+delete the reference-identity sentence. `FrameworkMatrixTest`'s line asserting
+`isPlaceholder(LocalDate.of(-999_999_999, 1, 1))` is `true` inverts with the fix; that is the point
+of it. `Placeholders.describe()` renders the per-JVM `STRING` token into exception messages and logs
+- it need not, and should print a fixed literal instead, so log access does not hand out the marker
+an attacker would submit to make an entity permanently unsavable.
+
+### S-11 (LOW) The post-boot self-check verifies five of the seven types it registered, and one position
+
+`CipherProbeSettlementListenerDisplacedTest.probe_a_displaced_settlement_listener_is_not_detected_after_boot`
+(RED).
+
+`ShreddingStartupCheck.refuseIfVerifierNotRegisteredFirst` checks presence on `PRE_INSERT`,
+`PRE_UPDATE`, `POST_INSERT`, `POST_UPDATE` and first-position on `POST_LOAD`. `FLUSH`, `AUTO_FLUSH`
+and `POST_DELETE` - S-1's first settlement point and the discharge of a row deleted in the same flush
+- are not checked at all: another library's ordinary `registry.setListeners(EventType.FLUSH, ...)`
+removes this module's settlement listener and the application starts silently. And presence is not
+the position the integrator registered for: `PRE_*` is prepended because "the scope must be pushed
+before anything else can trigger a bind", `POST_INSERT`/`POST_UPDATE` are appended because the
+post-hoc check "must see what actually reached the database, after every other listener has had its
+turn". Neither is verified. S-6 was raised to replace "best effort, not a proof"; this is the same
+gap one level in.
+
+**Fix (Thor).** The self-check iterates the same list the integrator registers - `PRE_INSERT`,
+`PRE_UPDATE`, `POST_LOAD`, `POST_INSERT`, `POST_UPDATE`, `POST_DELETE`, `FLUSH`, `AUTO_FLUSH` - and
+asserts, per type, the position it registered for: first for the three prepended, last for the five
+appended. One table, no per-type methods, so adding a type to the integrator cannot silently skip its
+check. Test `a_displaced_flush_listener_fails_startup`.
+
+### S-12 (INFO) `CipherProbeBatchedInsertCheckTest` no longer tests batching or the insert check
+
+Per QUESTIONS #25 the file was rewritten from S-1's batched fail-open to S-5's startup refusal, which
+I accept (below). What is left is a probe named for a property it no longer exercises, in a repository
+where the probe names are the index into the review history; the next reader will believe S-1 is
+covered by it. Rename it to what it now asserts - `CipherProbePropertyAccessSequenceTest` or a merge
+into `CipherProbePropertyAccessTest` - and put S-1's name in `BatchedWriteVerificationTest`'s class
+javadoc as the file that carries it.
+
+### Attacked and closed without a code change
+
+**A write refusal the application catches.** `onPostInsert` runs the belt
+(`refuseIfStoredHeadersDisagree`) *before* `WriteVerification.owe`, so at any batch size where the
+belt can read the row a bad stored header makes it throw before the debt that would make the failure
+unavoidable at `beforeCompletion` is ever recorded; and `settle` clears its entries before it verifies
+them, so a caught settlement refusal leaves nothing to re-raise. Both look like S-1 through the
+swallow door. Neither reproduces: measured against Hibernate ORM 7.4 on this branch, a
+`RuntimeException` escaping a flush event listener goes through Hibernate's exception conversion,
+which marks the transaction rollback-only, so the application's `catch` buys it an
+`UnexpectedRollbackException` at commit rather than a commit. The property holds - on a Hibernate
+behaviour this module neither asks for nor asserts anywhere. `SwallowedWriteRefusalTest` is added to
+`src/test/java` as that assertion, green, so a Hibernate upgrade that stops marking rollback-only is
+caught here rather than in a customer's audit. Keep it.
+
+**Other attempts that produced nothing.** Ledger key by session identity across two sessions on one
+thread (two ledgers, no cross-talk); a session that ends without a flush (`requireSettlementAnchor`
+refuses a bind with no transaction, and `AfterCompletionCallback` removes the ledger on both
+outcomes); `beforeCompletion` ordering against Spring's own synchronisations (Spring's
+`beforeCommit`/`beforeCompletion` run before `JpaTransactionManager.doCommit`, so a write from one is
+flushed and settled by the flush-end point); `Scope.tenantFor`'s `getOrDefault` fallback (`scopeFor`
+fills the map for every field of the model and `@BlindIndex(of=)` is validated against that same set
+at startup, so the fallback is unreachable - it should still be a `get` and a refusal, as a matter of
+not leaving a silent default where a tenant is decided, but I could not reach it and do not raise it
+as a finding); placeholder false positives on `STRING` and `BYTES` (128 random bits, no); async
+carrying a region across threads (`REGIONS` is a plain `ThreadLocal`); the sample module's 61.63%
+against the 80% gate (deliberate, documented and separately gated at 30% in `gdpr-shredding-sample/pom.xml`).
+
+### Rulings
+
+**#25 - S-1's probe rewritten as S-5's startup refusal: accepted.** S-5's fix genuinely makes the old
+fixture unstartable, the rewrite is red on `05ca185` and green here, and S-1's property is carried by
+`BatchedWriteVerificationTest`'s seventeen tests, which I re-ran and which measure settlement by the
+SQL actually prepared rather than by an absence of exceptions. Rename it - S-12.
+
+**#26 - ledger growth on a `StatelessSession` import: accepted, with a number.** The reasoning against
+an interim settlement pass is right: a settlement point chosen by a heuristic in the middle of
+`insertMultiple` is S-1 again. But "it degrades until the JVM dies" is not a bound, and a `Debt`
+holds a subject and a tenant, so an OOM heap dump of it is personal data. Add the hard cap Thor
+offered: property `shredding.write-verification.max-outstanding`, default **50 000**, and a debt that
+would exceed it is `SHRED-UNVERIFIED-WRITE` naming the property and the fix ("a transaction per
+chunk"). It refuses, it never degrades, and it is the secure default rather than an opt-in. Test
+`a_stateless_import_past_the_cap_is_refused_rather_than_accumulated`.
+
+**#27 - the unreachable "still outstanding at completion" branch: keep it, and it stops being
+unreachable.** The argument is right and I would carry three uncovered lines for it in any case. Note
+that change 5 of the S-8 fix and the "clear only what verified" half of the swallow attack above both
+make it reachable: once `settle` stops emptying the ledger before it has verified anything, a
+settlement that threw and was caught leaves entries for `beforeCompletion` to find, which is what the
+branch is for. Do that even though the swallow does not reproduce today - it is the difference between
+a property and an accident of Hibernate's exception conversion. Do not exclude the lines from JaCoCo.
+
+### S-4 R1
+
+Not a finding this pass. Blocked on design addendum 2, reviewed above: **APPROVED WITH CHANGES**, six
+numbered. `CipherProbeRegionResidueTest` stays in `src/test-pending/java` until R1 is green.

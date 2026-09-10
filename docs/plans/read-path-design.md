@@ -496,3 +496,100 @@ and before any proxied call, sees a stale matching epoch — the C-32 window `po
 **Probes, RED first.** R1 promoted from `src/test-pending`; a region left by a returned call does not
 serve a later non-proxied decode; nested repository calls still serve their own decodes; a failed
 inner restore refuses the outer region; `CipherProbeBracketUnwindTest` unchanged, leaks still 0/200.
+
+### Cipher review of addendum 2 (2026-09-10)
+
+**APPROVED WITH CHANGES.** The choice of (b) is right and the argument for it is right. A counter is
+accumulated state and one missed exit is stuck-positive authority; an epoch is replaced state and a
+missed restore lands in the refusing direction. The rejections of (a) and (c) are made on evidence -
+R1's region has no session and R1's reader enters no proxy - and I accept both. What follows are six
+changes, five of them because the mechanism as written does not yet have the property the addendum
+claims for it, and one because the accounting the epoch is meant to protect is already broken on
+`e2c2bdd` and should be fixed first.
+
+**1. Compare epochs for equality, never for age.** The addendum's predicate is "regions with an older
+epoch are residue". A region can carry an epoch *newer* than the thread's: an inner entry stamps
+`n+1`, an `Error` inside it leaves its region on the deque, the outer frame's `finally` restores `n`
+and the outer call carries on. Under "older is residue" that leftover region is not older, so it is
+not residue, so it authorises - and it is the region on top, so it is the one every subsequent decode
+of the outer call is filed into. Equality refuses both directions and is the only predicate the
+property needs. It also takes wraparound off the table: at `TOKENS.incrementAndGet()` 2^63 is not
+reachable by any workload, but an ordering test is the one shape where a single overflow inverts
+every comparison at once, and equality cannot be inverted.
+
+**2. There must be a distinguished "no entry in force" epoch, and public `openRegion()` must not stamp
+the live one.** The addendum states that "public `openRegion()` stamps the thread's *current* epoch,
+so a region opened outside either is residue by construction". That is false in two places I can
+name.
+
+  - *A thread that has never entered.* The epoch `ThreadLocal` has to start somewhere. A raw
+    `openRegion()` on a fresh or pooled-but-never-bracketed thread stamps that initial value, and
+    `recordDecoded` compares against the same initial value: equal, authorised. R1 would then be red
+    or green according to whether the JUnit thread happened to enter a repository proxy earlier in
+    the class, which is not a property, it is an ordering artefact.
+  - *A raw `openRegion()` from inside a proxied call.* A user `@PostLoad` method, an
+    `@EntityListeners` bean, a hand-written DAO reached from a repository default method - all run
+    with the live epoch in force. A region they open is stamped live, sits on top of the deque, and
+    every decode for the remainder of that call is filed into it and drained from it rather than
+    from the proxy's own region. Indistinguishable from the legitimate one, which is exactly S-4.
+
+  So: the epoch `ThreadLocal`'s initial value, and the value restored at the outermost exit, is a
+  `NONE` that no entry ever assigns; `Bracket.invoke` and `withReadBracket` are the only two writers
+  of a real epoch; a `Region` captures the epoch in force at the moment it is constructed and never
+  re-reads it; and every region access refuses when the thread's epoch is `NONE`. Public
+  `openRegion()` either stamps `NONE` explicitly or stops being public and becomes reachable only
+  through the two entries. Only then is "a region opened outside either is residue by construction"
+  true as written - and only then does the residual shrink to the one case the addendum wants to
+  concede, because a region-less read after an ordinary return now refuses instead of matching.
+
+**3. (c)'s sweep must be conditional on the epoch, and must not be silent.** "`Bracket.invoke`
+discards any region already on the deque before opening its own" is written unconditionally. A
+nested repository call would then destroy the *outer* call's still-live region: its pending decodes
+vanish, and the outer `closeRegion(outerToken)` finds its token no longer on the stack and raises
+`SHRED-READ-UNVERIFIED` - on every nested repository call in the application, which is the shape the
+addendum's own probe list says must keep working. Sweep only regions whose epoch is not the epoch in
+force at entry; never one whose epoch equals it. And log what is swept at WARN with the count and
+the first `entity.field`, the way `pushBind` already does for a stale write scope: the sweep is the
+only moment an operator ever learns an undisciplined region existed at all.
+
+**4. The check belongs at every region access, not only at `recordDecoded`.** `drain`,
+`pendingKeysFor` and `closeRegion` each read `stack.peek()` with no test of any kind. A decode
+recorded while the epoch matched and drained after it changed is the same fail-open one method
+later, and a `closeRegion` that unwinds a region it does not own is what makes residue reachable in
+the first place. One predicate in one private `currentRegion()`, four callers.
+
+**5. Fix `unwindTo`'s silent discard before building the epoch, not after.** Reproduced on `e2c2bdd`:
+`CipherProbeSeventhPassTest.probe_an_inner_regions_undrained_decode_is_discarded_in_silence_by_the_outer_close`
+(`src/test-pending/java`). `closeRegion(outer)` pops every region above `outer` and never looks at
+their pending maps, so an inner region whose own close was skipped - precisely the C-32 state this
+addendum exists to handle - is dropped with its unverified decode inside it, and the outer call
+returns its result. `discardRegion` may drop unchecked; the original exception is the failure worth
+reporting. `closeRegion` may not: an intermediate region still holding a decode is
+`SHRED-READ-UNVERIFIED`, named the same way its own region's would be. The epoch is worth little on
+top of accounting that already loses a debt on the normal return path.
+
+**6. Two probes to add to the list.** A raw `openRegion()` *inside* a proxied call is refused (change
+2's second case), and a raw `openRegion()` on a thread that has never entered an entry is refused
+(change 2's first case). The four already listed are right, and `CipherProbeBracketUnwindTest` stays
+unchanged at 0/200.
+
+**The named residual: accepted - and no, the converter must not be made to refuse "when no proxied
+call is active".** The phrasing is the problem, not the position. `withReadBracket` is deliberately
+not a proxied call; it is the documented path for a raw `EntityManager` entity operation, and a
+"proxied call in flight" test would refuse exactly the relaxation (a) was rejected for refusing. The
+property to enforce is *no bracketed entry is in force on this thread*, which change 2 makes testable
+with one `long` and without consulting Spring or Hibernate state at all. With change 2 in place the
+residual is no longer "a region-less read on a thread that has not entered the proxy" - that case
+refuses - but only "a region-less read on a thread where an `Error` skipped exactly the frame that
+restores the epoch, and before the next entry". That is the same window `popWrite`'s javadoc concedes
+for write scopes and `CipherProbeBracketUnwindTest` already measures, and its cost is bounded by
+S-4's closed half: an ownerless region can serve nothing but this row's own current value, verified
+by `onPostLoad` against this row's tenant, subject and identifier, with the per-decrypt key-state
+check still in force. **A leaked region costs a refusal, never a value.** Accept it, state it in
+`SECURITY-NOTES.md` in those words beside QUESTIONS #21, and do not buy a `StackWalker` on every
+decode for it.
+
+**Async, for the record.** Both `REGIONS` and the new epoch must be plain `ThreadLocal`s, never
+`InheritableThreadLocal` and never anything a task decorator can copy: an inherited epoch would match
+an inherited region and authorise the one case the design gets for free today. Worth a line of
+javadoc, since the failure mode of getting this wrong is silent.

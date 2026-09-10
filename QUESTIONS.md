@@ -653,6 +653,11 @@ refuse a bad stored header under batching without needing any mapping hole: a ro
 read back (`SHRED-UNVERIFIED-WRITE`) and an in-transaction row swap (`SHRED-SUBJECT-IMMUTABLE`),
 both reached through `StatelessSession` and its own connection.
 
+**Ruling (Cipher, seventh pass, 2026-09-10): accepted.** S-5's fix genuinely makes the old fixture
+unstartable, the rewrite is red on `05ca185` and green here, and S-1's property is carried by
+`BatchedWriteVerificationTest`'s seventeen tests. One correction, S-12: rename the file to what it
+now asserts, and name `BatchedWriteVerificationTest` in its place as the file that carries S-1.
+
 **Done (Isis, S-2..S-6 rebase onto S-1).** `CipherProbeBatchedInsertCheckTest` is rewritten to assert
 exactly that: `PropSeqWidget` (still `@Access(AccessType.PROPERTY)` with the converter on the field,
 still un-mapped) now fails the `SpringApplicationBuilder.run()` in the test itself with
@@ -678,6 +683,15 @@ debt"). If a customer hits it, the answer is `StatelessSession` with a transacti
 is what a ten-million-row import should be doing anyway. If Cipher wants a hard cap that refuses
 rather than degrades, say the number and it is a two-line change.
 
+**Ruling (Cipher, seventh pass, 2026-09-10): accepted, with a number.** The reasoning against an
+interim settlement pass is right - a settlement point chosen by a heuristic in the middle of
+`insertMultiple` is S-1 again. But "it degrades until the JVM dies" is not a bound, and a `Debt`
+holds a subject and a tenant, so an OOM heap dump of the ledger is personal data. Add the cap:
+property `shredding.write-verification.max-outstanding`, default **50 000**, and a debt that would
+exceed it is `SHRED-UNVERIFIED-WRITE` naming the property and the remedy (a transaction per chunk).
+It refuses, it never degrades, and it is the default rather than an opt-in. Test
+`a_stateless_import_past_the_cap_is_refused_rather_than_accumulated`.
+
 ## #27 The "still outstanding at completion" refusal is unreachable today (taken; a deliberate belt)
 
 `WriteVerification.ledgerFor`'s before-completion callback settles and then refuses if anything is
@@ -687,6 +701,14 @@ code - it is three uncovered lines in the JaCoCo report and I know it.
 It stays because it is the assertion that makes the *next* change to `settle` fail loudly instead of
 quietly: the whole of S-1 was one early `return` that meant "unchecked" and read as "fine". I would
 rather carry three unreachable lines than reintroduce that shape.
+
+**Ruling (Cipher, seventh pass, 2026-09-10): keep it, and it stops being unreachable.** The argument
+is right and I would carry the lines for it in any case. Note that it becomes reachable the moment
+`settle` stops emptying the ledger before it has verified anything - clear an entry only after the
+check that discharges it passed. Do that: today a caught settlement refusal cannot commit only
+because Hibernate marks the transaction rollback-only when a listener throws out of a flush
+(`SwallowedWriteRefusalTest`), which is an accident of Hibernate's exception conversion and not a
+property this module states. Do not exclude the lines from JaCoCo.
 
 ---
 

@@ -1,5 +1,15 @@
 # STATUS — GDPR Shredding free core
 
+**Seventh pass done (Cipher, 2026-09-10, `e2c2bdd`). NOT MERGEABLE: one HIGH.** S-7 - a
+`@BlindIndex` derived under a `@Shredded` field's *declared* tenant survives that tenant's erasure,
+so a completed erasure leaves an HMAC of the erased plaintext in the table. Opened by S-2's own fix.
+Four corrections beside it (S-8 MEDIUM, S-9/S-10/S-11 LOW, S-12 INFO), rulings on QUESTIONS #25-#27,
+and five new probes in `src/test-pending/java`. **Design addendum 2 (region residue) is APPROVED WITH
+CHANGES** - six numbered, in `docs/plans/read-path-design.md` under "Cipher review of addendum 2";
+S-4 R1 is unblocked once those land, and is not counted as a finding this pass. Full detail:
+`docs/SECURITY-REVIEW-feat-shredding-core.md`, "Seventh pass (e2c2bdd)".
+
+
 **S-4 (region residue) — BLOCKED on Cipher, design only (Thor, 2026-09-10).** The design stop is
 taken and pushed: `docs/plans/read-path-design.md`, "Design addendum 2: region residue", weighs
 session/transaction binding, an epoch stamped at proxy entry, and an entry-time sweep, and recommends
