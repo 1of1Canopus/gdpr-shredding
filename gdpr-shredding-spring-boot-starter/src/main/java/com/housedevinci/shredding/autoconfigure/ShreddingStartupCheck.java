@@ -49,6 +49,10 @@ public final class ShreddingStartupCheck implements InitializingBean {
   @Override
   public void afterPropertiesSet() {
     ShreddingRuntime.set(new ShreddingRuntime(cipher, properties.getErasedValue().getPolicy()));
+    // #26 (Cipher seventh pass): the write-verification ledger's hard cap, configured once at boot
+    // the same way ShreddingRuntime is.
+    WriteVerification.configureMaxOutstanding(
+        properties.getWriteVerification().getMaxOutstanding());
     refuseIfVerifierNotRegisteredFirst();
 
     if (properties.isDevMode()) {

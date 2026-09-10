@@ -260,4 +260,36 @@ public class ShreddingProperties {
       this.backupRetention = backupRetention;
     }
   }
+
+  private final WriteVerificationProperties writeVerification = new WriteVerificationProperties();
+
+  public WriteVerificationProperties getWriteVerification() {
+    return writeVerification;
+  }
+
+  /**
+   * QUESTIONS #26 (Cipher seventh pass). Settlement discharges its ledger at the end of every
+   * flush, so an ordinary {@code @Transactional} write holds at most one flush worth of debt - but
+   * {@code StatelessSession} fires no flush event, so a stateless import of N rows in one
+   * transaction holds N debts, each a subject and a tenant, until {@code beforeCompletion}. This is
+   * the hard cap: refuse rather than degrade, so the worst case is a typed error naming the fix - a
+   * transaction per chunk - never an unbounded ledger and an OOM heap dump holding personal data.
+   */
+  public static class WriteVerificationProperties {
+    /**
+     * How many written-but-unsettled rows one session's ledger may hold before a further write is
+     * refused with {@code SHRED-UNVERIFIED-WRITE} rather than accepted onto a ledger that keeps
+     * growing. Reached in practice only by a long {@code StatelessSession} import in one
+     * transaction; the remedy the refusal names is a transaction per chunk.
+     */
+    private int maxOutstanding = 50_000;
+
+    public int getMaxOutstanding() {
+      return maxOutstanding;
+    }
+
+    public void setMaxOutstanding(int maxOutstanding) {
+      this.maxOutstanding = maxOutstanding;
+    }
+  }
 }

@@ -701,6 +701,13 @@ exceed it is `SHRED-UNVERIFIED-WRITE` naming the property and the remedy (a tran
 It refuses, it never degrades, and it is the default rather than an opt-in. Test
 `a_stateless_import_past_the_cap_is_refused_rather_than_accumulated`.
 
+**Done (Isis, 2026-09-10).** `ShreddingProperties.WriteVerificationProperties.maxOutstanding`
+(default 50 000), configured into `WriteVerification` by `ShreddingStartupCheck.afterPropertiesSet`
+the same way `ShreddingRuntime` is. `owe` refuses a genuinely new debt once the ledger already holds
+`maxOutstanding` distinct rows, naming the property and the remedy; a row already owed and rebound
+in the same transaction (an update after an insert) replaces its own entry rather than counting
+twice, so only a new row can push the ledger over. `CipherProbeWriteVerificationCapTest`, green.
+
 ## #27 The "still outstanding at completion" refusal is unreachable today (taken; a deliberate belt)
 
 `WriteVerification.ledgerFor`'s before-completion callback settles and then refuses if anything is
@@ -718,6 +725,21 @@ check that discharges it passed. Do that: today a caught settlement refusal cann
 because Hibernate marks the transaction rollback-only when a listener throws out of a flush
 (`SwallowedWriteRefusalTest`), which is an accident of Hibernate's exception conversion and not a
 property this module states. Do not exclude the lines from JaCoCo.
+
+**Done (Isis, 2026-09-10).** `settle` no longer clears its snapshot up front: `groupByTable` now
+groups debt *keys*, and `verifyChunk` removes each key from the ledger immediately after the row it
+names is found to agree - one at a time within a chunk, in iteration order - not the whole chunk at
+once after the SELECT returns. A chunk that throws partway through therefore leaves every debt it
+had not yet reached still in the ledger, correctly, and `beforeCompletion`'s "still outstanding"
+branch is reachable the moment something between a `settle` throw and the transaction's own commit
+attempt swallows the exception - not reproducible today for the reason stated above (kept, not
+removed: `SwallowedWriteRefusalTest`'s javadoc now says so), but no longer unreachable by
+construction. New test,
+`BatchedWriteVerificationTest.a_settlement_refusal_discharges_only_the_debt_that_actually_passed`:
+two rows in one chunk, one deleted out from under its own debt before settlement, `settle` called
+directly (package-private, same package) so the still-open transaction can be inspected before it
+unwinds - it throws for the vanished row, and the row that verified is discharged regardless of
+where in the chunk it fell. Lines not excluded from JaCoCo.
 
 ---
 

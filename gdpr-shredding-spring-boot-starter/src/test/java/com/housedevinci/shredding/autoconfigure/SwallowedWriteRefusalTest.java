@@ -47,9 +47,13 @@ import org.testcontainers.utility.DockerImageName;
  * skip-policy - therefore commits the row that this module already knew was wrong, and the
  * before-completion callback finds an empty ledger and says nothing.
  *
- * <p>The same shape sits in {@code WriteVerification.settle}, which clears its ledger entries
- * before it verifies them: a settlement refusal that is caught leaves nothing for {@code
- * beforeCompletion} to re-raise.
+ * <p>The same shape used to sit in {@code WriteVerification.settle}, which cleared every ledger
+ * entry before it verified any of them: a settlement refusal that was caught left nothing for
+ * {@code beforeCompletion} to re-raise. QUESTIONS #27 (Cipher seventh pass) closed that: a debt is
+ * now removed only after the check that discharges it has actually passed, so a caught settlement
+ * refusal now leaves the debts {@code settle} had not yet reached still outstanding for {@code
+ * beforeCompletion} to find - reachable on the belt-throws-before-owe path this test's own scenario
+ * exercises, if Hibernate ever stopped marking the transaction rollback-only on a listener's throw.
  *
  * <p><strong>Not reproducible, and this is why.</strong> Measured against Hibernate ORM 7.4 on this
  * branch: a {@code RuntimeException} escaping a flush event listener goes through Hibernate's own

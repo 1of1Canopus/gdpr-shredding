@@ -6,6 +6,29 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added (QUESTIONS #26: a hard cap on the write-verification ledger)
+
+**Cipher's ruling on the seventh pass, accepted with a number.** Settlement discharges the ledger at
+the end of every flush, so an ordinary `@Transactional` write never holds more than one flush worth
+of debt; `StatelessSession` fires no flush event, so a stateless import that stays in one
+transaction for its whole run keeps accumulating debts - each one a subject and a tenant - until
+`beforeCompletion`, unboundedly. New property `shredding.write-verification.max-outstanding`
+(default 50 000): a debt that would exceed it is refused with `SHRED-UNVERIFIED-WRITE`, naming the
+property and the remedy (a transaction per chunk), rather than left to grow without bound. It
+refuses; it never degrades. `CipherProbeWriteVerificationCapTest`.
+
+### Fixed (QUESTIONS #27: the "still outstanding at completion" refusal was unreachable)
+
+**Cipher's ruling on the seventh pass: keep it, and make it reachable.** `WriteVerification.settle`
+used to clear its whole ledger before it verified any of it, on the reasoning that a refusal below
+throws out of the flush and aborts the transaction anyway - which made `beforeCompletion`'s own
+"still outstanding when the transaction tries to commit" refusal permanently unreachable (three
+uncovered lines by construction) and meant a caught settlement refusal (`SwallowedWriteRefusalTest`'s
+shape) discharged debts it had never actually checked. A debt is now removed from the ledger only
+once the check that discharges it has actually passed, one at a time within a chunk, so a chunk that
+throws partway through leaves every debt it had not yet reached correctly still outstanding.
+`BatchedWriteVerificationTest.a_settlement_refusal_discharges_only_the_debt_that_actually_passed`.
+
 ### Changed (seventh pass at `e2c2bdd`, S-12: renamed a probe to what it tests)
 
 **INFO.** `CipherProbeBatchedInsertCheckTest` was rewritten per QUESTIONS #25 from S-1's batched

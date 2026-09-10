@@ -8,18 +8,22 @@ are fine here for now — but before this repo is made public, move them to
 tests, README, CHANGELOG, LICENSE/NOTICE, SECURITY.md, CONTRIBUTING.md, user docs, CI, the
 probe script). See how `agent-guard` did it (2026-09-10).
 
-**Seventh pass corrections, in progress (Isis, 2026-09-10).** S-7 (HIGH), S-8 (MEDIUM), S-9, S-10,
-S-11 (LOW) closed; see the CHANGELOG's five "Fixed (seventh pass at ..., S-*)" entries. S-8 is
-rebuilt on top of Thor's entry-epoch mechanism (`95efeac`/`ff294bc`, pushed mid-session): `unwindTo`
-gained a `refuseUndrainedIntermediates` flag rather than a second inline pop loop, per Dollar's
-instruction, and the branch was rebased onto `95efeac` before S-8 landed. `CipherProbeSeventhPassTest`
-(S-8 + S-10) is promoted out of `src/test-pending/java`, both green. S-11's own probe,
-`CipherProbeSettlementListenerDisplacedTest`, stays red - see QUESTIONS.md S-11: position-of-our-own-
-listener checking is structurally unable to catch an earlier-composed integrator's `setListeners()`
-wipe, since this module always composes itself last. S-12 (rename) and #26/#27 still open. S-4 R1
-and the general form of S-7 (S-7b) remain design stops for Thor, unaffected by this pass's
-corrections - S-4 R1 has since been closed by Thor (`ff294bc`) and S-7b has a design stop taken
-(`95efeac`), both independent of this work.
+**Seventh pass corrections, done (Isis, 2026-09-10).** S-7 (HIGH), S-8 (MEDIUM), S-9, S-10, S-11
+(LOW), S-12 (INFO), and QUESTIONS #26/#27 all closed; see the CHANGELOG's "Fixed"/"Added"/"Changed"
+entries for the seventh pass and #26/#27. S-8 is rebuilt on top of Thor's entry-epoch mechanism
+(`95efeac`/`ff294bc`, pushed mid-session): `unwindTo` gained a `refuseUndrainedIntermediates` flag
+rather than a second inline pop loop, per Dollar's instruction, and the branch was rebased onto
+`95efeac` before S-8 landed. `CipherProbeSeventhPassTest` (S-8 + S-10) is promoted out of
+`src/test-pending/java`, both green. #26 adds `shredding.write-verification.max-outstanding` (default
+50 000), refusing rather than degrading; #27 makes `settle`'s "still outstanding at completion"
+branch genuinely reachable by discharging each debt only once its own check passes. **One item not
+closed: S-11's own probe, `CipherProbeSettlementListenerDisplacedTest`, stays red** - see
+QUESTIONS.md S-11: position-of-our-own-listener checking is structurally unable to catch an
+earlier-composed integrator's `setListeners()` wipe, since this module always composes itself last;
+needs a design decision (per-type Hibernate-internal class hardcoding, or a new registration-time
+snapshot mechanism), flagged rather than built. S-4 R1 and the general form of S-7 (S-7b) were
+Thor's design stops, independent of this work - both since addressed: S-4 R1 closed (`ff294bc`),
+S-7b's design stop taken (`95efeac`).
 
 **Seventh pass done (Cipher, 2026-09-10, `e2c2bdd`). NOT MERGEABLE: one HIGH.** S-7 - a
 `@BlindIndex` derived under a `@Shredded` field's *declared* tenant survives that tenant's erasure,

@@ -61,6 +61,19 @@ final class WriteVerification {
   private static final int CHUNK = 500;
 
   /**
+   * QUESTIONS #26 (Cipher seventh pass): {@code shredding.write-verification.max-outstanding},
+   * configured once by {@link ShreddingStartupCheck} at boot. A ledger this session's debts would
+   * exceed is refused rather than left to grow without bound - a {@code StatelessSession} import of
+   * millions of rows in one transaction is the only realistic way to reach it, and the remedy is a
+   * transaction per chunk, not a bigger heap.
+   */
+  private static volatile int maxOutstanding = 50_000;
+
+  static void configureMaxOutstanding(int max) {
+    maxOutstanding = max;
+  }
+
+  /**
    * Keyed by session identity - Hibernate's session implementations do not override {@code equals}.
    * An entry is created only when a transaction is in progress, so the after-completion callback
    * that removes it is always registered and always runs.
@@ -105,11 +118,28 @@ final class WriteVerification {
       ShreddingContext.Scope scope,
       RowId rowId,
       String what) {
-    ledgerFor(session)
-        .debts
-        .put(
-            new Key(entityName, normalise(id)),
-            new Debt(entityName, tableName, idColumn, id, fields, scope, rowId, what));
+    WriteVerification ledger = ledgerFor(session);
+    Key key = new Key(entityName, normalise(id));
+    // #26: the cap is on distinct debts, not on this call - a row already owed and rebound (an
+    // update after an insert in the same flush) replaces its own entry rather than growing the
+    // ledger, so only a genuinely new row can push it over.
+    if (!ledger.debts.containsKey(key) && ledger.debts.size() >= maxOutstanding) {
+      throw new ShreddingException(
+          ErrorCodes.UNVERIFIED_WRITE,
+          "this session's write-verification ledger already holds "
+              + ledger.debts.size()
+              + " unsettled row(s), at shredding.write-verification.max-outstanding ("
+              + maxOutstanding
+              + "). Settlement discharges the ledger at the end of every flush, so an ordinary"
+              + " @Transactional write never grows past one flush worth of debt; a StatelessSession"
+              + " import that stays under one transaction for its whole run does not flush at all"
+              + " and keeps accumulating debts, each holding a subject and a tenant, until"
+              + " beforeCompletion. Refused rather than left to grow without bound: commit in"
+              + " chunks, one transaction per chunk, instead of one transaction for the whole"
+              + " import.");
+    }
+    ledger.debts.put(
+        key, new Debt(entityName, tableName, idColumn, id, fields, scope, rowId, what));
   }
 
   /** A row deleted in this transaction owes nothing: there is no stored header left to verify. */
@@ -123,35 +153,49 @@ final class WriteVerification {
   /**
    * Settles every outstanding debt of this session, or throws. Called at the end of every flush and
    * auto-flush, and again from the before-completion callback.
+   *
+   * <p><strong>#27 (Cipher seventh pass).</strong> A debt is removed from the ledger only after the
+   * check that discharges it has actually passed - not before, on the assumption that it is about
+   * to. The old shape cleared the whole ledger up front, on the reasoning that a refusal below
+   * throws out of the flush and aborts the transaction anyway, so nothing downstream would ever see
+   * the difference. That reasoning is sound only as long as nothing ever catches the refusal and
+   * carries on - which is exactly the shape S-1 itself was - and it made {@code beforeCompletion}'s
+   * own "still outstanding at completion" refusal permanently unreachable: {@code settle} always
+   * left the ledger empty, whether it threw or not. Now a chunk's debts are removed one at a time,
+   * each immediately after its own row is found to agree, so a chunk that throws partway through
+   * leaves every debt it had not yet reached - correctly - still outstanding.
    */
   static void settle(SharedSessionContractImplementor session) {
     WriteVerification ledger = LEDGERS.get(session);
     if (ledger == null || ledger.debts.isEmpty()) {
       return;
     }
-    var outstanding = new ArrayList<>(ledger.debts.values());
-    // Cleared first: a refusal below throws out of the flush and aborts the transaction, and the
-    // after-completion callback drops the ledger either way. Leaving the entries in place would
-    // only let the same failure be reported a second time from beforeCompletion.
-    ledger.debts.clear();
-    for (var group : groupByTable(outstanding).values()) {
+    var outstanding = new ArrayList<>(ledger.debts.keySet());
+    for (var group : groupByTable(ledger, outstanding).values()) {
       for (int from = 0; from < group.size(); from += CHUNK) {
-        verifyChunk(session, group.subList(from, Math.min(from + CHUNK, group.size())));
+        verifyChunk(session, ledger, group.subList(from, Math.min(from + CHUNK, group.size())));
       }
     }
   }
 
-  private static Map<String, List<Debt>> groupByTable(List<Debt> outstanding) {
-    var groups = new LinkedHashMap<String, List<Debt>>();
-    for (var debt : outstanding) {
+  private static Map<String, List<Key>> groupByTable(
+      WriteVerification ledger, List<Key> outstanding) {
+    var groups = new LinkedHashMap<String, List<Key>>();
+    for (var key : outstanding) {
+      Debt debt = ledger.debts.get(key);
+      if (debt == null) {
+        continue; // forgiven (onPostDelete) since the snapshot was taken
+      }
       groups
           .computeIfAbsent(debt.entityName() + " " + debt.tableName(), k -> new ArrayList<>())
-          .add(debt);
+          .add(key);
     }
     return groups;
   }
 
-  private static void verifyChunk(SharedSessionContractImplementor session, List<Debt> chunk) {
+  private static void verifyChunk(
+      SharedSessionContractImplementor session, WriteVerification ledger, List<Key> chunkKeys) {
+    var chunk = chunkKeys.stream().map(ledger.debts::get).toList();
     Debt first = chunk.get(0);
     var fields = first.fields();
     StringBuilder sql = new StringBuilder("SELECT ").append(quote(first.idColumn()));
@@ -189,7 +233,8 @@ final class WriteVerification {
               return rows;
             });
 
-    for (var debt : chunk) {
+    for (int idx = 0; idx < chunk.size(); idx++) {
+      Debt debt = chunk.get(idx);
       byte[][] columns = stored.get(normalise(debt.id()));
       if (columns == null) {
         throw new ShreddingException(
@@ -226,6 +271,8 @@ final class WriteVerification {
                   + " commit rather than left in another subject's erasure scope.");
         }
       }
+      // #27: discharged only now, after this row's own check has actually passed.
+      ledger.debts.remove(chunkKeys.get(idx));
     }
   }
 

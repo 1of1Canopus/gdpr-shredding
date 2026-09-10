@@ -457,6 +457,53 @@ class BatchedWriteVerificationTest {
   }
 
   /**
+   * #27 (Cipher seventh pass). {@code settle} used to clear its whole ledger before it verified any
+   * of it, on the reasoning that a refusal aborts the transaction anyway - which made {@code
+   * beforeCompletion}'s own "still outstanding" refusal permanently unreachable and meant a caught
+   * settlement refusal (the shape {@link SwallowedWriteRefusalTest} exercises) discharged debts it
+   * had never actually checked. A debt is now removed only once the check that discharges it has
+   * passed: two rows in one chunk, one left alone and one deleted out from under its own debt
+   * (S-1's "vanished row" shape, the same as {@link
+   * #a_written_row_that_cannot_be_read_back_refuses_the_commit}), called directly so the still-open
+   * transaction can be inspected before it unwinds - {@code settle} throws for the vanished row,
+   * and the row that verified is discharged regardless of where in the chunk it fell: one debt
+   * remains outstanding, not two and not zero.
+   */
+  @Test
+  void a_settlement_refusal_discharges_only_the_debt_that_actually_passed() {
+    String owner = owner("partial-settle");
+    var sessionFactory = entityManagerFactory.unwrap(org.hibernate.SessionFactory.class);
+    try (var stateless = sessionFactory.openStatelessSession()) {
+      var tx = stateless.beginTransaction();
+      var session = (org.hibernate.engine.spi.SharedSessionContractImplementor) stateless;
+      try {
+        stateless.insertMultiple(
+            List.of(new BatchWidget(owner, "keeps-its-row"), new BatchWidget(owner, "vanishes")));
+        // The second-inserted row vanishes, so the chunk's loop reaches (and discharges) the first
+        // row's debt before it ever reaches the one that throws.
+        stateless.doWork(
+            connection -> {
+              try (var ps =
+                  connection.prepareStatement(
+                      "delete from batch_widget where id = (select max(id) from batch_widget"
+                          + " where owner_id = ?)")) {
+                ps.setString(1, owner);
+                ps.executeUpdate();
+              }
+            });
+
+        assertThat(WriteVerification.outstanding(session)).isEqualTo(2);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> WriteVerification.settle(session))
+            .isInstanceOf(ShreddingException.class)
+            .satisfies(e -> assertThat(codeOf(e)).isEqualTo(ErrorCodes.UNVERIFIED_WRITE));
+        assertThat(WriteVerification.outstanding(session)).isEqualTo(1);
+      } finally {
+        tx.rollback();
+      }
+    }
+  }
+
+  /**
    * C-34's row swap, performed inside the writing transaction and under a batch size: two rows of
    * one subject exchange their stored ciphertexts, so each row's header names the other's id. The
    * per-row check cannot see this - at {@code onPostInsert} time neither row exists yet - and
