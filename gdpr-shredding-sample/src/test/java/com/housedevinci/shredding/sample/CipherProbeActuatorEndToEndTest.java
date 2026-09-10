@@ -35,9 +35,10 @@ class CipherProbeActuatorEndToEndTest {
   @Container @ServiceConnection
   static final PostgreSQLContainer<?> POSTGRES =
       new PostgreSQLContainer<>(
-          DockerImageName.parse(
-                  "postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777")
-              .asCompatibleSubstituteFor("postgres"));
+              DockerImageName.parse(
+                      "postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777")
+                  .asCompatibleSubstituteFor("postgres"))
+          .withStartupTimeout(java.time.Duration.ofMinutes(2));
 
   private static final String MASTER_KEY_PLAINTEXT = "actuator-probe-master-key-32-byte";
   private static final String MASTER_KEY_BASE64 =
@@ -45,6 +46,9 @@ class CipherProbeActuatorEndToEndTest {
 
   @DynamicPropertySource
   static void secrets(DynamicPropertyRegistry registry) {
+    // S-25: pinned rather than resolved from the container's bootstrap connection.
+    registry.add(
+        "spring.jpa.properties.hibernate.dialect", () -> "org.hibernate.dialect.PostgreSQLDialect");
     registry.add("shredding.master-key", () -> MASTER_KEY_BASE64);
     registry.add(
         "shredding.erasure-log.hmac-secret",

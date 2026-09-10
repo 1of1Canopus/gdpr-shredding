@@ -38,14 +38,21 @@ class SampleEndToEndTest {
   @Container @ServiceConnection
   static final PostgreSQLContainer<?> POSTGRES =
       new PostgreSQLContainer<>(
-          // Pinned by digest, the same image module B uses. The tag is dropped here because
-          // Testcontainers' service-connection support re-parses the name and rejects tag+digest.
-          DockerImageName.parse(
-                  "postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777")
-              .asCompatibleSubstituteFor("postgres"));
+              // Pinned by digest, the same image module B uses. The tag is dropped here because
+              // Testcontainers' service-connection support re-parses the name and rejects
+              // tag+digest.
+              DockerImageName.parse(
+                      "postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777")
+                  .asCompatibleSubstituteFor("postgres"))
+          .withStartupTimeout(java.time.Duration.ofMinutes(2));
 
   @DynamicPropertySource
   static void secrets(DynamicPropertyRegistry registry) {
+    // S-25: pinned rather than resolved from the container's bootstrap connection, the same
+    // reason the startup timeout above exists - resolution failing under load is
+    // "Unable to determine Dialect", not a Hibernate bug.
+    registry.add(
+        "spring.jpa.properties.hibernate.dialect", () -> "org.hibernate.dialect.PostgreSQLDialect");
     registry.add(
         "shredding.master-key",
         () ->

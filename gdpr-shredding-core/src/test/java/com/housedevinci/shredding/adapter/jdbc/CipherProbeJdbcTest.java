@@ -51,9 +51,10 @@ class CipherProbeJdbcTest {
   // Pinned by digest, the same image module B uses.
   private static final PostgreSQLContainer<?> POSTGRES =
       new PostgreSQLContainer<>(
-          DockerImageName.parse(
-                  "postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777")
-              .asCompatibleSubstituteFor("postgres"));
+              DockerImageName.parse(
+                      "postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777")
+                  .asCompatibleSubstituteFor("postgres"))
+          .withStartupTimeout(java.time.Duration.ofMinutes(2));
 
   private static final byte[] SECRET =
       "erasure-log-secret-that-is-32-bytes-or-more".getBytes(StandardCharsets.UTF_8);
