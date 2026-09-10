@@ -456,3 +456,43 @@ insert through a collection, `@BatchSize` collection then flush, `IDENTITY` unde
 and settlement), assigned id, sequence id, two entities in one flush, `saveAndFlush` then a second
 flush, flush-then-rollback (nothing commits, nothing refused), a bind with no transaction, and bulk
 JPQL update, which fires no event and stays matrix row 15's `SHRED-CONTEXT-001`. Matrix rows 24-27.
+
+## Design addendum 2: region residue (2026-09-10)
+
+**Property.** A decrypt is served only inside a region opened by the same call that is reading, on
+the same thread; residue from an earlier call, however it ended, never serves. `recordDecoded` today
+asks only "is this deque non-empty", and a region a returned call left behind is the same object at
+`stack.peek()` as one legitimately open (QUESTIONS S-4).
+
+**A counter is refused; an epoch is not one.** Isis stopped at a second `ThreadLocal` depth counter,
+rightly: a counter is *accumulated* state, so one exit missed under a `StackOverflowError` (C-32) is
+permanently wrong in the *permissive* direction — stuck positive, still authorising. An epoch is
+*replaced* state: entry assigns `TOKENS.incrementAndGet()` unconditionally, nothing accumulates, and
+a missed restore is overwritten by the next entry in the refusing direction, since an older-stamped
+region is thereby residue. `pushBind`'s own argument: correctness on entry, never on exit.
+
+| | (a) session/tx binding | (b) epoch at proxy entry | (c) sweep on entry |
+|---|---|---|---|
+| SOE mid-unwind | residue outlives its session only if the session ends too; inside one session it keeps authorising | residue's epoch ≠ the next entry's → refused; residual is the window before that next entry | residue destroyed by the next proxied call; until then it keeps authorising |
+| nested repo calls | one session throughout → no discrimination at all | save/restore the outer epoch; a failed restore refuses the outer region, fail-closed | needs the explicit nesting token, a second mechanism, and a lazy load through a converter cannot pass one |
+| async / session closed uncommitted | async already refused (no region on that thread); a closed session is (a)'s one real win | both refused on the epoch alone, no session state consulted | both refused at the next entry, not before |
+| cost | a `TransactionSynchronizationManager` or `Session` lookup per decode; couples the read path to Spring tx state | one `long` compare per decode, one `ThreadLocal<Long>` | one deque drain per proxied call |
+| **closes S-4 R1?** | **no** | **yes** | **no** |
+
+**(a) and (c) do not close R1, which decides it.** R1 builds its ownerless region from a direct
+`openRegion()` with no session and no transaction, then reads it from a caller holding no region:
+under (a) both sides see "no current session" and the binding matches, while refusing "no session"
+would refuse every non-transactional `withReadBracket`, C-32's probes included. Under (c) nothing
+sweeps — the undisciplined reader never enters the proxy; (c) guards the next proxied call only.
+
+**Recommendation: (b), with (c)'s sweep as a free complement** — `Bracket.invoke` discards any region
+already on the deque before opening its own, bounding (b)'s residual to "no proxied call since the
+failed restore". `Bracket.invoke` and `withReadBracket` stamp a fresh epoch; public `openRegion()`
+stamps the thread's *current* epoch, so a region opened outside either is residue by construction.
+No leak here carries authority: a surviving epoch can only make regions refuse. **Residual, stated
+not hidden:** a read opening no region of its own, after an SOE skipped exactly the restoring frame
+and before any proxied call, sees a stale matching epoch — the C-32 window `popWrite` concedes.
+
+**Probes, RED first.** R1 promoted from `src/test-pending`; a region left by a returned call does not
+serve a later non-proxied decode; nested repository calls still serve their own decodes; a failed
+inner restore refuses the outer region; `CipherProbeBracketUnwindTest` unchanged, leaks still 0/200.

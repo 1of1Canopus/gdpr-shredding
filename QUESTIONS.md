@@ -769,6 +769,19 @@ have been raised") does not, and is the same residual #21 already named.
 `CipherProbeRegionResidueTest.java` stays in `src/test-pending/java` for this reason — R2 is green,
 R1 is red, and the file is not moved until both are.
 
+**Design stop taken (Thor, 2026-09-10).** `docs/plans/read-path-design.md`, "Design addendum 2:
+region residue", weighs the three shapes Dollar named - (a) bind the region to the transaction or
+Hibernate session identity, (b) an epoch stamped at proxy entry, (c) sweep residue on proxy entry -
+against `StackOverflowError` mid-unwind, nested repository calls, async, a session closed without
+commit, and cost. **Recommendation: (b), with (c)'s sweep as a free complement.** (a) and (c) are
+refused on evidence rather than taste: R1's ownerless region is built with no session and no
+transaction and read from a caller that enters no proxy, so under (a) the binding matches and under
+(c) nothing sweeps - both leave R1 red. The objection to a second `ThreadLocal` is answered by the
+difference between accumulated and replaced state: a depth counter is the sum of every entry and
+exit and one missed exit is stuck-positive *authority*, while an epoch is overwritten unconditionally
+at the next entry, so a missed restore lands in the refusing direction. S-4 stays **open** pending
+Cipher's review of the design: the instruction for option (b) is to stop after the addendum.
+
 The `S-1 / S-5` interaction this note would have flagged is #25 above, already resolved: `S-5`'s
 startup refusal is what made `CipherProbeBatchedInsertCheckTest`'s original fixture unstartable, and
 the probe is rewritten as a startup-refusal assertion rather than given a new fixture, since S-1's own
