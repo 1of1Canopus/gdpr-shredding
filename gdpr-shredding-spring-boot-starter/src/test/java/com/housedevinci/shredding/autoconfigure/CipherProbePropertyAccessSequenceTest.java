@@ -54,9 +54,10 @@ class CipherProbePropertyAccessSequenceTest {
   @Container
   static final PostgreSQLContainer<?> POSTGRES =
       new PostgreSQLContainer<>(
-          DockerImageName.parse(
-                  "postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777")
-              .asCompatibleSubstituteFor("postgres"));
+              DockerImageName.parse(
+                      "postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777")
+                  .asCompatibleSubstituteFor("postgres"))
+          .withStartupTimeout(java.time.Duration.ofMinutes(2));
 
   private static String b64(String s) {
     return Base64.getEncoder().encodeToString(s.getBytes(StandardCharsets.UTF_8));
@@ -88,6 +89,7 @@ class CipherProbePropertyAccessSequenceTest {
                 "shredding.erasure-log.hmac-secret=" + b64("propseq-chain-secret-32-bytes!!!"),
                 "shredding.blind-index.hmac-secret=" + b64("propseq-index-secret-32-bytes!!!"),
                 "spring.jpa.hibernate.ddl-auto=create-drop",
+                "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect",
                 "spring.jpa.properties.hibernate.jdbc.batch_size=10",
                 "spring.jpa.properties.hibernate.order_inserts=true",
                 "spring.datasource.url=" + POSTGRES.getJdbcUrl(),

@@ -6,6 +6,47 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed (tenth pass, S-23: `@Shredded` inside an entity inheritance hierarchy was refused by a reason the developer could not act on)
+
+**LOW.** `ShreddedModel.allFields` walks an entity class and every superclass to collect
+`@Shredded` fields, which is what lets a field be shared through a `@MappedSuperclass`. It made no
+distinction between a `@MappedSuperclass` ancestor and an `@Entity` ancestor: a `@Shredded` field
+declared on the root of an `@Inheritance` hierarchy (`JOINED`, `SINGLE_TABLE` or
+`TABLE_PER_CLASS`) was scanned once per concrete entity that inherits it, each time against the
+field's one converter, under a different `entityName` — no converter pair could ever satisfy every
+scan, so the shape was always refused, but the message named the converter's declared entity/field
+pair as though it were a copy-paste mistake the developer could correct. It cannot be: the shape is
+not supported under any inheritance strategy.
+
+- **Added** `ShreddedModel.refuseIfInheritedFromAnotherEntity`: refuses at startup, before the
+  converter check runs, when a `@Shredded` field's declaring class is not the entity being scanned
+  and that declaring class is itself `@Entity`-annotated — naming the ancestor and the inheriting
+  entity, and pointing at `@MappedSuperclass` as the supported way to share the field. A field
+  inherited from a plain `@MappedSuperclass` is unaffected.
+- **Documented** the limitation in `docs/index.md` and `SECURITY-NOTES.md`, beside the existing
+  `@Embeddable`/`@ElementCollection` limitation (C-29).
+
+Probe: `CipherProbeTenthPassTest.probe_a_shredded_field_in_an_inheritance_hierarchy_is_refused_by_its_real_reason`.
+
+### Fixed (tenth pass, S-25: the starter's Testcontainers suite could fail bootstrap dialect resolution under container-count load)
+
+**LOW, the flake.** Cipher could not reproduce "Unable to determine Dialect" in three consecutive
+full `verify` runs, but ruled it fix-required rather than accepted: the starter's suite starts one
+`PostgreSQLContainer` per test class, and under load one container not yet accepting connections
+before Hikari's default 30s `connectionTimeout` would produce exactly that failure on whichever
+context bootstraps first, since dialect resolution needs a live connection.
+
+- **Pinned** `spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect` (or
+  the `DynamicPropertySource` equivalent) in every probe application's properties, so dialect
+  resolution never needs a bootstrap connection and cannot race the container regardless of how
+  slow it is to accept connections.
+- **Added** an explicit `.withStartupTimeout(java.time.Duration.ofMinutes(2))` on every
+  `@Container static final PostgreSQLContainer`, rather than relying on Testcontainers' default.
+- **Deferred** (not a design stop, recorded in `QUESTIONS.md`): collapsing the per-test containers
+  onto one reused singleton, which does not fit the two-hour follow-up window without restructuring
+  every probe's own `SpringApplicationBuilder`/`@DynamicPropertySource` bootstrap for schema
+  isolation.
+
 ### Fixed (ninth pass at `4a95ba5`, S-20: a blind index whose `subjectColumn` is not the shredded subject survives that subject's erasure)
 
 **HIGH.** Design addendum 3 bound one of the two axes of a blind index to the row it sits in.

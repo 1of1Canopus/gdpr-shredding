@@ -1207,3 +1207,66 @@ Hibernate's own statements. This module's own `shredding_*` tables are unqualifi
 **Probes.** `CipherProbeNinthPassBlindIndexTest` (5, promoted), including the K1 probe Cipher did not
 build — a decoy `public.schema_note` ahead of `app2` on `search_path`, which the erasure must leave
 untouched — plus `TableRefTest` (7) in the core.
+
+## S-23 (2026-09-10, Isis) — CLOSED. `@Shredded` inside an entity inheritance hierarchy is refused by its real reason.
+
+Tenth pass: `ShreddedModel.allFields` walks an entity class and every superclass, so a `@Shredded`
+field declared on the root of an `@Inheritance` hierarchy was scanned once per concrete entity that
+inherits it, each time against the one converter it declares, under a different `entityName`. No
+converter pair can satisfy every scan, so the shape was always refused — but by
+`requireMatchingConverter`, naming the converter's entity/field pair as though the developer had
+copy-pasted it wrong. They had not: the shape itself is not supported, under any strategy.
+
+**Fix.** `ShreddedModel.refuseIfInheritedFromAnotherEntity`, called before the converter check, for
+every `@Shredded` field whose `Field.getDeclaringClass()` is not the entity currently being scanned
+and is itself `@Entity`-annotated. Names the ancestor and the inheriting entity, and says
+`@MappedSuperclass` is the supported way to share the field. A field declared on a plain
+`@MappedSuperclass` is unaffected — it is never scanned as `type` under more than one `entityName`,
+so it never had this problem, and this check does not see it as "declared elsewhere" because
+`@MappedSuperclass` carries no `@Entity` annotation.
+
+**Documented, not designed around.** `@Shredded` on an inherited entity field is a permanent
+limitation, not a residual to close later — every one of this module's per-field checks (subject
+expression, `@Immutable`, secondary-table, `onPostLoad`'s field list) is keyed by one entity name,
+and making an inherited field work would mean redesigning all four around a field that can belong to
+more than one entity. Recorded in `docs/index.md` and `SECURITY-NOTES.md`, beside the existing
+`@Embeddable`/`@ElementCollection` limitation (C-29).
+
+**Probe.** `CipherProbeTenthPassTest.probe_a_shredded_field_in_an_inheritance_hierarchy_is_refused_by_its_real_reason`
+— RED on `3c424c1` (asserted the message contains "inherit"; got the converter-pair message
+instead), GREEN after the fix. That test class is not promoted out of `src/test-pending/java` yet:
+two of its other four methods are S-22's and S-24's probes, both Thor's design stop and both still
+red by design, and the module's convention is that the whole file moves together only once every
+method in it is green.
+
+## S-25 (2026-09-10, Isis) — CLOSED. The starter suite's container-count flake.
+
+Cipher's tenth pass named `CipherProbeCompositeIdTest`'s "Unable to determine Dialect" a flake:
+not reproduced in three consecutive full runs, but ruled fix-required because the starter's suite
+starts one `PostgreSQLContainer` per test class (32 at the tenth pass) and dialect resolution needs
+a live bootstrap connection — under load, one container not yet accepting connections before
+Hikari's 30s default `connectionTimeout` reproduces exactly that symptom on whichever context
+bootstraps first.
+
+**Fix, both parts Cipher asked for.** Every probe application's properties (all 33 files that start
+a `PostgreSQLContainer` under `gdpr-shredding-spring-boot-starter/src/test` and `src/test-pending`)
+now pin `spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect`, so
+dialect resolution never opens a bootstrap connection at all and cannot race the container. Every
+`@Container` declaration also now carries an explicit
+`.withStartupTimeout(java.time.Duration.ofMinutes(2))` instead of Testcontainers' default.
+
+**Follow-up deferred, not attempted.** Cipher's suggested follow-up — collapsing the per-test
+containers onto one reused singleton with a fresh schema per test class — "if it fits in under two
+hours." It does not: all 33 files each build their own `SpringApplicationBuilder` (or
+`@SpringBootTest` with `@DynamicPropertySource`) context and each declare their own `@Container`
+field: a shared singleton needs every one of those bootstraps touched to pick a schema or database
+name per test class for isolation, which is a mechanical but cross-cutting change across the whole
+suite, not a two-hour patch on top of this fix. Not a design stop either — no new mechanism, just
+more files than the box allows — so recorded here as deferred rather than either built narrowly or
+escalated.
+
+**Measured.** `./mvnw -B clean verify` (full reactor, three consecutive runs): BUILD SUCCESS every
+time, 289/289 tests, 0 failures; `CipherProbeCompositeIdTest` green (2/2) all three runs, no dialect
+failure observed. Container count unchanged (33 static `@Container` declarations before and after —
+this fix removes the race, not the container count; the singleton collapse above is what would
+reduce it, and is deferred).

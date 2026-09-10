@@ -38,7 +38,8 @@ class CipherProbeTenthPassTest {
       new PostgreSQLContainer<>(
           DockerImageName.parse(
                   "postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777")
-              .asCompatibleSubstituteFor("postgres"));
+              .asCompatibleSubstituteFor("postgres"))
+              .withStartupTimeout(java.time.Duration.ofMinutes(2));
 
   private static String b64(String s) {
     return Base64.getEncoder().encodeToString(s.getBytes(StandardCharsets.UTF_8));
@@ -166,6 +167,7 @@ class CipherProbeTenthPassTest {
                 "spring.datasource.username=" + POSTGRES.getUsername(),
                 "spring.datasource.password=" + POSTGRES.getPassword(),
                 "spring.jpa.hibernate.ddl-auto=update",
+                "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect",
                 "spring.jpa.properties.hibernate.default_schema=app3")
             .run()) {
       var dataSource = ctx.getBean(DataSource.class);
@@ -423,7 +425,8 @@ class CipherProbeTenthPassTest {
             "spring.datasource.url=" + POSTGRES.getJdbcUrl(),
             "spring.datasource.username=" + POSTGRES.getUsername(),
             "spring.datasource.password=" + POSTGRES.getPassword(),
-            "spring.jpa.hibernate.ddl-auto=update")
+            "spring.jpa.hibernate.ddl-auto=update",
+            "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect")
         .run();
   }
 

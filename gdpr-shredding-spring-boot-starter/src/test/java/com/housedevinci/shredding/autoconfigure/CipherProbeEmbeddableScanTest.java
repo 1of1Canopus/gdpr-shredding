@@ -33,9 +33,10 @@ class CipherProbeEmbeddableScanTest {
   @Container
   static final PostgreSQLContainer<?> POSTGRES =
       new PostgreSQLContainer<>(
-          DockerImageName.parse(
-                  "postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777")
-              .asCompatibleSubstituteFor("postgres"));
+              DockerImageName.parse(
+                      "postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777")
+                  .asCompatibleSubstituteFor("postgres"))
+          .withStartupTimeout(java.time.Duration.ofMinutes(2));
 
   private static String b64(String s) {
     return Base64.getEncoder().encodeToString(s.getBytes(StandardCharsets.UTF_8));
@@ -57,6 +58,7 @@ class CipherProbeEmbeddableScanTest {
                 "shredding.erasure-log.hmac-secret=" + b64("embeddable-chain-secret-32bytes!"),
                 "shredding.blind-index.hmac-secret=" + b64("embeddable-index-secret-32bytes!"),
                 "spring.jpa.hibernate.ddl-auto=create-drop",
+                "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect",
                 "spring.datasource.url=" + POSTGRES.getJdbcUrl(),
                 "spring.datasource.username=" + POSTGRES.getUsername(),
                 "spring.datasource.password=" + POSTGRES.getPassword());
@@ -118,6 +120,7 @@ class CipherProbeEmbeddableScanTest {
                 "shredding.erasure-log.hmac-secret=" + b64("embeddable-chain-secret-32bytes!"),
                 "shredding.blind-index.hmac-secret=" + b64("embeddable-index-secret-32bytes!"),
                 "spring.jpa.hibernate.ddl-auto=create-drop",
+                "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect",
                 "spring.datasource.url=" + POSTGRES.getJdbcUrl(),
                 "spring.datasource.username=" + POSTGRES.getUsername(),
                 "spring.datasource.password=" + POSTGRES.getPassword());

@@ -50,9 +50,10 @@ class CipherProbeWriteVerificationCapTest {
   @Container @ServiceConnection
   static final PostgreSQLContainer<?> POSTGRES =
       new PostgreSQLContainer<>(
-          DockerImageName.parse(
-                  "postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777")
-              .asCompatibleSubstituteFor("postgres"));
+              DockerImageName.parse(
+                      "postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777")
+                  .asCompatibleSubstituteFor("postgres"))
+          .withStartupTimeout(java.time.Duration.ofMinutes(2));
 
   @DynamicPropertySource
   static void secrets(DynamicPropertyRegistry registry) {
@@ -62,6 +63,8 @@ class CipherProbeWriteVerificationCapTest {
     registry.add(
         "shredding.blind-index.hmac-secret", () -> b64("write-verif-cap-index-secret-32b"));
     registry.add("spring.jpa.hibernate.ddl-auto", () -> "create-drop");
+    registry.add(
+        "spring.jpa.properties.hibernate.dialect", () -> "org.hibernate.dialect.PostgreSQLDialect");
     // A small cap so the probe does not need to actually insert fifty thousand rows to reach it.
     registry.add("shredding.write-verification.max-outstanding", () -> "3");
   }

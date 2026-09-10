@@ -49,6 +49,15 @@ inside an `@Embeddable`, not inside an `@ElementCollection` - both are refused a
 and not mapped `@Basic(fetch = LAZY)` (undocumented lazily by Hibernate's own bytecode-enhancement
 requirement, which this module does not configure and has not tested against).
 
+**A `@Shredded` field cannot be declared on the root or a subclass of an `@Inheritance` hierarchy**
+(`JOINED`, `SINGLE_TABLE` or `TABLE_PER_CLASS`) that maps more than one entity - refused at startup,
+naming the ancestor and the inheriting entity (S-23). This module keys a shredded field's subject
+expression, its `@Immutable` check and its `@SecondaryTable` refusal by one entity name, and an
+inherited field's column is shared by more than one, which no single converter can describe. Share
+the field through a plain `@MappedSuperclass` instead (not itself an `@Entity`) - that is unaffected
+and is the supported way to put the same `@Shredded` field on more than one concrete entity - or
+declare the field, its `@Convert` and its own converter directly on each concrete entity.
+
 > **`ShreddedBytesConverter` (the `byte[]` base class) needs `@Immutable` on the field.** Hibernate
 > treats `byte[]` as mutable and deep-copies the *converted* value - calling the converter a second
 > time, outside the write-path bracket - to build the entity's dirty-checking snapshot; under

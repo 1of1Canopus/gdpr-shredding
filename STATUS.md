@@ -8,6 +8,48 @@ are fine here for now — but before this repo is made public, move them to
 tests, README, CHANGELOG, LICENSE/NOTICE, SECURITY.md, CONTRIBUTING.md, user docs, CI, the
 probe script). See how `agent-guard` did it (2026-09-10).
 
+**S-23 (LOW) and S-25 (LOW, the flake) — CLOSED, built (Isis, 2026-09-10).** Tenth-pass fix-list
+items assigned to Isis; S-22 (HIGH) and S-24 (LOW) are Thor's design stop and untouched here.
+
+*S-23.* `ShreddedModel.scan` now refuses at startup, before the converter check, when a `@Shredded`
+field's declaring class is not the entity being scanned and that declaring class is itself
+`@Entity`-annotated (`refuseIfInheritedFromAnotherEntity`) - naming the ancestor and the inheriting
+entity, and pointing at `@MappedSuperclass` as the supported way to share a field. Before this fix,
+the same shape was refused too, but by `requireMatchingConverter` blaming the converter's
+entity/field pair, which no correction could satisfy (the field is scanned once per inheriting
+entity, under a different `entityName` each time, against the one converter it can declare). The
+limitation is documented in `docs/index.md` and `SECURITY-NOTES.md`, beside the existing
+`@Embeddable`/`@ElementCollection` one (C-29). Probe (RED confirmed on `3c424c1` before the fix, then
+GREEN): `CipherProbeTenthPassTest.probe_a_shredded_field_in_an_inheritance_hierarchy_is_refused_by_its_real_reason`.
+That probe file also carries S-22's and S-24's probes (Thor's, red by design) and one already-green
+S-21 verification (`probe_a_default_schema_deployment_addresses_its_own_table_and_not_the_decoy`) and
+one already-green S-22-adjacent verification
+(`probe_a_case_folded_subject_column_does_not_address_a_different_column`); the file stays in
+`src/test-pending/java` — under the `probes-pending` profile all five methods now run 3 green / 2 red
+(S-22, S-24), exactly as expected — and is not moved into `src/test/java` until S-22/S-24 close too,
+per the module's own convention (the whole file must be green before it is promoted).
+
+*S-25.* Every probe application's properties now pin
+`spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect` and every
+`@Container static final PostgreSQLContainer` declares an explicit
+`.withStartupTimeout(java.time.Duration.ofMinutes(2))`, across all 33 files in
+`gdpr-shredding-spring-boot-starter/src/test` (32) and `src/test-pending` (1) that start a
+container. Dialect resolution can no longer need a bootstrap connection at all, so it cannot race a
+slow-starting container. The follow-up Cipher offered ("if it fits in under two hours" - collapsing
+the per-test containers onto one reused singleton) does not fit: every file builds its own
+`SpringApplicationBuilder` or `@DynamicPropertySource` context, so a shared container would need a
+schema-per-class isolation scheme touched into every one of them, not a two-hour patch. Recorded as
+deferred in `QUESTIONS.md`, not a design stop (no new mechanism the module needs, just a bigger
+refactor than the box allows).
+
+`./mvnw -B clean verify` (full reactor): BUILD SUCCESS, **289 tests** (core 99, starter 173, sample
+17), 0 failures, 0 errors, 0 skipped. Line coverage core 85.3% (1124/1318), starter 87.9%
+(1491/1697); gate 80% held. `CipherProbeCompositeIdTest` (the flake Cipher named) green, 2/2, no
+dialect failure observed. Container count unchanged at 33 static declarations (S-25's fix does not
+reduce container count, only removes the race - the singleton collapse is deferred, see above). Ran
+`-Pprobes-pending -pl gdpr-shredding-spring-boot-starter test`: 178 tests, 2 failures (S-22, S-24,
+expected, Thor's). Cipher re-verifies; not self-marked closed.
+
 **S-20 (HIGH) and S-21 (MEDIUM) — CLOSED, built (Thor, 2026-09-10).** Both were corrections to a
 mechanism that already existed, so both are recorded in `docs/plans/read-path-design.md` as
 **addendum 3 changes 8 and 9** before the code, not in a fix list.

@@ -437,6 +437,64 @@ address".
 
 Probe: `CipherProbeSubjectMovedNotFoundTest.probe_the_subject_immutability_check_refuses_when_the_read_back_finds_no_row`.
 
+### `@Shredded` is not supported inside an entity inheritance hierarchy (S-23)
+
+`ShreddedModel.allFields` walks an entity class and every superclass to find its declared fields, so
+that it also picks up a `@MappedSuperclass`'s fields for the one concrete entity that maps them - the
+supported way to share a `@Shredded` field across entities. Before this fix, the same walk also
+picked up a field declared on an *entity* ancestor (the root of an `@Inheritance` hierarchy, `JOINED`,
+`SINGLE_TABLE` or `TABLE_PER_CLASS`): the field is then scanned once per concrete entity that inherits
+it, each time against the one converter the field declares, under a different `entityName` each scan.
+No converter pair can satisfy every scan - `(Root, field)` is refused when the subclass is being
+scanned, `(Subclass, field)` is refused when the root is - so the shape is refused every time, but the
+refusal named the converter's declared entity/field pair as if a developer could correct it. They
+cannot: entity inheritance with a `@Shredded` field anywhere in the hierarchy is not a supported
+mapping, under any `@Inheritance` strategy, because this module keys a shredded field's subject/tenant
+expression, its `@Immutable` check, its secondary-table check and `onPostLoad`'s field list by one
+entity name, and an inherited field's column is shared by more than one.
+
+Fixed: `ShreddedModel.scan` now refuses at startup, before the converter check runs, when a
+`@Shredded` field's declaring class is not the entity being scanned and that declaring class is
+itself `@Entity`-annotated - naming the ancestor, the inheriting entity, and pointing at
+`@MappedSuperclass` as the supported way to share the field. A field inherited from a plain
+`@MappedSuperclass` (not itself an entity) is unaffected: it is never scanned as `type` under more
+than one `entityName`, so it never had this problem.
+
+**Limitation, not fixed:** `@Shredded` cannot be used on a field of an entity that is the root or a
+subclass of an `@Inheritance` hierarchy mapping more than one entity, under `JOINED`, `SINGLE_TABLE`
+or `TABLE_PER_CLASS`. Declare the field, its `@Convert` and its own converter directly on each
+concrete entity instead, or share it through a `@MappedSuperclass` (not an `@Entity` superclass).
+Documented in `docs/index.md`.
+
+Probe: `CipherProbeTenthPassTest.probe_a_shredded_field_in_an_inheritance_hierarchy_is_refused_by_its_real_reason`.
+
+### The starter's Testcontainers suite: bootstrap dialect resolution under container-count load (S-25)
+
+The starter's test suite starts one `PostgreSQLContainer` per test class (32 at the tenth pass, one
+more added since) rather than sharing a container, so a full run brings up and tears down that many
+containers. Cipher's tenth pass could not reproduce it (three consecutive full runs, 289/289 green)
+but ruled it "fix required, not accepted": "Unable to determine Dialect" is Hibernate failing to get a
+bootstrap connection for dialect resolution, and under CI load one container not yet accepting
+connections before Hikari's default 30s `connectionTimeout` would produce exactly that symptom on
+whichever probe's context happens to start first.
+
+Fixed, two parts, no design change: every probe application's properties now pin
+`spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect` (or the
+`DynamicPropertySource`/`registry.add` equivalent), so dialect resolution never needs a bootstrap
+connection at all - it cannot race the container regardless of how slow the container is to accept
+connections. Every `@Container static final PostgreSQLContainer` also now declares
+`.withStartupTimeout(java.time.Duration.ofMinutes(2))` explicitly, rather than relying on
+Testcontainers' own default, so a slow pull or a loaded CI host gets more room before the container is
+declared unhealthy.
+
+**Deferred, not a design stop:** collapsing the 32+ per-test containers onto one reused singleton
+container (the Testcontainers singleton pattern, with a fresh schema per test class for isolation) was
+the follow-up Cipher suggested "if it fits in under two hours." It does not: every one of the 32+
+files declares its own `@Container` field and builds its own `SpringApplicationBuilder` context: a
+shared container would still need each test's Spring context isolated by schema or database name,
+which is a cross-cutting change to every one of those files' bootstrap, not a two-hour patch. Recorded
+in `QUESTIONS.md` as deferred rather than attempted narrowly.
+
 ### A `@Shredded` field must not be mapped `@Basic(fetch = LAZY)` (documented, not reproduced)
 
 Lazy fetching of a basic attribute is inert in Hibernate without bytecode enhancement, and none of

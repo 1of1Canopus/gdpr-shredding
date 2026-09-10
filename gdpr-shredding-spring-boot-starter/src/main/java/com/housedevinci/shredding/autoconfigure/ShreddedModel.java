@@ -215,6 +215,7 @@ public final class ShreddedModel {
         if (Modifier.isStatic(field.getModifiers())) {
           throw config("@Shredded on " + where + " must be an instance field");
         }
+        refuseIfInheritedFromAnotherEntity(field, type, entityName, where);
         ShreddedConverter<?> converter = requireMatchingConverter(field, entityName, where);
         // CIPHER-16: a byte[] attribute is mutable by Hibernate's own reckoning, so without
         // @Immutable, AttributeConverterMutabilityPlan deep-copies the converted value - calling
@@ -964,6 +965,41 @@ public final class ShreddedModel {
               + " entity's own top-level declared fields. Move the field - @Shredded, @Convert and"
               + " all - onto the entity itself.");
     }
+  }
+
+  /**
+   * S-23 (Cipher tenth pass). {@link #allFields} walks the whole superclass chain, so a
+   * {@code @Shredded} field declared on an entity's ancestor is scanned once per entity that
+   * inherits it - {@code entityName} is a different string each time, so no pair the field's one
+   * converter can declare satisfies every scan, and the refusal that used to fire named the
+   * converter's entity/field pair as if the developer could correct it. They cannot: the shape
+   * itself - {@code @Shredded} on a field declared in an entity that is part of an
+   * {@code @Inheritance} hierarchy mapping more than one entity - is not supported at all, under
+   * any inheritance strategy, because this module has exactly one entity name per shredded field
+   * and an inherited field has one column shared by more than one. A field inherited from a plain
+   * {@code @MappedSuperclass} is unaffected: a mapped superclass is not itself an entity, so it is
+   * never the {@code type} being scanned and this check does not see it as "declared elsewhere".
+   */
+  private static void refuseIfInheritedFromAnotherEntity(
+      Field field, Class<?> type, String entityName, String where) {
+    Class<?> declaringClass = field.getDeclaringClass();
+    if (declaringClass == type || !declaringClass.isAnnotationPresent(Entity.class)) {
+      return;
+    }
+    throw config(
+        "@Shredded on "
+            + where
+            + " is declared on "
+            + declaringClass.getSimpleName()
+            + ", which is itself an @Entity that "
+            + entityName
+            + " inherits from (an @Inheritance hierarchy mapping more than one entity). This is"
+            + " not supported: this module keys a shredded field by one entity name, and an"
+            + " inherited field is scanned once per entity that maps it, against the same one"
+            + " converter, under a different entity name each time - no converter pair can satisfy"
+            + " every scan. Move the @Shredded field onto a @MappedSuperclass instead of an"
+            + " @Entity superclass, or declare it directly on each concrete entity with its own"
+            + " converter.");
   }
 
   /**

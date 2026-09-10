@@ -46,9 +46,10 @@ class CipherProbeMatrix2Test {
   @Container @ServiceConnection
   static final PostgreSQLContainer<?> POSTGRES =
       new PostgreSQLContainer<>(
-          DockerImageName.parse(
-                  "postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777")
-              .asCompatibleSubstituteFor("postgres"));
+              DockerImageName.parse(
+                      "postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777")
+                  .asCompatibleSubstituteFor("postgres"))
+          .withStartupTimeout(java.time.Duration.ofMinutes(2));
 
   @DynamicPropertySource
   static void secrets(DynamicPropertyRegistry r) {
@@ -56,6 +57,8 @@ class CipherProbeMatrix2Test {
     r.add("shredding.erasure-log.hmac-secret", () -> b64("starter-integration-chain-secret"));
     r.add("shredding.blind-index.hmac-secret", () -> b64("starter-integration-index-secret"));
     r.add("spring.jpa.hibernate.ddl-auto", () -> "create-drop");
+    r.add(
+        "spring.jpa.properties.hibernate.dialect", () -> "org.hibernate.dialect.PostgreSQLDialect");
   }
 
   private static String b64(String s) {
