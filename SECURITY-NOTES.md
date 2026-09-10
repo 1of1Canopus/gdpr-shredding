@@ -178,6 +178,36 @@ update rather than only when a fresh scope was pushed, and a post-hoc header che
 insert and every update, re-reading what was actually written and comparing every header against the
 `(tenant, subject, rowId)` the row was written under. A row written under a residual scope — the
 shape C-41 demonstrated — is refused inside the same flush and before the commit, rather than left
+
+### The write path settles a debt; it does not perform a check (S-1)
+
+The per-row post-hoc check above is fail-open by nature: it reads the row back inside the flush that
+wrote it, and with `hibernate.jdbc.batch_size` set the `INSERT` is still in the JDBC batch, so there
+is nothing to read. It returned without checking anything, for every row of every batch, on an
+ordinary performance property. Cipher's probe committed three rows of plaintext personal data.
+
+So the control is no longer that check. **A bind incurs a verification debt** on the session -
+`(entity, table, id column, id, expected tenant/subject/rowId)` - and the debt is settled at every
+point where the batch has demonstrably executed and the transaction has not yet committed: the end
+of every flush and auto-flush, and `beforeCompletion`, which runs after Hibernate's own commit-time
+flush and covers `StatelessSession`, which fires no flush event at all. **Settlement is total or the
+transaction aborts:** a debt whose row cannot be read back, a stored header that disagrees, and any
+debt still outstanding at completion are all `SHRED-UNVERIFIED-WRITE` before the commit. A write with
+no transaction has no settlement anchor and is refused at bind time.
+
+A configuration knob can no longer remove this control - it can only make it refuse. The property
+is *no row commits whose stored header is not bound to that row's own id, subject and tenant, at any
+batch size*, and it is measured on seventeen write paths in `BatchedWriteVerificationTest` rather
+than argued.
+
+**Cost.** One `SELECT` with an `IN` list per entity per flush, plus the per-row belt. The ledger
+holds one small record per written row until the flush that wrote it ends, so a `StatelessSession`
+import that never flushes carries one record per row until the transaction commits; that is
+`QUESTIONS.md` #26.
+
+A row deleted in the same transaction discharges its own debt: inside one flush Hibernate executes
+insertions before deletions, so an insert-then-delete of one row would otherwise be settled against
+a row that legitimately no longer exists.
 sitting in another subject's erasure scope. A write scope is also tagged with its session and a
 per-push token, `ShreddingContext.require` compares the entity name (ignoring it *was* C-41), and a
 scope still live when the next bind starts is by construction residue and is dropped rather than
@@ -358,6 +388,7 @@ support ticket or a PDF the application itself produced. Those are the applicati
 | Half-migrated plaintext column | core refuses it; the batch migrator is Pro (control 17) |
 | Crypto supply chain | JDK only, no BouncyCastle, no provider install (control 18) |
 | Erasure reported complete while work is outstanding | a failed hook makes it `PARTIAL` (control 19) |
+| A batch size switching the write-side verification off | a bind incurs a debt the transaction cannot commit without settling; an unsettled debt is `SHRED-UNVERIFIED-WRITE` (control 20, S-1) |
 | A racing write minting a fresh key for an erased subject | the `shredding_erased_subject` tombstone, holding no key material, protected by the same append-only triggers as the erasure log (QUESTIONS #3, CIPHER-04) |
 | A write racing the *first* key mint for a subject surviving the tombstone | `pg_advisory_xact_lock(tenant, subject)` taken first, in the same transaction, by every path that mints or erases (CIPHER-03) |
 | A decrypted value reaching a generated `toString` | a record entity fails startup; Lombok's generators are `SOURCE`-retained and cannot be detected at runtime, so the sample ships an ArchUnit rule for that case instead (CIPHER-06) |

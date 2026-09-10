@@ -6,6 +6,49 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed (sixth pass at `05ca185`, S-1: the write-side verification under a JDBC batch size)
+
+**A standard Hibernate performance property switched the insert-side header check off, and personal
+data then committed in the clear.** With `hibernate.jdbc.batch_size` set and an id strategy that
+batches, the `INSERT` is still in the JDBC batch when `onPostInsert` fires:
+`readStoredShreddedColumns` found no row, returned `null`, and `refuseIfStoredHeadersDisagree`
+returned without checking anything - for every row of every batch, with no warning. Cipher's probe
+committed three rows of plaintext personal data. The update side was weak the same way: the `UPDATE`
+was also still in the batch, so the check read the pre-update row and passed vacuously.
+
+The design addendum in `docs/plans/read-path-design.md` states the property and weighs four options.
+**Option (a), with the fail-open closed**, is what shipped, and the second half is the point:
+
+- **A bind incurs a verification debt, it no longer performs a check.** Each written row records
+  `(entity, table, id column, id, expected tenant/subject/rowId)` on the session's ledger.
+- **Debts are settled where the batch has demonstrably executed and the transaction has not yet
+  committed:** the end of every flush and auto-flush (appended `FLUSH`/`AUTO_FLUSH` listeners, after
+  `ActionQueue.executeActions` has run `executeBatch()`), and `beforeCompletion`, which runs after
+  Hibernate's own commit-time flush and covers `StatelessSession`, which fires no flush event at all.
+  One `SELECT` with an `IN` list per entity per flush, not one statement per row.
+- **Settlement is total or the transaction aborts.** A debt whose row cannot be read back, a stored
+  header that disagrees, and any debt still outstanding at completion are all the new
+  **`SHRED-UNVERIFIED-WRITE`**, thrown before the commit. A write with no transaction has no
+  settlement anchor and is refused at bind time. A configuration knob can no longer remove this
+  control; it can only make it refuse.
+- The per-row post-hoc check stays, as the belt and as early failure.
+- A row deleted in the same transaction discharges its own debt (`POST_DELETE`): inside one flush
+  Hibernate executes insertions before deletions.
+
+Seventeen probes in `BatchedWriteVerificationTest`, one per path Hibernate offers to write a row,
+run RED before the hook: batched `saveAll`, `persist` in a loop, batched `UPDATE`, `merge` of a new
+entity, cascade insert, a `@BatchSize` collection, `SEQUENCE`/`IDENTITY`/`UUID`/assigned ids, two
+entities in one flush, an explicit flush, `StatelessSession.insertMultiple`, a write with no
+transaction, insert-then-delete in one transaction, flush-then-rollback, a row that cannot be read
+back, an in-transaction row swap, and a bulk JPQL update. Coverage is measured by recording the SQL
+on the application's own `DataSource`, not asserted from the mechanism. Framework matrix rows 24-27.
+
+**Also fixed, found by those probes:** every `StatelessSession` **write** of a `@Shredded` entity
+threw `ClassCastException` out of the write path, because the listener cast the session to
+`EventSource` and `StatelessSessionImpl` is not one. The read path had `StatelessSession` tests;
+nothing wrote through one.
+
+
 ### Changed (read-path redesign, sixth pass at `faaafff`)
 
 Cipher's design review of `docs/plans/read-path-design.md` (`## Cipher design review (2026-09-09)`)

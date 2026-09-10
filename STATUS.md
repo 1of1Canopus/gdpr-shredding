@@ -282,11 +282,28 @@ backups.
 The wording rule follows: never "erases", "deletes", "anonymises" or "GDPR-compliant erasure" as an
 unqualified claim. The public API keeps `ErasureService` and `ErasureRecord` (QUESTIONS #11).
 
+Seventh pass - S-1, the write-side design stop (2026-09-10, Thor): Cipher's `## Sixth pass
+(75af7ea)` returned NOT MERGEABLE on one HIGH: with `hibernate.jdbc.batch_size` set, design item
+14's insert-side post-hoc header check read the row back before the JDBC batch had executed, found
+nothing, and returned - and Cipher's probe committed three rows of plaintext personal data.
+`docs/plans/read-path-design.md` carries the design addendum (the property, four options with their
+cost, the recommendation, the paths, the probes); **option (a) with the fail-open closed** is built.
+A bind now incurs a verification debt the transaction cannot commit without settling; a debt that
+cannot be settled is `SHRED-UNVERIFIED-WRITE` before the commit, so a configuration knob can no
+longer remove the control, only make it refuse. Seventeen probes in `BatchedWriteVerificationTest`,
+framework matrix rows 24-27. The `StatelessSession` `EventSource` ClassCastException on every
+shredded write is fixed in the same branch. **S-2 to S-6 are Isis's, in the main checkout, and were
+not touched here.** Open: QUESTIONS #25 (S-1's own probe collides with S-5's startup refusal and is
+therefore left in `src/test-pending`, green), #26 (ledger cost on a stateless import), #27 (three
+deliberately unreachable lines).
+
 ## Deliberately not done
 
 - No cross-node cache invalidation (QUESTIONS #8, ruled); the 60-second window is documented
   instead, and Pro gets invalidation with the KMS adapters.
 - No batch migrator for existing plaintext columns; Pro only, per control 17.
+- Not settled per-row inside the flush that wrote the row: at any batch size the row is not there
+  yet, which is S-1 itself. The per-row check stays only as the belt.
 - No `PostErasureHook` retry scheduler. A failed hook makes the erasure `PARTIAL` and the outcome is
   in the log; who retries it is the application's decision.
 - The spec body's "100k encryptions, no nonce collision" property test is **not** written. Cipher

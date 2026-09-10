@@ -168,6 +168,10 @@ refusal, because those paths have no open region.
 | 21 | forged placeholder stored in the column | refused `SHRED-FORMAT-001` (it is not `SH1` bytes) | `a_forged_placeholder_in_the_column_is_refused` |
 | 22 | `IDENTITY` insert: CDC / trigger / replica sees the intermediate | intermediate is bound to a random rowId and verifies against no row (item 5) | `an_identity_insert_intermediate_is_bound_to_no_row` |
 | 23 | `IDENTITY` insert inside a batched `saveAll`; rollback | rebind runs per row; failure aborts the transaction (item 6) | `a_batched_save_all_rebinds_every_row`, `a_rebind_failure_aborts_the_transaction` |
+| 24 | batched insert (`saveAll`, `persist` loop, cascade, `merge` of a new entity, `SEQUENCE`/`UUID`/assigned id) and batched `UPDATE` | one settlement `SELECT` per entity per flush; every row's stored header compared before commit (S-1) | `a_batched_save_all_is_settled_before_the_commit` and 8 siblings in `BatchedWriteVerificationTest` |
+| 25 | `StatelessSession.insert`/`insertMultiple` | no flush event, so settled at `beforeCompletion`; a write with no transaction is refused `SHRED-UNVERIFIED-WRITE` at bind time | `a_stateless_session_insert_multiple_is_settled_before_the_commit`, `a_stateless_write_with_no_transaction_is_refused` |
+| 26 | a written row that cannot be read back; a stored header naming another row | `SHRED-UNVERIFIED-WRITE` / `SHRED-SUBJECT-IMMUTABLE`, thrown before the commit | `a_written_row_that_cannot_be_read_back_refuses_the_commit`, `a_row_whose_stored_header_names_another_row_refuses_the_commit` |
+| 27 | insert then delete in one transaction; flush then rollback; `@BatchSize` collection | not refused: a deleted row discharges its own debt, a rollback commits nothing | `an_insert_and_a_delete_of_one_row_in_one_transaction_is_not_refused`, `a_flush_then_a_rollback_commits_nothing_and_refuses_nothing`, `a_cascade_insert_of_shredded_children_is_settled_before_the_commit` |
 
 Each row is a RED test committed before the mechanism it names.
 

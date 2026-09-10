@@ -632,3 +632,51 @@ directly.
 **Recommendation.** Keep the strict assertion. If Cipher would rather have a stable build than a
 strict one, the alternative is to assert unconsumability and print the leak count as evidence — say
 which and I will change it in one commit.
+
+## #25 S-1's own probe becomes unstartable once S-5's startup refusal lands (flagged, for Isis and Cipher)
+
+`CipherProbeBatchedInsertCheckTest` demonstrates S-1 with an `@Access(AccessType.PROPERTY)` shredded
+mapping - S-5's hole, and the only mapping in which Hibernate writes a `@Shredded` column with no
+converter at all. It is **green now** under `./mvnw -Pprobes-pending test` (`BATCHED INSERT ->
+REFUSED TransactionSystemException; stored null`, against `COMMITTED; stored
+BATCHED-SECRET-1|BATCHED-SECRET-2|BATCHED-SECRET-3` on `05ca185`).
+
+**The collision.** S-5's fix refuses a property-access `@Shredded` mapping *at startup*. Once that
+lands, this probe's `@SpringBootTest` context cannot start, and the test fails for a reason that has
+nothing to do with S-1. So I did **not** promote it into `src/test/java`: promoting it would put a
+test in the default build that Isis's own fix breaks.
+
+**Recommendation.** On merge, rewrite it exactly as C-38 was rewritten - from "the write is refused"
+to "startup refuses the mapping" - and keep it in whichever branch lands S-5. S-1's property is
+carried in the default build by `BatchedWriteVerificationTest`'s seventeen probes, two of which
+refuse a bad stored header under batching without needing any mapping hole: a row that cannot be
+read back (`SHRED-UNVERIFIED-WRITE`) and an in-transaction row swap (`SHRED-SUBJECT-IMMUTABLE`),
+both reached through `StatelessSession` and its own connection.
+
+## #26 The verification ledger holds one record per written row until the flush ends (taken; a documented cost)
+
+Settlement discharges debts at the end of every flush, so an ordinary `@Transactional` method holds
+at most one flush worth of debt - bounded by the same thing the persistence context is bounded by.
+`StatelessSession` fires no flush event, so a stateless import of N rows in one transaction holds N
+records (an entity name, a table name, an id, a tenant, a subject and a rowId each) until
+`beforeCompletion`. A ten-million-row stateless import in a single transaction would notice.
+
+**Why I did not add a threshold.** An interim settlement pass triggered by ledger size would have to
+run mid-`insertMultiple`, where the batch has not executed - which is S-1 again, in a place chosen by
+a heuristic rather than by the framework. The two settlement points this design has are the two
+points where the batch is provably out.
+
+**Recommendation.** Leave it, and document it (done, `SECURITY-NOTES.md`, "The write path settles a
+debt"). If a customer hits it, the answer is `StatelessSession` with a transaction per chunk, which
+is what a ten-million-row import should be doing anyway. If Cipher wants a hard cap that refuses
+rather than degrades, say the number and it is a two-line change.
+
+## #27 The "still outstanding at completion" refusal is unreachable today (taken; a deliberate belt)
+
+`WriteVerification.ledgerFor`'s before-completion callback settles and then refuses if anything is
+still owed. `settle` either empties the ledger or throws, so the second branch cannot fire on this
+code - it is three uncovered lines in the JaCoCo report and I know it.
+
+It stays because it is the assertion that makes the *next* change to `settle` fail loudly instead of
+quietly: the whole of S-1 was one early `return` that meant "unchecked" and read as "fine". I would
+rather carry three unreachable lines than reintroduce that shape.
