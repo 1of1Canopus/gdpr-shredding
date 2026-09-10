@@ -167,7 +167,19 @@ final class WriteVerification {
    * own "still outstanding at completion" refusal permanently unreachable: {@code settle} always
    * left the ledger empty, whether it threw or not. Now a chunk's debts are removed one at a time,
    * each immediately after its own row is found to agree, so a chunk that throws partway through
-   * leaves every debt it had not yet reached - correctly - still outstanding.
+   * leaves every debt it had not yet reached - correctly - still outstanding <em>in this method's
+   * own data</em>.
+   *
+   * <p><strong>S-18 (Cipher eighth pass) corrects #27's own claim.</strong> That residual debt is
+   * not what makes {@code beforeCompletion}'s "still outstanding at completion" branch reachable,
+   * and #27 was wrong to say it does: {@code settle} still only ever returns normally after it has
+   * emptied every debt it started with, or throws before returning at all - a throw from inside
+   * this method propagates straight out of the {@code beforeCompletion} callback, past the branch
+   * that checks the ledger afterwards, every time. That branch is unreachable by construction
+   * today, on both the belt-throws-before-owe path ({@code SwallowedWriteRefusalTest}) and this
+   * one. It stays: kept as a belt for whatever settlement path replaces this one, and deliberately
+   * not excluded from JaCoCo, so the day it becomes reachable the coverage report says so instead
+   * of a green checkmark nobody looks at.
    */
   static void settle(SharedSessionContractImplementor session) {
     WriteVerification ledger = LEDGERS.get(session);
