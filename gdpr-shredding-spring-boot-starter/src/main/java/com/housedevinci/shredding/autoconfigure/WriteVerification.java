@@ -4,6 +4,7 @@ import com.housedevinci.shredding.domain.EncryptedValue;
 import com.housedevinci.shredding.domain.ErrorCodes;
 import com.housedevinci.shredding.domain.RowId;
 import com.housedevinci.shredding.domain.ShreddingException;
+import com.housedevinci.shredding.domain.TableRef;
 import com.housedevinci.shredding.jpa.ShreddingContext;
 import java.math.BigDecimal;
 import java.sql.PreparedStatement;
@@ -94,7 +95,7 @@ final class WriteVerification {
 
   private record Debt(
       String entityName,
-      String tableName,
+      TableRef tableName,
       String idColumn,
       Object id,
       List<ShreddedModel.ShreddedField> fields,
@@ -115,7 +116,7 @@ final class WriteVerification {
   static void owe(
       SharedSessionContractImplementor session,
       String entityName,
-      String tableName,
+      TableRef tableName,
       String idColumn,
       Object id,
       List<ShreddedModel.ShreddedField> fields,
@@ -219,7 +220,7 @@ final class WriteVerification {
       sql.append(", ").append(quote(field.columnName()));
     }
     sql.append(" FROM ")
-        .append(quote(first.tableName()))
+        .append(first.tableName().sql())
         .append(" WHERE ")
         .append(quote(first.idColumn()))
         .append(" IN (");

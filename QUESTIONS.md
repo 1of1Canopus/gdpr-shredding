@@ -1148,3 +1148,62 @@ all - the same shape as a wrongly-addressed `SELECT` - and asserts refusal.
 Out of scope, left to Thor (S-20, S-21): `BlindIndex`, `subjectColumn` and `tableName`/schema
 handling were not touched. `SECURITY-NOTES.md` carries one sentence noting this module's own tables
 are unqualified deliberately, per Cipher's instruction.
+
+## S-20 (2026-09-10, Thor) — CLOSED. The subject axis of a blind index is bound to the row, as the tenant axis already was.
+
+Ninth pass, `docs/SECURITY-REVIEW-feat-shredding-core.md`, "Ninth pass (4a95ba5)": `subjectColumn`
+was validated as a SQL identifier and interpolated into the erasure's `WHERE` and both of
+`verifyCleared`'s queries, and never resolved, never read at write time and never compared with
+`Scope.subject()` — S-13 one column over, and fail-open in the same way.
+
+**Fix (Thor), design addendum 3 change 8** (`docs/plans/read-path-design.md`, §3.8a–d): changes 1–4
+applied to the subject axis by one resolver shared with the tenant axis (`resolveAxisProperty`), a
+second `Optional<String>` on the same `BlindIndexColumn`, `rowSubject` at the write, and a refusal
+when the row's subject column is not the subject the data key is derived under.
+
+**Decision made, which Cipher left open.** `subjectColumn` naming the entity's identifier is
+**refused**, not supported. The identifier is not in the state array the write path reads; under
+`GenerationType.IDENTITY` it does not exist at all when `onPreInsert` derives the index; and a
+`SubjectId` is a string while an identifier is as often a `Long`, a `UUID` or a `byte[]`, so the
+equality would need a rendering this module would have to invent — the same class of guess as a
+guessed row binding. An application that wants its id to be the subject maps that value as an
+ordinary basic `String` property and names its column. `IdentifierSubjectNote` is the probe, and the
+message says all of this.
+
+**Deviation, recorded.** Cipher's two probe methods are green **as a refusal**, not as a clearing —
+the same deviation, for the same reason, as change 4's on `Note` (which Cipher accepted on the ninth
+pass). `SplitNote`'s shape is erasable under no keying this module can choose, so the write never
+reaches the table and there is no surviving HMAC left to assert about; `AlignedNote`, in the same
+file, is that application shape declared correctly and asserts the clearing property in full.
+
+**Probes.** `CipherProbeBlindIndexSubjectColumnTest` (6) and
+`CipherProbeBlindIndexSubjectColumnStartupTest` (6), both promoted into `src/test/java`.
+
+## S-21 (2026-09-10, Thor) — CLOSED. Every statement for a user table is addressed at the persister's qualified table.
+
+Ninth pass: `ShreddedModel.tableName(Class)` ignored `@Table(schema)`, so every statement this
+module builds for a user table was unqualified and `search_path` decided which table it hit;
+`@Table(schema = ...)` and `hibernate.default_schema` were both refused at startup by accident, with
+a message naming a `@SecondaryTable` that did not exist.
+
+**Fix (Thor), design addendum 3 change 9** (§3.9a–d). Cipher offered two directions and named
+neither as preferred; **the qualified address is the one taken**, because refusing every
+schema-qualified deployment would refuse `hibernate.default_schema`, which is how a large share of
+enterprise deployments name their schema. New `TableRef` in the core domain, parsed from Hibernate's
+own table expression and rendered quoted per part; `ShreddedField.table()` and
+`BlindIndexColumn.table()` come from the persister at startup for every `@Shredded` entity, indexed
+or not; `tableName(Class)` survives only as the provisional value for a model scanned without an
+`EntityManagerFactory`, which builds no SQL.
+
+**Found while fixing it, and fixed with it.** The `@SecondaryTable` refusal compared
+`tableName(type)` with itself — one value per entity, so `distinct().count()` was always 1 and the
+check could never fire. It now compares each shredded field's own containing table against the
+entity's primary table, and it fires for a single `@Shredded` field too.
+
+**Residual, stated in `SECURITY-NOTES.md`.** With no schema in the mapping, Hibernate's own table
+expression is unqualified and so is this module's: `search_path` decides, exactly as it does for
+Hibernate's own statements. This module's own `shredding_*` tables are unqualified deliberately.
+
+**Probes.** `CipherProbeNinthPassBlindIndexTest` (5, promoted), including the K1 probe Cipher did not
+build — a decoy `public.schema_note` ahead of `app2` on `search_path`, which the erasure must leave
+untouched — plus `TableRefTest` (7) in the core.

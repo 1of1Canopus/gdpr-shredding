@@ -408,7 +408,11 @@ class CipherProbeJdbcTest {
     var store =
         store(
             List.of(
-                BlindIndexColumn.unresolved("customer", "email_bidx", "customer_id", "tenant_id")));
+                BlindIndexColumn.unresolved(
+                    com.housedevinci.shredding.domain.TableRef.of("customer"),
+                    "email_bidx",
+                    "customer_id",
+                    "tenant_id")));
     var result = service(store).erase(new ErasureRequest(TENANT, subject, "dpo", "art 17"));
 
     assertThat(result.blindIndexColumnsCleared()).isEqualTo(1);

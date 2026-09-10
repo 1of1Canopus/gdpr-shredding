@@ -84,11 +84,48 @@ tenant, so:
   populated for the erased subject refuses the erasure (`SHRED-ERASURE-004`) instead of recording
   it, and an index under a different tenant value for the same subject id is a WARN with the count.
 
+**The subject binding (S-20, design addendum 3 change 8).** The same three rules apply, word for
+word, to `subjectColumn` — the other half of the erasure's `WHERE`. It is resolved to a property at
+startup under the same rules (exactly one basic `String` property on the primary table, or
+`SHRED-CONFIG-001` naming what was found; the entity's *identifier* is refused explicitly, because
+it is not in the state array, does not exist yet under `GenerationType.IDENTITY`, and is not a
+string); its value is read out of the row at write time; and the write is refused with
+`SHRED-UNVERIFIED-WRITE` when that value is null, blank, or not the subject the indexed field's data
+key is derived under. `@Shredded(subject = "#{customer.externalId}")` with `subjectColumn =
+"customer_id"` — the subject one association away — is the ordinary shape that used to write an
+index no erasure could reach, and it is now refused at the write, naming both values.
+
+**The invariant, in one line.** For a row to be erasable by one request, the tenant and subject its
+data key was derived under, the tenant and subject its index was derived under, and the values in
+its `tenantColumn` and `subjectColumn` are one pair.
+
 **Residual.** A row whose tenant column is changed by a bulk update outside Hibernate (JPQL or
 native `UPDATE t SET tenant_id = ?`) fires no listener and re-derives nothing, so it keeps an index
 derived under its former tenant; the erasure for its new tenant then refuses rather than reporting
 success, and the erasure for its former tenant reports the leftover in the WARN above. A tenant move
 made *through* Hibernate is refused outright: the tenant is bound into every stored value's header.
+The same is true of the subject column, and for the same reason: the subject is in every stored
+value's header, so `refuseIfSubjectMoved` refuses a move made through Hibernate, and a bulk update
+outside it fires no listener.
+
+### Which table this module's statements address (S-21)
+
+Every statement this module builds for a user table — the blind-index `UPDATE`, the two read-backs
+that verify it, the post-hoc header check, the `IDENTITY` rebind and the subject-immutability
+`SELECT` — is addressed at the table the Hibernate persister maps, **schema and all**, taken from
+the persister at startup and rendered quoted per part (`"app2"."note"`). It used to be derived from
+`@Table(name = ...)`, which ignores `schema`: which table those statements hit was then decided by
+the runtime connection's `search_path`, so a same-named table earlier on the path took every one of
+them, and an erasure could clear a stranger's column and report success while the real index
+survived. `@Table(schema = ...)` and `hibernate.default_schema` are both supported; a
+catalog-qualified table, and a table or schema whose identifier is not folded lowercase, are refused
+at startup with `SHRED-CONFIG-001` rather than addressed by a guess.
+
+**Residual.** When the mapping names no schema at all, Hibernate's own table expression is
+unqualified and so is this module's, and `search_path` decides — exactly as it does for Hibernate's
+own statements. That is the intended property: this module addresses the table Hibernate addresses.
+This module's own tables (`shredding_*`) are unqualified deliberately and are expected on the
+runtime role's `search_path`.
 
 ### The startup listener check proves position, not survival of Hibernate's own defaults (S-11, accepted residual)
 
@@ -395,8 +432,8 @@ reaches this method — insert has its own path (`onPreInsert`/`onPostInsert`).
 
 This module's own tables (`shredding_data_key`, `shredding_erasure`, `shredding_erasure_anchor`,
 `shredding_erased_subject`) are addressed unqualified, deliberately, and are expected on the runtime
-role's `search_path` — the same residual S-21 records for user tables that interpolate an
-unqualified `@Table(name = ...)`.
+role's `search_path` — the same residual recorded above under "Which table this module's statements
+address".
 
 Probe: `CipherProbeSubjectMovedNotFoundTest.probe_the_subject_immutability_check_refuses_when_the_read_back_finds_no_row`.
 

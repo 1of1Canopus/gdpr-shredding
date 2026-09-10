@@ -23,7 +23,13 @@ import java.util.regex.Pattern;
  * resolution, read by {@code writeBlindIndexes} (the property) and by {@code
  * JdbcErasureStore.clearBlindIndexes} (the column).
  *
- * @param table the entity's table
+ * <p><b>Design addendum 3, change 8 (applied §3.8b).</b> S-20 was S-13 one column over: the same
+ * resolution was owed to {@code subjectColumn}, which the erasure's {@code WHERE} matches on just
+ * as it matches on {@code tenantColumn}, and which nothing resolved, read or compared. Both axes
+ * now carry their resolved property on this one record, so a row's index, its data key and the
+ * values the erasure matches on cannot be computed from three different inputs.
+ *
+ * @param table the entity's table, schema and all (change 9, §3.9a)
  * @param column the blind-index column to null
  * @param subjectColumn the column holding the data subject id
  * @param tenantColumn the column holding the tenant id
@@ -31,35 +37,48 @@ import java.util.regex.Pattern;
  *     Hibernate metamodel at startup. Empty only for a model scanned without an {@code
  *     EntityManagerFactory} (this module's own unit tests); the startup check refuses an empty one,
  *     and the write path refuses to derive an index without it rather than guessing.
+ * @param subjectProperty the entity property mapped to {@code subjectColumn}, resolved the same way
+ *     and empty under the same one condition
  */
 public record BlindIndexColumn(
-    String table,
+    TableRef table,
     String column,
     String subjectColumn,
     String tenantColumn,
-    Optional<String> tenantProperty) {
+    Optional<String> tenantProperty,
+    Optional<String> subjectProperty) {
 
   private static final Pattern IDENTIFIER = Pattern.compile("[a-z_][a-z0-9_]{0,62}");
   private static final Pattern PROPERTY = Pattern.compile("[A-Za-z_$][A-Za-z0-9_$]{0,127}");
 
   public BlindIndexColumn {
-    table = identifier("table", table);
+    Objects.requireNonNull(table, "table");
     column = identifier("column", column);
     subjectColumn = identifier("subjectColumn", subjectColumn);
     tenantColumn = identifier("tenantColumn", tenantColumn);
     Objects.requireNonNull(tenantProperty, "tenantProperty");
-    tenantProperty.ifPresent(BlindIndexColumn::property);
+    Objects.requireNonNull(subjectProperty, "subjectProperty");
+    tenantProperty.ifPresent(p -> property("tenantProperty", p));
+    subjectProperty.ifPresent(p -> property("subjectProperty", p));
   }
 
-  /** A column whose {@code tenantColumn} has not been resolved to a property yet. */
+  /** A column whose tenant and subject columns have not been resolved to properties yet. */
   public static BlindIndexColumn unresolved(
-      String table, String column, String subjectColumn, String tenantColumn) {
-    return new BlindIndexColumn(table, column, subjectColumn, tenantColumn, Optional.empty());
+      TableRef table, String column, String subjectColumn, String tenantColumn) {
+    return new BlindIndexColumn(
+        table, column, subjectColumn, tenantColumn, Optional.empty(), Optional.empty());
   }
 
-  /** The same column, with the property the startup scan resolved {@code tenantColumn} to. */
-  public BlindIndexColumn resolvedTo(String property) {
-    return new BlindIndexColumn(table, column, subjectColumn, tenantColumn, Optional.of(property));
+  /** The same column, addressed at the table the persister maps (change 9, §3.9b). */
+  public BlindIndexColumn at(TableRef resolvedTable) {
+    return new BlindIndexColumn(
+        resolvedTable, column, subjectColumn, tenantColumn, tenantProperty, subjectProperty);
+  }
+
+  /** The same column, with the properties the startup scan resolved both columns to. */
+  public BlindIndexColumn resolvedTo(String tenant, String subject) {
+    return new BlindIndexColumn(
+        table, column, subjectColumn, tenantColumn, Optional.of(tenant), Optional.of(subject));
   }
 
   private static String identifier(String what, String value) {
@@ -77,15 +96,11 @@ public record BlindIndexColumn(
     return lower;
   }
 
-  private static String property(String value) {
+  private static String property(String what, String value) {
     if (!PROPERTY.matcher(value).matches()) {
       throw new ShreddingException(
           ErrorCodes.CONFIG,
-          "@BlindIndex tenantProperty must match "
-              + PROPERTY.pattern()
-              + ", was \""
-              + value
-              + "\"");
+          "@BlindIndex " + what + " must match " + PROPERTY.pattern() + ", was \"" + value + "\"");
     }
     return value;
   }

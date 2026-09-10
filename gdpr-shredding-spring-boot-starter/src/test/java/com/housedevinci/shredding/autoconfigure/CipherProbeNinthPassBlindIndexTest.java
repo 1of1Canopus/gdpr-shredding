@@ -72,9 +72,12 @@ class CipherProbeNinthPassBlindIndexTest {
 
   @SpringBootConfiguration
   @EnableAutoConfiguration
-  @EntityScan(basePackageClasses = com.housedevinci.shredding.autoconfigure.blindindexambient.OwnedNote.class)
+  @EntityScan(
+      basePackageClasses =
+          com.housedevinci.shredding.autoconfigure.blindindexambient.OwnedNote.class)
   @EnableJpaRepositories(
-      basePackageClasses = com.housedevinci.shredding.autoconfigure.blindindexambient.OwnedNoteRepository.class)
+      basePackageClasses =
+          com.housedevinci.shredding.autoconfigure.blindindexambient.OwnedNoteRepository.class)
   static class SchemaDefaultApp {
     @org.springframework.context.annotation.Bean
     ShreddingEventListener.TenantSupplier tenantSupplier() {
@@ -163,8 +166,9 @@ class CipherProbeNinthPassBlindIndexTest {
       refusal = shreddingCause(startupFailure);
     }
     assertThat(refusal)
-        .describedAs("a @Shredded value and its blind index inside an element collection must be"
-            + " refused at startup with this module's own typed error")
+        .describedAs(
+            "a @Shredded value and its blind index inside an element collection must be"
+                + " refused at startup with this module's own typed error")
         .isNotNull();
     assertThat(refusal.getMessage()).contains("tags");
   }
@@ -208,6 +212,68 @@ class CipherProbeNinthPassBlindIndexTest {
                 + " unqualified, so what its statements hit is decided by search_path")
         .doesNotContain("secondary table");
     assertThat(refusal.getMessage()).contains("search_path");
+  }
+
+  /**
+   * The K1 lesson from module B, built rather than argued (S-21, change 9). A decoy table of the
+   * same name sits in {@code public}, which is on the connection's {@code search_path}, while the
+   * entity is mapped to {@code app2}, which is not. Every statement this module builds for a user
+   * table used to interpolate an unqualified identifier, so all of them - the blind-index {@code
+   * UPDATE}, {@code verifyCleared}'s two reads, the post-hoc header read-back and the
+   * subject-immutability {@code SELECT} - would resolve to the decoy: the erasure would clear a
+   * stranger's column and report success while the real index survived in {@code app2}. The
+   * qualified address is what makes that impossible, and this is the probe that says so.
+   */
+  @Test
+  void probe_a_same_named_table_in_another_schema_earlier_on_the_search_path_is_not_touched()
+      throws Exception {
+    try (var context = start(SchemaApp.class)) {
+      var dataSource = context.getBean(DataSource.class);
+      String owner = "decoy-" + System.nanoTime();
+      byte[] decoyIndex = {1, 2, 3, 4, 5, 6, 7, 8};
+      try (var c = dataSource.getConnection();
+          var st = c.createStatement()) {
+        st.execute(
+            "create table if not exists public.schema_note (id bigserial primary key,"
+                + " owner_id varchar(255) not null, tenant_id varchar(255) not null,"
+                + " email bytea, email_idx bytea)");
+      }
+      try (var c = dataSource.getConnection();
+          var ps =
+              c.prepareStatement(
+                  "insert into public.schema_note (owner_id, tenant_id, email, email_idx)"
+                      + " values (?, 'org-a', null, ?)")) {
+        ps.setString(1, owner);
+        ps.setBytes(2, decoyIndex);
+        ps.executeUpdate();
+      }
+      try {
+        var notes = context.getBean(SchemaNoteRepository.class);
+        var erasures = context.getBean(ErasureService.class);
+        notes.saveAndFlush(new SchemaNote(owner, "org-a", "victim@example.test"));
+
+        assertThat(countIndexes(context, "app2.schema_note", owner))
+            .describedAs("the write reached the mapped table, not the decoy")
+            .isEqualTo(1);
+
+        var result =
+            erasures.erase(
+                new ErasureRequest(TenantId.of("org-a"), SubjectId.of(owner), "dpo", "art 17"));
+
+        assertThat(result.blindIndexColumnsCleared()).isEqualTo(1);
+        assertThat(countIndexes(context, "app2.schema_note", owner)).isZero();
+        assertThat(countIndexes(context, "public.schema_note", owner))
+            .describedAs(
+                "the decoy is another table's data: an erasure that reaches it is an erasure"
+                    + " addressing whatever search_path resolved, not the table Hibernate maps")
+            .isEqualTo(1);
+      } finally {
+        try (var c = dataSource.getConnection();
+            var st = c.createStatement()) {
+          st.execute("drop table if exists public.schema_note");
+        }
+      }
+    }
   }
 
   private ConfigurableApplicationContext start(Class<?> app) {

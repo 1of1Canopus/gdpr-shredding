@@ -16,7 +16,8 @@ import java.util.List;
 /**
  * Cipher, ninth pass: an {@code @ElementCollection} whose element carries a {@code @Shredded} value
  * and its {@code @BlindIndex}. The forward field scan walks entity classes, so it never sees either
- * annotation; the index would live in the collection table, which no {@code BlindIndexColumn} names.
+ * annotation; the index would live in the collection table, which no {@code BlindIndexColumn}
+ * names.
  */
 @Entity
 @Table(name = "tagged_note")

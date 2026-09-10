@@ -282,7 +282,11 @@ class CipherProbeStartupTest {
         .singleElement()
         .satisfies(
             c -> {
-              assertThat(c.table()).isEqualTo("customer");
+              // Change 9 (§3.9b): a model scanned without an EntityManagerFactory keeps the
+              // provisional, annotation-derived table. The persister's own qualified table
+              // replaces it wherever a statement is built.
+              assertThat(c.table())
+                  .isEqualTo(com.housedevinci.shredding.domain.TableRef.of("customer"));
               assertThat(c.column()).isEqualTo("email_bidx");
               assertThat(c.subjectColumn()).isEqualTo("customer_id");
               assertThat(c.tenantColumn()).isEqualTo("tenant_id");

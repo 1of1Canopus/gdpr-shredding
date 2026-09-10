@@ -276,8 +276,30 @@ when it is not the tenant the indexed field's data key is derived under - one er
 reach the key, the ciphertext and the index together. So a query helper computes the index under the
 tenant the row's tenant column holds, which is also the tenant it passes to the erasure.
 
+`subjectColumn` works exactly the same way, and for the same reason: it is a **column** name,
+resolved at startup to the single basic `String` property that maps to it, and a write is refused
+when that column's value is null, blank, or not the subject the indexed field's data key is derived
+under. `@Shredded(subject = "#{customer.externalId}")` with `subjectColumn = "customer_id"` — the
+subject one association away — is refused at the write, naming both values, rather than writing an
+index no erasure can reach. Naming the entity's **identifier** as `subjectColumn` is refused at
+startup: the identifier is not in the state array the write path reads, under
+`GenerationType.IDENTITY` it does not exist yet, and it is not a string. In one line: *for a row to
+be erasable by one request, the tenant and subject its data key was derived under, the tenant and
+subject its index was derived under, and the values in its `tenantColumn` and `subjectColumn` are
+one pair.*
+
 The erasure reads the columns back inside its own transaction: still populated means the erasure is
 refused (`SHRED-ERASURE-004`), not recorded.
+
+## Schemas
+
+Every statement this module builds for one of your tables is addressed at the table Hibernate maps,
+schema and all, taken from the persister at startup. `@Table(schema = "app2")` and
+`spring.jpa.properties.hibernate.default_schema` both work. A catalog-qualified table, and a table
+or schema whose name is not lowercase, are refused at startup rather than addressed by a guess. With
+no schema in the mapping the statements are unqualified, exactly like Hibernate's own, and the
+connection's `search_path` decides. This module's own `shredding_*` tables are unqualified: keep
+them on the runtime role's `search_path`.
 
 ## The cross-node cache window
 

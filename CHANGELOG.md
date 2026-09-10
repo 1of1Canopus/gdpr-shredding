@@ -6,6 +6,99 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed (ninth pass at `4a95ba5`, S-20: a blind index whose `subjectColumn` is not the shredded subject survives that subject's erasure)
+
+**HIGH.** Design addendum 3 bound one of the two axes of a blind index to the row it sits in.
+`subjectColumn` — the other half of the erasure's `WHERE` — was left exactly as S-13 found
+`tenantColumn`: validated as a SQL identifier, interpolated into `clearBlindIndexes` and into both
+of `verifyCleared`'s queries, and never resolved to a property, never read at write time, never
+compared with the subject the data key, the AAD and the erasure request are all keyed on. An entity
+whose `@Shredded(subject = ...)` evaluated to something other than the value in `subjectColumn`
+wrote an index no erasure could reach: the key died, the ciphertext died, the chained record said
+`COMPLETE`, and `HMAC(secret, tenant | entity | field | plaintext)` stayed in the table as a stable
+cross-row correlator for the erased subject and, over a low-entropy field such as an email address,
+a confirmation oracle for anyone holding `shredding.blind-index.hmac-secret`. It was fail-*open*:
+nothing at startup, nothing at the write and nothing in the erasure said a word, because
+`verifyCleared`'s residual query was keyed on the same `subjectColumn` that missed.
+`@Shredded(subject = "#{customer.externalId}")` with `subjectColumn = "customer_id"` — the subject
+one association away — is the ordinary shape that reached it without trying.
+
+Fixed by design addendum 3 change 8 (`docs/plans/read-path-design.md`), which applies changes 1–4 to
+the subject axis verbatim rather than inventing a mechanism:
+
+- **Added** `ShreddedModel.resolveAxisProperty`: one resolver for both axes, so their rules cannot
+  drift apart again (S-20 exists because they were written for one axis and never applied to the
+  other). `subjectColumn` must resolve, through the entity's own column mapping, to exactly one
+  property that is basic, `String`-typed, on the primary table, not a formula, not itself
+  `@Shredded` and not inside a component — every other outcome is `SHRED-CONFIG-001` naming the
+  entity, the index field, `subjectColumn` and what was found.
+- **Decided** the case Cipher left open: `subjectColumn` naming the entity's identifier is
+  **refused**, with the reason in the message. The identifier is not in the state array the write
+  path reads, under `GenerationType.IDENTITY` it does not exist yet when the index is derived, and a
+  `SubjectId` is a string while an identifier is as often a `Long`, a `UUID` or a `byte[]` — so the
+  equality this check exists to make would need a rendering this module would have to invent.
+- **Added** `BlindIndexColumn.subjectProperty`, beside `tenantProperty` on the same record, resolved
+  once, read by the write path (the property) and the erasure path (the column).
+  `ShreddingStartupCheck` refuses an unresolved one.
+- **Added** `ShreddingEventListener.rowSubject`: the write is refused with
+  `SHRED-UNVERIFIED-WRITE` when the subject column's value is null, blank or not a `String`, and —
+  the change that closes the finding — when it is not `scope.subject()`, naming both values, the
+  field and the column, before any derivation.
+
+Probes: `CipherProbeBlindIndexSubjectColumnTest` (Cipher's two, promoted from `src/test-pending/java`
+and green **as a refusal**, plus `AlignedNote`, the same application shape declared correctly, which
+erases key, ciphertext and index together) and `CipherProbeBlindIndexSubjectColumnStartupTest` (one
+per refusal branch, plus the camel-case configuration that must still boot). The refusal is the same
+recorded deviation as change 4's on `Note`, for the same reason: `SplitNote`'s shape is erasable
+under no keying this module can choose, so the original "the erasure clears the index" assertion is
+unbuildable on that fixture and the property is asserted on the correctly declared one.
+
+### Fixed (ninth pass at `4a95ba5`, S-21: every statement for a user table was addressed unqualified, so `search_path` decided which table it hit)
+
+**MEDIUM.** `ShreddedModel.tableName(Class)` read `@Table(name = ...)` and ignored `schema`, and
+every statement this module builds for a user table came from it: the blind-index `UPDATE`,
+`verifyCleared`'s two queries, the post-hoc header read-back, the `IDENTITY` rebind and the
+subject-immutability `SELECT`. Which table they actually hit was decided by the runtime connection's
+`search_path` rather than by the mapping Hibernate uses. Consequences: `@Table(schema = ...)` was
+refused at startup by accident, with a message about a `@SecondaryTable` that did not exist;
+`spring.jpa.properties.hibernate.default_schema` — how a large share of enterprise deployments name
+their schema — made every `@BlindIndex` mapping in the application unusable with the same misleading
+message; and a same-named table earlier on `search_path` would have taken every one of those
+statements.
+
+Fixed by design addendum 3 change 9, taking the first of Cipher's two directions (refusing every
+schema-qualified deployment would refuse `hibernate.default_schema`, and a library that cannot boot
+there is not a library):
+
+- **Added** `TableRef` (core domain): a table as an optional schema and a name, parsed from
+  Hibernate's own table expression (dots outside quotes, each part unquoted and validated against
+  the identifier pattern) and rendered quoted per part. A catalog-qualified expression and an
+  identifier that is not folded lowercase are refused with `SHRED-CONFIG-001` rather than reduced or
+  lowercased into another table's name.
+- **Changed** `ShreddedField.table()` and `BlindIndexColumn.table()` to `TableRef`s taken from the
+  persister at startup (`ShreddedModel.resolveTables`), for every `@Shredded` entity — not only the
+  indexed ones. `ShreddedModel.tableName(Class)` survives only as the provisional value for a model
+  scanned without an `EntityManagerFactory`, which builds no SQL.
+- **Fixed** the `@SecondaryTable` refusal, which compared `tableName(type)` with itself — one value
+  per entity, so `distinct().count()` was always 1 and it could never fire. It now compares each
+  shredded field's own containing table with the entity's primary table, and it fires for a single
+  `@Shredded` field too.
+- **Fixed** change 1's primary-table comparison, which compared a persister table expression
+  (`public.owned_note`) against an annotation-derived name (`owned_note`); both sides now come from
+  the same source.
+
+Probes: `CipherProbeNinthPassBlindIndexTest` promoted from `src/test-pending/java`, all five green —
+`@Table(schema = "app2")` boots, writes and erases; `hibernate.default_schema` boots; and the K1
+probe Cipher did not build,
+`probe_a_same_named_table_in_another_schema_earlier_on_the_search_path_is_not_touched`, holds a decoy
+`public.schema_note` ahead of `app2` on `search_path` with a live index column that the erasure must
+leave untouched while clearing the real one. Plus `TableRefTest` in the core.
+
+**Residual, stated in `SECURITY-NOTES.md`:** with no schema in the mapping, Hibernate's own table
+expression is unqualified and so is this module's, and `search_path` decides — exactly as it does
+for Hibernate's own statements. This module's own `shredding_*` tables are unqualified deliberately
+and are expected on the runtime role's `search_path`.
+
 ### Fixed (ninth pass at `4a95ba5`, S-21b: the subject-immutability check failed open on a wrongly-addressed read-back)
 
 **MEDIUM.** `refuseIfSubjectMoved` (control 14) is the write path's per-update check that a

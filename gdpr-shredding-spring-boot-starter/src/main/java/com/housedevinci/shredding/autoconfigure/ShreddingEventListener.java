@@ -176,7 +176,7 @@ public final class ShreddingEventListener
     WriteVerification.owe(
         event.getSession(),
         entityName(event.getPersister()),
-        fields.get(0).tableName(),
+        fields.get(0).table(),
         singleIdColumn(event.getPersister()),
         event.getId(),
         fields,
@@ -242,7 +242,7 @@ public final class ShreddingEventListener
     WriteVerification.owe(
         event.getSession(),
         entityName(event.getPersister()),
-        fields.get(0).tableName(),
+        fields.get(0).table(),
         singleIdColumn(event.getPersister()),
         event.getId(),
         fields,
@@ -631,7 +631,7 @@ public final class ShreddingEventListener
     String idColumn = singleIdColumn(event.getPersister());
     String sql =
         "UPDATE "
-            + quote(fields.get(0).tableName())
+            + fields.get(0).table().sql()
             + " SET "
             + columns.stream()
                 .map(c -> quote(c) + " = ?")
@@ -799,7 +799,7 @@ public final class ShreddingEventListener
               + " row "
               + id
               + " could not be verified before update: no row was found at "
-              + fields.get(0).tableName()
+              + fields.get(0).table()
               + " for that identifier. Hibernate believes this row exists; a check that cannot find"
               + " it is refused rather than skipped.");
     }
@@ -850,7 +850,7 @@ public final class ShreddingEventListener
         "SELECT "
             + columns
             + " FROM "
-            + quote(fields.get(0).tableName())
+            + fields.get(0).table().sql()
             + " WHERE "
             + quote(idColumn)
             + " = ?";
@@ -953,6 +953,35 @@ public final class ShreddingEventListener
       }
       TenantId rowTenant = rowTenant(index, names, state);
       TenantId fieldTenant = scope.tenantFor(index.ofFieldName());
+      String rowSubject = rowSubject(index, names, state);
+      if (!scope.subject().value().equals(rowSubject)) {
+        // Design addendum 3, change 8 (applied §3.8d): S-20, the subject axis of change 4. One
+        // erasure request names one tenant and one subject; the data key is per (tenant, subject),
+        // so an index derived under a subject the key was not derived under is reachable by an
+        // erasure that destroys no key, and the key's own erasure reaches no index. Refused before
+        // any derivation, naming both values, rather than written and reported as erased later.
+        throw new ShreddingException(
+            ErrorCodes.UNVERIFIED_WRITE,
+            "@BlindIndex on "
+                + index.entityName()
+                + "."
+                + index.fieldName()
+                + " indexes "
+                + index.entityName()
+                + "."
+                + index.ofFieldName()
+                + ", whose data key is derived under subject \""
+                + scope.subject().value()
+                + "\", while this row's subject column \""
+                + index.column().subjectColumn()
+                + "\" holds \""
+                + rowSubject
+                + "\". One erasure request names one tenant and one subject, so it can only reach"
+                + " the key, the ciphertext and the index when all three are under the same"
+                + " subject. Declare the @Shredded subject as the one the subject column holds, or"
+                + " write the subject column with the subject the value belongs to. The write is"
+                + " refused.");
+      }
       if (!fieldTenant.value().equals(rowTenant.value())) {
         throw new ShreddingException(
             ErrorCodes.UNVERIFIED_WRITE,
@@ -1046,6 +1075,62 @@ public final class ShreddingEventListener
               + " than performed.");
     }
     return TenantId.of(tenantValue);
+  }
+
+  /**
+   * Design addendum 3, change 8 (applied §3.8c, §3.8d). The subject axis of {@link #rowTenant}: the
+   * value in the column the erasure's {@code WHERE} matches on, read out of the state array by the
+   * property {@code subjectColumn} was resolved to at startup, refused when it is unusable.
+   *
+   * <p>S-20 was S-13 one column over. {@code subjectColumn} was validated as an identifier,
+   * interpolated into the erasure's {@code WHERE} and into both of {@code verifyCleared}'s queries,
+   * and never resolved, never read and never compared with {@code Scope.subject()} - so an entity
+   * whose subject expression evaluated to something other than its subject column wrote an index no
+   * erasure could reach, while the key died, the ciphertext died and the chained record said
+   * COMPLETE.
+   */
+  private static String rowSubject(
+      ShreddedModel.BlindIndexField index, String[] names, Object[] state) {
+    String where = index.entityName() + "." + index.fieldName();
+    String property =
+        index
+            .column()
+            .subjectProperty()
+            .orElseThrow(
+                () ->
+                    new ShreddingException(
+                        ErrorCodes.CONFIG,
+                        "@BlindIndex on "
+                            + where
+                            + " has no property resolved for subjectColumn=\""
+                            + index.column().subjectColumn()
+                            + "\". The resolution happens at startup from the Hibernate metamodel;"
+                            + " a ShreddedModel built without an EntityManagerFactory cannot write"
+                            + " blind indexes, because it cannot read the subject the erasure will"
+                            + " match on out of the row."));
+    int subjectIndex = indexOf(names, property);
+    Object raw = subjectIndex < 0 ? null : state[subjectIndex];
+    if (!(raw instanceof String subjectValue) || subjectValue.isBlank()) {
+      throw new ShreddingException(
+          ErrorCodes.UNVERIFIED_WRITE,
+          "@BlindIndex on "
+              + where
+              + " is matched by the erasure on the value of "
+              + index.entityName()
+              + "."
+              + property
+              + " (column \""
+              + index.column().subjectColumn()
+              + "\"), which this write leaves "
+              + (raw == null
+                  ? "null"
+                  : raw.getClass().getName() + (raw instanceof String ? " and blank" : ""))
+              + ". An index no WHERE "
+              + index.column().subjectColumn()
+              + " = ? can match is an index no erasure can destroy, so the write is refused rather"
+              + " than performed.");
+    }
+    return subjectValue;
   }
 
   /** One code path, shared by the write path here and by the query helper. */

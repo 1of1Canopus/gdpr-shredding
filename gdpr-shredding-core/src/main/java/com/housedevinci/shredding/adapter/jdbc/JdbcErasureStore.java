@@ -227,10 +227,12 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
     int cleared = 0;
     for (BlindIndexColumn column : blindIndexColumns) {
       // The identifiers were validated against a narrow pattern when the column was registered
-      // (BlindIndexColumn); the values are always bind parameters.
+      // (BlindIndexColumn, TableRef); the values are always bind parameters. The table is the one
+      // the persister maps, schema and all (change 9, S-21): an unqualified name here would leave
+      // it to the connection's search_path which table this UPDATE clears.
       String sql =
           "UPDATE "
-              + column.table()
+              + column.table().sql()
               + " SET "
               + column.column()
               + " = NULL WHERE "
@@ -274,7 +276,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
       // Identifiers validated at startup (BlindIndexColumn); values are bind parameters.
       String residual =
           "SELECT count(*) FROM "
-              + column.table()
+              + column.table().sql()
               + " WHERE "
               + column.tenantColumn()
               + " = ? AND "
@@ -305,7 +307,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
       }
       String elsewhere =
           "SELECT count(*) FROM "
-              + column.table()
+              + column.table().sql()
               + " WHERE "
               + column.subjectColumn()
               + " = ? AND "

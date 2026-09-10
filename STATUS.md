@@ -8,6 +8,39 @@ are fine here for now — but before this repo is made public, move them to
 tests, README, CHANGELOG, LICENSE/NOTICE, SECURITY.md, CONTRIBUTING.md, user docs, CI, the
 probe script). See how `agent-guard` did it (2026-09-10).
 
+**S-20 (HIGH) and S-21 (MEDIUM) — CLOSED, built (Thor, 2026-09-10).** Both were corrections to a
+mechanism that already existed, so both are recorded in `docs/plans/read-path-design.md` as
+**addendum 3 changes 8 and 9** before the code, not in a fix list.
+
+*S-20 (change 8).* The subject axis of a blind index is now bound to the row exactly as changes 1-4
+bound the tenant axis: `subjectColumn` is resolved to a property at startup through the persister
+(one resolver, `resolveAxisProperty`, shared by both axes so their rules cannot drift apart again),
+carried on `BlindIndexColumn.subjectProperty`, read out of the state array at write time, and the
+write is refused with `SHRED-UNVERIFIED-WRITE` when that value is null, blank, or not the subject
+the indexed field's data key is derived under. The case Cipher left open is **decided and refused**:
+`subjectColumn` naming the entity's identifier, because the identifier is not in the state array,
+does not exist yet under `IDENTITY`, and is not a string. Cipher's two probes are green **as a
+refusal** — the same recorded deviation, for the same reason, as change 4's on `Note` — with
+`AlignedNote` in the same file asserting the clearing property on the correctly declared shape.
+
+*S-21 (change 9).* Cipher's first direction, taken: every statement this module builds for a user
+table is addressed at the table the persister maps, schema and all, quoted per part, via a new
+`TableRef` in the core domain — the blind-index `UPDATE`, both of `verifyCleared`'s reads, the
+post-hoc header read-back, the `IDENTITY` rebind and the subject-immutability `SELECT`, for every
+`@Shredded` entity and not only the indexed ones. `@Table(schema)` and `hibernate.default_schema`
+now boot, write and erase; a catalog-qualified or non-lowercase table is refused with an accurate
+message. The `@SecondaryTable` refusal, which compared `tableName(type)` with itself and could never
+fire, is rebuilt on the mapping. The K1 probe Cipher did not build (a decoy `public.schema_note`
+ahead of `app2` on `search_path`) is green.
+
+`./mvnw -B clean verify`: BUILD SUCCESS, **289 tests** (core 99, starter 173, sample 17), 0 failures,
+0 errors, 0 skipped; Docker up throughout. Line coverage core 85.3% (1124/1318), starter 87.9%
+(1487/1691); branch 62.3% / 72.6%; every JaCoCo gate met. `src/test-pending/java` holds a `README.md`
+and nothing else in both trees: all eleven probe files Cipher staged for this pass are promoted into
+`src/test/java` and green in the default build. QUESTIONS S-20 and S-21 closed; `SECURITY-NOTES.md`
+carries the subject binding, the invariant in one line, and the new "Which table this module's
+statements address" section with its residual. Cipher re-verifies; not self-marked closed.
+
 **S-21b (subject-immutability check fails open on "row not found") — CLOSED, built (Isis,
 2026-09-10).** `refuseIfSubjectMoved` now refuses with `SHRED-UNVERIFIED-WRITE`, naming the entity,
 row id and table, when its own read-back finds no row - previously it returned silently, the same
