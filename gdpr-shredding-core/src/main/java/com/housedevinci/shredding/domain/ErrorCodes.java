@@ -72,6 +72,15 @@ public final class ErrorCodes {
   /** This instance's keyed/unkeyed mode disagrees with the trail's anchor (control 8). */
   public static final String ERASURE_KEY_MISMATCH = "SHRED-ERASURE-003";
 
+  /**
+   * S-13, design addendum 3 change 5: an erasure cleared a subject's blind-index columns and then
+   * found at least one of them still populated for the same (tenant, subject) inside its own
+   * transaction. The row count the {@code UPDATE} claimed is not evidence - a trigger, a rule, a
+   * view or a column rewritten since the startup scan can all leave an HMAC of the erased plaintext
+   * behind - so the erasure is refused and rolled back rather than recorded as complete.
+   */
+  public static final String ERASURE_INDEX_RESIDUAL = "SHRED-ERASURE-004";
+
   /** A value or identifier failed boundary validation. */
   public static final String INVALID = "SHRED-INVALID-001";
 

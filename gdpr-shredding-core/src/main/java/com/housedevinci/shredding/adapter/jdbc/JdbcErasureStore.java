@@ -25,6 +25,8 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import javax.sql.DataSource;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * The erasure half in PostgreSQL: key destruction, blind-index clearing and the chained erasure
@@ -37,6 +39,8 @@ import javax.sql.DataSource;
  * construction and on every append.
  */
 public final class JdbcErasureStore implements ErasureStore, ErasureReader, ErasureAnchor {
+
+  private static final Logger log = LoggerFactory.getLogger(JdbcErasureStore.class);
 
   private static final long LOCK_KEY = 0x5348455241L; // "SHERA"
 
@@ -242,7 +246,93 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
         cleared += ps.executeUpdate();
       }
     }
+    verifyCleared(c, tenant, subject);
     return cleared;
+  }
+
+  /**
+   * Design addendum 3, change 5 (applied §3.5). The {@code UPDATE}s above report a row count; a row
+   * count is what this module asked for, not evidence of what the table now holds. Between the
+   * startup scan and this transaction the column may have gained a trigger, a rule, a rewriting
+   * view or a new default, any of which leaves an HMAC of the erased plaintext behind while the
+   * erasure record claims the index was cleared. So it is read back, inside the same transaction,
+   * before the record is appended:
+   *
+   * <ul>
+   *   <li>an index still populated for this (tenant, subject) <b>refuses</b> the erasure - {@link
+   *       ErrorCodes#ERASURE_INDEX_RESIDUAL}, rolling back the whole transaction, key destruction
+   *       and record included, so nothing claims a completion that did not happen;
+   *   <li>an index under a <em>different</em> tenant value for the same subject id is a
+   *       <b>WARN</b>, never a refusal: those rows may legitimately belong to another tenant that
+   *       happens to use the same subject identifier, and refusing would let one tenant's data
+   *       block another tenant's erasure. It is also the only place a row moved between tenants by
+   *       a bulk update outside Hibernate (change 7) is ever visible.
+   * </ul>
+   */
+  private void verifyCleared(Connection c, TenantId tenant, SubjectId subject) throws SQLException {
+    for (BlindIndexColumn column : blindIndexColumns) {
+      // Identifiers validated at startup (BlindIndexColumn); values are bind parameters.
+      String residual =
+          "SELECT count(*) FROM "
+              + column.table()
+              + " WHERE "
+              + column.tenantColumn()
+              + " = ? AND "
+              + column.subjectColumn()
+              + " = ? AND "
+              + column.column()
+              + " IS NOT NULL";
+      try (PreparedStatement ps = c.prepareStatement(residual)) {
+        ps.setString(1, tenant.value());
+        ps.setString(2, subject.value());
+        try (ResultSet rs = ps.executeQuery()) {
+          long left = rs.next() ? rs.getLong(1) : 0L;
+          if (left > 0) {
+            throw new ShreddingException(
+                ErrorCodes.ERASURE_INDEX_RESIDUAL,
+                "erasure refused: "
+                    + left
+                    + " row(s) of "
+                    + column.table()
+                    + " still hold a value in the blind-index column "
+                    + column.column()
+                    + " for this subject after the erasure cleared it. Something outside this"
+                    + " module - a trigger, a rule, a rewriting view - is repopulating the column,"
+                    + " and an erasure that leaves an HMAC of the erased plaintext behind is"
+                    + " refused rather than recorded as complete.");
+          }
+        }
+      }
+      String elsewhere =
+          "SELECT count(*) FROM "
+              + column.table()
+              + " WHERE "
+              + column.subjectColumn()
+              + " = ? AND "
+              + column.tenantColumn()
+              + " IS DISTINCT FROM ? AND "
+              + column.column()
+              + " IS NOT NULL";
+      try (PreparedStatement ps = c.prepareStatement(elsewhere)) {
+        ps.setString(1, subject.value());
+        ps.setString(2, tenant.value());
+        try (ResultSet rs = ps.executeQuery()) {
+          long other = rs.next() ? rs.getLong(1) : 0L;
+          if (other > 0) {
+            log.warn(
+                "shredding: this subject also has {} blind index value(s) in {}.{} under other"
+                    + " tenant values, which this erasure does not destroy. That is legitimate when"
+                    + " another tenant uses the same subject identifier for a different person, and"
+                    + " is a leftover when it is the same person - a row whose tenant column was"
+                    + " changed by a bulk update outside Hibernate keeps an index derived under its"
+                    + " former tenant. Erase that tenant too, or re-derive the index.",
+                other,
+                column.table(),
+                column.column());
+          }
+        }
+      }
+    }
   }
 
   @Override
