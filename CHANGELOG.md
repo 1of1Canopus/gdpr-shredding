@@ -48,6 +48,57 @@ threw `ClassCastException` out of the write path, because the listener cast the 
 `EventSource` and `StatelessSessionImpl` is not one. The read path had `StatelessSession` tests;
 nothing wrote through one.
 
+### Fixed (sixth pass corrections at `75af7ea`)
+
+Cipher's `## Sixth pass (75af7ea)` review found one HIGH design stop (S-1, closed above by Thor) and
+five corrections, S-2 to S-6, closed here. Four are fully closed; S-4 is closed for the data-loss half
+(a stale decode is never served) with one narrower residual left open, recorded under QUESTIONS.md
+S-4.
+
+- **S-2 (MEDIUM).** A second `@Shredded` field's declared tenant was silently ignored: `scopeFor` and
+  `onPostLoad` took the tenant from the entity's *first* shredded field and applied it to every field,
+  so a field whose tenant differed from the others was encrypted into the wrong tenant's erasure
+  scope and survived that tenant's own erasure. `ShreddingContext.Scope` now carries a per-field
+  tenant map (`Scope.tenantFor(String)`), resolved once per write from each field's own declared
+  expression; every write and read-path use of "the tenant" - the converter, blind-index derivation,
+  the `IDENTITY` rebind, `refuseIfSubjectMoved`, `refuseIfStoredHeadersDisagree`, `onPostLoad` - goes
+  through it instead of the first field's value. See QUESTIONS.md S-2 for why this closes as full
+  per-field support rather than the review's suggested startup refusal.
+- **S-3 (MEDIUM).** A value-equal but reference-distinct copy of the read placeholder - what a DTO
+  round trip, `new String(...)`, `trim()` or a defensive `clone()` produces from a refused, detached
+  load - defeated both write-back checks and overwrote the live ciphertext with the marker's own
+  rendering. `Placeholders.isPlaceholder` now matches by value (`String.equals`, `Arrays.equals` for
+  `byte[]`, `equals` for the date and the decimal) as well as by reference identity.
+  `FrameworkMatrixTest.a_placeholder_is_never_re_encrypted`'s three assertions are inverted to match.
+- **S-4 (LOW).** `ShreddingContext.drain` took `entries.remove(0)` - the *oldest* pending decode under
+  a key - so an ownerless region left on the deque by an undisciplined direct call to the public
+  `openRegion()` could serve a stale, previously-decrypted value of the same row instead of the one
+  the current read just took out of the column. `drain` now takes the most recent entry. The
+  `Pending.ownerToken` field and its comparison in `drain` are removed rather than "fixed": they were
+  unreachable by construction (a `Pending` is always read back from the very `Region` object it was
+  recorded into), and making the check real would need a second piece of call-scoped state - a new
+  mechanism, not a correction. See QUESTIONS.md S-4.
+- **S-5 (LOW).** An `@Access(AccessType.PROPERTY)` `@Shredded` mapping started with no converter on
+  the column at all - Hibernate ignores field-level mapping annotations, the `@Convert` among them,
+  under property access - caught only on the first write by the post-hoc header check, with a message
+  naming neither the entity nor the field. `ShreddedModel.scan` now adds the forward direction of the
+  C-19 reverse check: for every field-level `@Shredded`, the metamodel attribute of that name must
+  resolve to that field's own declared `ShreddedConverter`, refused at startup by name otherwise.
+- **S-6 (LOW).** `ShreddingAutoConfiguration.shreddingHibernateCustomizer` installed the integrator
+  with an unconditional `properties.put(JpaSettings.INTEGRATOR_PROVIDER, ...)`, which silently
+  discarded any `IntegratorProvider` a library or the application had already installed - its own
+  auditing or security integrator included. The customizer now composes with whatever provider is
+  already in the map, appending this module's integrator last so its `POST_LOAD` listener remains the
+  one Hibernate calls first. `ShreddingStartupCheck` now also verifies, once the `SessionFactory` is
+  actually built, that this module's listener is registered on every event it needs and is first on
+  `POST_LOAD`, refusing startup and naming the listener that displaced it otherwise.
+
+Probes moved from `src/test-pending/java` to `src/test/java`: `CipherProbeTenantExpressionTest`,
+`CipherProbePlaceholderCopyTest`, `CipherProbePropertyAccessTest`, `CipherProbeSecondIntegratorTest`,
+and `CipherProbeBatchedInsertCheckTest` (rewritten as a startup-refusal assertion; QUESTIONS #25 - S-5
+makes its original `@Access(PROPERTY)` fixture unstartable, so the batching scenario it demonstrated
+is no longer reachable through that fixture at all). `CipherProbeRegionResidueTest` stays pending: one
+of its two probe methods is the S-4 residual.
 
 ### Changed (read-path redesign, sixth pass at `faaafff`)
 

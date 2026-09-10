@@ -653,6 +653,13 @@ refuse a bad stored header under batching without needing any mapping hole: a ro
 read back (`SHRED-UNVERIFIED-WRITE`) and an in-transaction row swap (`SHRED-SUBJECT-IMMUTABLE`),
 both reached through `StatelessSession` and its own connection.
 
+**Done (Isis, S-2..S-6 rebase onto S-1).** `CipherProbeBatchedInsertCheckTest` is rewritten to assert
+exactly that: `PropSeqWidget` (still `@Access(AccessType.PROPERTY)` with the converter on the field,
+still un-mapped) now fails the `SpringApplicationBuilder.run()` in the test itself with
+`SHRED-CONFIG-001`, naming `PropSeqWidget` and `name` - the same shape as every other startup
+refusal this module has (`CipherProbeCompositeIdTest`, `CipherProbePropertyAccessTest`). Promoted to
+`src/test/java`; the `propseq` fixtures move with it.
+
 ## #26 The verification ledger holds one record per written row until the flush ends (taken; a documented cost)
 
 Settlement discharges debts at the end of every flush, so an ordinary `@Transactional` method holds
@@ -680,3 +687,89 @@ code - it is three uncovered lines in the JaCoCo report and I know it.
 It stays because it is the assertion that makes the *next* change to `settle` fail loudly instead of
 quietly: the whole of S-1 was one early `return` that meant "unchecked" and read as "fine". I would
 rather carry three unreachable lines than reintroduce that shape.
+
+---
+
+## S-2 Second `@Shredded` field's declared tenant: full per-field support, not the review's suggested startup refusal (taken; a deviation, with a probe that requires it)
+
+**What the sixth pass's fix text says.** "`ShreddedModel.scan`, in the same loop that already refuses
+a `@SecondaryTable` split, refuses at startup when the `@Shredded` fields of one entity do not all
+declare the same tenant expression (all blank, or all the same string), naming the entity and both
+expressions."
+
+**Why I did not take it as written.** `CipherProbeTenantExpressionTest.probe_a_second_shredded_field_is_bound_to_the_tenant_it_declares`,
+committed by Cipher alongside the finding, drives `Dossier` — one entity, two `@Shredded` fields,
+`note` declared `tenant="#{'org-a'}"` and `memo` declared `tenant="#{'org-b'}"` — through a real save
+and asserts the stored `memo` column decodes to tenant `org-b`. That is not "refused at startup"; it
+is the *other* half of the finding's own javadoc ("or every field is bound to the tenant it
+declares"), the half the probe actually exercises and the only outcome a mapping this way can produce
+without failing the probe. A per-entity refusal would make the probe fail at context startup with
+`SHRED-CONFIG-001` instead of reaching the assertion.
+
+**What I built instead.** Two `@Shredded` fields of one entity declaring *different* tenants is a
+supported shape. `ShreddingContext.Scope` grew a `Map<String, TenantId> fieldTenants` and a
+`tenantFor(String fieldName)` accessor; `ShreddingEventListener.scopeFor` resolves and stores every
+field's own tenant expression against the entity instance once, at write time (the only place a
+tenant expression can be evaluated — the converter is handed nothing but the attribute value), and
+every write and read-path site that used to read `scope.tenant()` as *the* tenant for every field of
+an entity — the converter, blind-index derivation, the `IDENTITY` rebind, `refuseIfSubjectMoved`,
+`refuseIfStoredHeadersDisagree`, `onPostLoad` — now asks for the specific field's tenant. `subject`
+still has to agree across fields (`resolveSubject`'s existing cross-check, unchanged): one row belongs
+to one subject, but a field within that row can belong to a different tenant's erasure scope than its
+neighbour, and that scope is now the one the field's own annotation names.
+
+**What is still refused, and what is not.** Nothing new is refused at startup by this fix. A
+mismatched *subject* across an entity's `@Shredded` fields is still refused at write time
+(`resolveSubject`), unchanged. A mismatched *tenant* is no longer a defect to refuse — it is the
+declared, honoured shape.
+
+---
+
+## S-4 The ownerless-region residual: closed for the value half, open for the refusal half — needs design stop for the refusal half
+
+**What closed.** `drain` took `entries.remove(0)` — the oldest pending decode under a key — so an
+ownerless region left on the thread's deque by an undisciplined direct call to the public
+`openRegion()` (the shape `CipherProbeRegionResidueTest` builds; QUESTIONS #21) could serve a stale,
+previously-decrypted value of the same row in place of the one the current read just took out of the
+column. `drain` now takes the *most recent* entry, so it can never serve anything except this row's
+own, current value — Cipher's own restated #21 boundary ("with S-4(a) in place it can never serve a
+value other than this row's own, current one"). `Pending.ownerToken` and its comparison in `drain`
+are removed rather than "fixed": `recordDecoded` always stamps an entry with the token of the very
+`Region` object it is filed into, and `drain` always reads back from `stack.peek()` — the same object
+— so `pending.ownerToken() != region.token` was unsatisfiable by construction, not a check that
+sometimes missed. `CipherProbeRegionResidueTest.probe_a_stale_decode_in_an_ownerless_region_is_not_installed_over_the_fresh_one`
+(R2) is green.
+
+**What did not close.** `CipherProbeRegionResidueTest.probe_a_decode_with_no_region_of_its_own_is_refused_even_when_an_ownerless_region_is_open`
+(R1) asserts that `recordDecoded` itself throws `SHRED-READ-UNSCOPED` when the region on top of the
+stack is one the *current* call did not open — an "ownerless" region left behind by an earlier,
+undisciplined direct `openRegion()` call, exactly as `CipherProbeRegionResidueTest`'s
+`onOwnerlessRegion` helper builds it. `recordDecoded` cannot make this distinction today: it only
+ever asks "is the region deque non-empty", and a region opened by an earlier, already-returned call
+is, on the stack, indistinguishable from one legitimately open for the call in progress — both are
+literally the same object at `stack.peek()`. Closing R1 needs a *second* piece of call-scoped state:
+something that marks a region "active for the call currently in flight" as opposed to merely
+"present", set only by the two disciplined callers (`ShreddingReadBracketCustomizer.Bracket.invoke`
+and `ShreddingContext.withReadBracket`) and consulted by `recordDecoded`. I prototyped the obvious
+shape — a second `ThreadLocal` depth counter incremented/decremented around those two call sites —
+and stopped: it reintroduces exactly the failure category `CipherProbeBracketUnwindTest` (C-32) exists
+to rule out for the *existing* region stack — an intermediate stack frame's own cleanup call failing
+under a `StackOverflowError` and leaving the counter stuck positive, which would make the new state
+leakable *authority* (a stuck-positive counter would keep authorising `recordDecoded` calls that
+should be refused) rather than the accusation-only state the class's own design principle requires.
+Arguing that a second counter is unwind-safe the way `popWrite`'s javadoc argues it for write scopes
+is real design work, not a data-loss fix, and building the mechanism without that argument is exactly
+the "mechanisms in fix lists" pattern module C's rounds two–four warn against.
+
+**Needs design stop.** Flagging R1 to Dollar/Thor rather than shipping a speculative fix. `S-4` is
+otherwise closed: the data-loss property ("an ownerless region serves nothing but this row's own,
+current value") holds; the missing-refusal property ("an ownerless region costs a refusal that should
+have been raised") does not, and is the same residual #21 already named.
+
+`CipherProbeRegionResidueTest.java` stays in `src/test-pending/java` for this reason — R2 is green,
+R1 is red, and the file is not moved until both are.
+
+The `S-1 / S-5` interaction this note would have flagged is #25 above, already resolved: `S-5`'s
+startup refusal is what made `CipherProbeBatchedInsertCheckTest`'s original fixture unstartable, and
+the probe is rewritten as a startup-refusal assertion rather than given a new fixture, since S-1's own
+property is independently carried by `BatchedWriteVerificationTest`'s seventeen probes.

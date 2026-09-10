@@ -375,7 +375,7 @@ support ticket or a PDF the application itself produced. Those are the applicati
 | Plaintext fallback on an unrecognised column | strict format, typed error, no lenient parse (controls 4 and 17) |
 | Master key in `/env`, `/configprops`, logs or `toString` | explicit exclusion, `byte[]` not `String`, never in a message (control 5) |
 | Unprovable erasure or false proof | key deletion and the record in one transaction (control 6) |
-| Key used after it was claimed by an erasure | state checked on read as well as write (control 7) |
+| Key used after it was claimed by an erasure | state checked on read as well as write (control 7). Costs one `SELECT` against `shredding_data_key` per decrypt - 200 statements for a 200-row page, measured above under "Cost" - because the cache holds key *material*, never *authority* (QUESTIONS #22, Cipher sixth pass): memoising this check per transaction would remove the statements but would cache authority, which is the one thing the read-path design took away from ambient state. Not removed. |
 | Rewritten erasure log | module B's keyed-from-birth chain, anchor row, append-only triggers (control 8) |
 | Enumerable subject hash in the log | HMAC pseudonym with an HKDF-separated pepper (control 9) |
 | Erased subject still searchable | erasure nulls the blind-index columns (control 10) |

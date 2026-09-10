@@ -1,5 +1,17 @@
 # STATUS — GDPR Shredding free core
 
+Sixth pass corrections (2026-09-10): Cipher's `## Sixth pass (75af7ea)` review of the read-path
+redesign found one HIGH design stop (S-1, `hibernate.jdbc.batch_size` silently switches off the
+insert-side post-hoc header check — left for Thor, a separate worktree, `S-1 DESIGN STOP`) and five
+corrections, S-2 to S-6. Isis closed S-2, S-3, S-5 and S-6 fully, and S-4 for its data-loss half (an
+ownerless region can now only ever serve this row's own, current value, never a stale one); S-4's
+missing-refusal half needs a design stop of its own — see QUESTIONS.md S-4. See the CHANGELOG's
+"Fixed (sixth pass corrections at `75af7ea`)" entry and QUESTIONS.md S-2/S-4/"S-1 / S-5 interaction"
+for the deviations and the one item still open. Also applied: the #22 doc correction, stating the
+per-decrypt key-state cost beside control 7 in `SECURITY-NOTES.md`. `./mvnw clean verify` green
+across all four modules (`gdpr-shredding`, `-core`, `-spring-boot-starter`, `-sample`); coverage
+gates held.
+
 Licensing (2026-09-08): free core switched from Apache-2.0 to FSL-1.1-ALv2 (Souhaile's decision); `LICENSE`/`NOTICE` added, `pom.xml` updated, `./mvnw -B clean verify` re-confirmed green.
 
 Re-verification (2026-09-09): Cipher's `## Re-verification (96713f9)` pass found 3 HIGH, 3 MEDIUM
