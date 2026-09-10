@@ -228,7 +228,10 @@ public final class ShreddingEventListener
    */
   private static void registerTransactionBoundaryClear(
       org.hibernate.engine.spi.SharedSessionContractImplementor session) {
-    ((org.hibernate.event.spi.EventSource) session)
+    // Not cast to EventSource: a StatelessSession write reaches this listener too and
+    // StatelessSessionImpl is not an EventSource. getTransactionCompletionCallbacks() is declared
+    // on SharedSessionContractImplementor, which both implement.
+    session
         .getTransactionCompletionCallbacks()
         .registerCallback(
             (org.hibernate.engine.spi.TransactionCompletionCallbacks.AfterCompletionCallback)
@@ -565,7 +568,10 @@ public final class ShreddingEventListener
             + " WHERE "
             + quote(idColumn)
             + " = ?";
-    ((org.hibernate.event.spi.EventSource) event.getSession())
+    // Not cast to EventSource: a StatelessSession insert of an IDENTITY-generated shredded entity
+    // reaches this rebind too, and StatelessSessionImpl is not an EventSource.
+    event
+        .getSession()
         .doWork(
             connection -> {
               try (PreparedStatement ps = connection.prepareStatement(sql)) {
