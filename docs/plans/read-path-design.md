@@ -412,3 +412,43 @@ ciphertext; a projection with no region; a forged placeholder in the column; a f
 `StackOverflowError`; a read after erasure with residue; the INSERT/UPDATE window under CDC and under rollback;
 single-column `@EmbeddedId`; `StatelessSession`; `merge`, `refresh`, `@SelectBeforeUpdate`, `OptimisticLockType.ALL`;
 a `Set` keyed on a shredded field; the 200-row count; every `CipherProbe*` unchanged.
+
+## Design addendum: insert-side binding under batching (2026-09-10)
+
+**Property.** *No row of a `@Shredded` entity commits whose stored header is not bound to that row's
+own id, subject and tenant — at any `hibernate.jdbc.batch_size`, on insert and on update.* With the
+corollary the built code lacks: **a check that could not run is a refusal, never a pass.** S-1 is not
+"the `SELECT` is in the wrong place"; it is `readStoredShreddedColumns` returning `null` and
+`refuseIfStoredHeadersDisagree` reading "I saw nothing" as "nothing is wrong".
+
+**Options.** (a) settle at flush completion from the ids the `Post*` events carry — one `SELECT` per
+entity per flush instead of one per row, which is §4's deferred optimisation, and needs "after the
+batch executed" proved rather than assumed. (b) `doWork` after `flush()` inside the same batch
+boundary — the module may not call `flush()` from inside the action queue (§3.1) and it would settle
+only the flush a caller happens to make: rejected. (c) refuse `batch_size > 0` at startup — complete
+and not a mechanism, but it deletes a real feature from every application holding one `@Shredded`
+entity, and it is per-`SessionFactory` while `session.setJdbcBatchSize` and `StatelessSession` are
+per-session, so it needs a runtime refusal too and is therefore not the two-line change it looks
+like. (d) bind the id before the `INSERT` and refuse `IDENTITY` under batching — removes the *rebind*
+read-back of §3.1, not the *verification* read-back of item 14, whose whole point is to catch a write
+this module's own bookkeeping got wrong (S-5's unconverted column, a residual scope). Not sufficient
+alone.
+
+**Recommendation: (a), with the fail-open closed — this is what makes it a property and not a
+mechanism.** Three parts. 1. Every bind records a **verification debt** on the session:
+`(entity, table, id column, id, expected tenant/subject/rowId)`. 2. Debts are settled in one
+`SELECT … WHERE id IN (…)` per entity at each settlement point: the end of every flush, after the
+action queue and the JDBC batch have run, **and** unconditionally at `beforeCompletion`. 3.
+**Settlement is total or the transaction aborts**: a debt whose row is absent at `beforeCompletion`,
+and any debt still outstanding when that synchronisation runs, is `SHRED-UNVERIFIED-WRITE`; a bind
+with no settlement anchor (no transaction to register on) is refused at bind time. A configuration
+knob can then no longer remove the control — it can only make it refuse. The existing per-row
+post-hoc check stays as belt and as early failure. (d)'s useful half is taken as a probed assumption,
+not a design: `IDENTITY` is asserted unbatchable by test, and refused at runtime if it ever is not.
+
+**Paths, one RED probe each before the hook:** batched `saveAll` (S-1's probe), `persist` in a loop,
+batched `UPDATE`, `StatelessSession.insert` with `setJdbcBatchSize`, `merge` of a new entity, cascade
+insert through a collection, `@BatchSize` collection then flush, `IDENTITY` under batching (rebind
+and settlement), assigned id, sequence id, two entities in one flush, `saveAndFlush` then a second
+flush, flush-then-rollback (nothing commits, nothing refused), a bind with no transaction, and bulk
+JPQL update, which fires no event and stays matrix row 15's `SHRED-CONTEXT-001`. Matrix rows 24-27.
