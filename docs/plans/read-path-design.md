@@ -950,3 +950,43 @@ stay cleared. Plus the K1 probe Cipher did not build:
 `probe_a_same_named_table_in_another_schema_earlier_on_the_search_path_is_not_touched` — a decoy
 `schema_note` in `public`, ahead of `app2` on `search_path`, holding a row with the same owner id
 and a live index column, which the erasure must leave untouched while clearing the real one.
+
+## Design addendum 4: column identifiers (2026-09-10)
+
+**Property (Cipher S-22, S-24).** *Every identifier this module interpolates into SQL addresses
+exactly the column Hibernate's mapping addresses, or startup refuses, naming the mapping.* Change 9
+established that for the table; the three column identifiers in the same statements got none of it,
+and the read-backs that exist to catch a mis-addressed write are built from the write's own text.
+
+- **§4a `ColumnRef`, core domain, mirroring `TableRef`.** One column, built **only** from the
+  persister's column mapping — `BasicValuedModelPart.getSelectionExpression()` for an attribute,
+  `getIdentifierMapping()`'s for the id — and never from `@Column(name)` or `@BlindIndex` text. No
+  case folding on any path: the mapping's case is the column's case. `sql()` renders it quoted the
+  way Hibernate quotes it for the same dialect, and admits no quote character in the name, so no
+  rendering can be closed early; `toString()` gives the bare name for messages. A selection
+  expression that is not a plain identifier (a formula) is refused, not rendered.
+- **§4b Annotation text is a lookup key, never an identifier.** `@BlindIndex(subjectColumn=...,
+  tenantColumn=...)` and `@Shredded`'s column are matched case-sensitively against the mapped
+  columns; the `ColumnRef` that reaches SQL is the matched mapping's, not the text. Startup refuses
+  a name the persister maps to no column (listing the columns it does map), a name it maps with
+  quoting this module cannot reproduce, and — unchanged — a name that resolves to more than one
+  property or to the identifier. `BlindIndexColumn.identifier`, `ShreddedModel.columnName(Field)`,
+  `ShreddedModel.unquote` and the two starter `quote()` helpers all go; `singleIdColumn` returns a
+  `ColumnRef`.
+- **§4c Every statement takes `TableRef` + `ColumnRef` and nothing else.** The blind-index `UPDATE`,
+  both `verifyCleared` queries, the post-hoc header read-back, the `IDENTITY` rebind and the
+  subject-immutability `SELECT` accept no `String` identifier in their signatures.
+- **§4d A read-back is not built from the text it verifies.** Same-text agreement is what let S-22
+  report `cleared=0, outcome=COMPLETE`. Two independent checks: (i) the `UPDATE`'s own row count is
+  compared against a count of the subject's rows obtained through Hibernate's own SQL (a criteria
+  count over the entity, subject and tenant bound as parameters) — matched-zero while Hibernate
+  sees rows is refused, not logged; (ii) the residual read-back selects through the persister's
+  column reference for the same attribute rather than re-rendering the erasure's string. A
+  disagreement fails the erasure closed; it never records `COMPLETE`.
+
+**Probes, written before the hook.** Cipher's five in `CipherProbeTenthPassTest`, promoted and green
+by their real assertions, plus: a reserved-word column mapped unquoted (`user`) as well as quoted; a
+mixed-case quoted column (`"Owner"`) with **no** mapped lowercase twin — the shape that slips
+today's "more than one property" rule; a quoted column whose name contains a dot; and a read-back
+independence probe that mutates the erasure's rendered SQL and asserts the verification still
+refuses. One test per path in §4b, per the framework integration rule.
