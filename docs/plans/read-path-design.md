@@ -513,7 +513,7 @@ epoch are residue". A region can carry an epoch *newer* than the thread's: an in
 and the outer call carries on. Under "older is residue" that leftover region is not older, so it is
 not residue, so it authorises - and it is the region on top, so it is the one every subsequent decode
 of the outer call is filed into. Equality refuses both directions and is the only predicate the
-property needs. It also takes wraparound off the table: at `TOKENS.incrementAndGet()` 2^63 is not
+property needs — **applied §2.1**. It also takes wraparound off the table: at `TOKENS.incrementAndGet()` 2^63 is not
 reachable by any workload, but an ordering test is the one shape where a single overflow inverts
 every comparison at once, and equality cannot be inverted.
 
@@ -538,7 +538,7 @@ name.
   of a real epoch; a `Region` captures the epoch in force at the moment it is constructed and never
   re-reads it; and every region access refuses when the thread's epoch is `NONE`. Public
   `openRegion()` either stamps `NONE` explicitly or stops being public and becomes reachable only
-  through the two entries. Only then is "a region opened outside either is residue by construction"
+  through the two entries — **applied §2.2**. Only then is "a region opened outside either is residue by construction"
   true as written - and only then does the residual shrink to the one case the addendum wants to
   concede, because a region-less read after an ordinary return now refuses instead of matching.
 
@@ -550,13 +550,13 @@ vanish, and the outer `closeRegion(outerToken)` finds its token no longer on the
 addendum's own probe list says must keep working. Sweep only regions whose epoch is not the epoch in
 force at entry; never one whose epoch equals it. And log what is swept at WARN with the count and
 the first `entity.field`, the way `pushBind` already does for a stale write scope: the sweep is the
-only moment an operator ever learns an undisciplined region existed at all.
+only moment an operator ever learns an undisciplined region existed at all. — **applied §2.3**
 
 **4. The check belongs at every region access, not only at `recordDecoded`.** `drain`,
 `pendingKeysFor` and `closeRegion` each read `stack.peek()` with no test of any kind. A decode
 recorded while the epoch matched and drained after it changed is the same fail-open one method
 later, and a `closeRegion` that unwinds a region it does not own is what makes residue reachable in
-the first place. One predicate in one private `currentRegion()`, four callers.
+the first place. One predicate in one private `currentRegion()`, four callers. — **applied §2.4**
 
 **5. Fix `unwindTo`'s silent discard before building the epoch, not after.** Reproduced on `e2c2bdd`:
 `CipherProbeSeventhPassTest.probe_an_inner_regions_undrained_decode_is_discarded_in_silence_by_the_outer_close`
@@ -566,12 +566,13 @@ addendum exists to handle - is dropped with its unverified decode inside it, and
 returns its result. `discardRegion` may drop unchecked; the original exception is the failure worth
 reporting. `closeRegion` may not: an intermediate region still holding a decode is
 `SHRED-READ-UNVERIFIED`, named the same way its own region's would be. The epoch is worth little on
-top of accounting that already loses a debt on the normal return path.
+top of accounting that already loses a debt on the normal return path. — **applied §2.5** (Isis's
+S-8 fix is the one this waits on; §2.5 says what was built instead and how the two merge)
 
 **6. Two probes to add to the list.** A raw `openRegion()` *inside* a proxied call is refused (change
 2's second case), and a raw `openRegion()` on a thread that has never entered an entry is refused
 (change 2's first case). The four already listed are right, and `CipherProbeBracketUnwindTest` stays
-unchanged at 0/200.
+unchanged at 0/200. — **applied §2.6**
 
 **The named residual: accepted - and no, the converter must not be made to refuse "when no proxied
 call is active".** The phrasing is the problem, not the position. `withReadBracket` is deliberately
@@ -592,4 +593,54 @@ decode for it.
 **Async, for the record.** Both `REGIONS` and the new epoch must be plain `ThreadLocal`s, never
 `InheritableThreadLocal` and never anything a task decorator can copy: an inherited epoch would match
 an inherited region and authorise the one case the design gets for free today. Worth a line of
-javadoc, since the failure mode of getting this wrong is silent.
+javadoc, since the failure mode of getting this wrong is silent. — **applied §2.2** (the javadoc on
+`EPOCH` says exactly this)
+
+### Addendum 2 as built (2026-09-10)
+
+**§2.1 Equality, never age.** `currentRegion()` is `top.epoch == EPOCH.get() && EPOCH.get() !=
+NO_ENTRY`. There is no `<`, no `>` and no arithmetic on an epoch anywhere in the class, so neither a
+newer leftover nor a wraparound has a direction to exploit.
+
+**§2.2 `NO_ENTRY`, and the two writers.** `NO_ENTRY` is `0L`; `TOKENS.incrementAndGet()` never
+returns it, so no entry can ever assign it. `enterRegion()` is the only method that stamps a real
+epoch and it has exactly two callers - `ShreddingReadBracketCustomizer.Bracket#invoke` and
+`withReadBracket`. `openRegion()` stays public (removing it is a breaking change, and the unwind
+probes build residue with it) but stamps `NO_ENTRY` explicitly and is `@Deprecated`; a region it
+opens can never be the current region, on a thread that never entered *or* inside a proxied call,
+and its own `closeRegion` is refused. `EPOCH` and `REGIONS` are both plain `ThreadLocal`s, and the
+javadoc says why.
+
+**§2.3 The sweep, conditional and loud.** `enterRegion()` discards regions on top whose epoch is not
+the epoch in force *at entry*, stopping at the first one that matches: a nested call never touches
+its caller's live region. What it discards it names at WARN, with the count and the first
+`entity.field`. *Deviation, stated:* Cipher's rule is applied literally, so a `NO_ENTRY` region left
+on a thread where nothing is in force (`NO_ENTRY == NO_ENTRY`) is not swept. It can serve nothing
+(§2.4) and the enclosing unwind pops it; QUESTIONS S-4 records the option of sweeping it too, for
+Cipher to rule on.
+
+**§2.4 One predicate, four callers.** `recordDecoded` refuses (`SHRED-READ-UNSCOPED`, message
+extended to name the residue case), `drain` returns empty, `pendingKeysFor` returns empty - an empty
+drain is what `onPostLoad` turns into `SHRED-READ-UNVERIFIED`, so the read still refuses, in the
+verifier's vocabulary rather than the converter's - and `closeRegion` refuses.
+
+**§2.5 The close, and the merge with S-8.** Isis had not pushed S-8 within the agreed hour (Dollar
+told), so this is built on a *separate method*: `closeRegion` keeps its body and calls
+`refuseIfClosedUnderAnotherEntry(region, epochAtClose)` as its **last** statement, after the region's
+own unpaid-debt refusal, so S-8's more specific message wins wherever both apply. The epoch in force
+is captured *before* the unwind. The one line inside `unwindTo` is `restoreEpoch(region)`, and its
+javadoc states the contract for whoever writes the next unwind path: **every pop of an entry region
+must restore.** A merge that drops it fails
+`CipherProbeRegionEpochTest.probe_an_inner_entry_and_its_caller_each_serve_only_their_own_decodes`
+and `CipherProbeReadScopeTest`'s nested probe immediately.
+
+**§2.6 Probes.** `CipherProbeRegionResidueTest` promoted from `src/test-pending` (S-4 R1 and R2,
+green; R1 is now the stronger statement that the ownerless region cannot even be *armed*).
+`CipherProbeRegionEpochTest`, six probes: a raw region on a never-entered thread; a raw region inside
+an entry (S-4 itself), including `drain` and `pendingKeysFor`; closing a region opened outside an
+entry; an inner entry and its caller each serving only their own decodes; the conditional sweep with
+its WARN asserted; an inner entry that never restored the epoch refusing its caller's close.
+`CipherProbeReadScopeTest` gains the two on the real read path: a repository call nested inside a
+read bracket, and a raw region opened mid-call refusing that call's later decodes.
+`CipherProbeBracketUnwindTest` unchanged: 0/200 write-scope leaks, 0/200 region drains, no
+plaintext.

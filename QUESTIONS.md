@@ -526,7 +526,7 @@ exist. See CHANGELOG's "Fixed (fifth pass at `2f72449`)" entry, C-38, and
 `SECURITY-NOTES.md`'s "A `@Shredded` entity with a composite identifier is refused at startup, not on
 the first read (C-38)".
 
-## #21 A read region left behind by a `StackOverflowError` still reads as "open" (open — for Cipher)
+## #21 A read region left behind by a `StackOverflowError` still reads as "open" (narrowed by S-4's epoch, 2026-09-10; the remainder accepted)
 
 **The residual.** Cipher's item 4 is implemented: a frame entry carries the token of the region that
 recorded it, a drain happens only under the region currently in force, and a foreign-token entry is
@@ -552,6 +552,15 @@ I would not pay without being asked to.
 region can cost a refusal, never a value*. If Cipher wants it closed, the cheapest sound option I
 see is a `StackWalker`-derived depth recorded at `openRegion()` and compared at `recordDecoded()`;
 say so and I will measure the cost and build it.
+
+**Narrowed, then accepted (Thor, 2026-09-10, S-4 / addendum 2).** The liveness signal turned out not
+to need a `StackWalker` and Cipher ruled the `StackWalker` out explicitly: the entry epoch answers
+"is a bracketed entry in force on this thread", with one `long` and no Hibernate or Spring state
+consulted. A region left on the deque by a returned call now carries an epoch that is not the one in
+force, and a region opened outside an entry carries `NO_ENTRY`, so both refuse. What remains is only
+the case where an `Error` skipped exactly the frame that restores the epoch, before the next entry -
+the same window `popWrite`'s javadoc concedes for write scopes. Accepted, in Cipher's words, in
+`SECURITY-NOTES.md` under "Region residue": **a leaked region costs a refusal, never a value.**
 
 ## #22 The per-decrypt key-state check is 200 statements on a 200-row page (open — for Cipher)
 
@@ -747,7 +756,7 @@ declared, honoured shape.
 
 ---
 
-## S-4 The ownerless-region residual: closed for the value half, open for the refusal half — needs design stop for the refusal half
+## S-4 The ownerless-region residual — CLOSED (built, 2026-09-10). History kept below.
 
 **What closed.** `drain` took `entries.remove(0)` — the oldest pending decode under a key — so an
 ownerless region left on the thread's deque by an undisciplined direct call to the public
@@ -803,6 +812,37 @@ difference between accumulated and replaced state: a depth counter is the sum of
 exit and one missed exit is stuck-positive *authority*, while an epoch is overwritten unconditionally
 at the next entry, so a missed restore lands in the refusing direction. S-4 stays **open** pending
 Cipher's review of the design: the instruction for option (b) is to stop after the addendum.
+
+**Closed (Thor, 2026-09-10).** Cipher approved addendum 2 with six changes and all six are built;
+`docs/plans/read-path-design.md` marks each one "applied §2.x" and its "Addendum 2 as built" section
+says what each became. The refusal half now holds: a decrypt is served only inside a region opened by
+the bracketed entry that is reading, compared by **epoch equality**, so R1 - a decode with no region
+of its own, with an ownerless region on the deque - is refused, and the ownerless region cannot even
+be *armed* through the public API any more. `CipherProbeRegionResidueTest` is out of
+`src/test-pending` with both probes green; `CipherProbeRegionEpochTest` carries the six new ones;
+`CipherProbeBracketUnwindTest` is unchanged at 0/200. The residual that remains is #21's, restated in
+`SECURITY-NOTES.md` in Cipher's words - an `Error` that skips exactly the epoch-restoring frame,
+before the next entry - and **a leaked region costs a refusal, never a value.**
+
+**S-4a, one open question for Cipher (recommended answer: sweep it too).** Change 3 says "sweep only
+regions whose epoch is not the epoch in force at entry; never one whose epoch equals it". Applied
+literally, a `NO_ENTRY` region left on a thread where nothing is in force compares equal to
+`NO_ENTRY` and is *not* swept. It is harmless - a `NO_ENTRY` region is never the current region, so
+it can serve nothing, and the enclosing unwind pops it - but it is also exactly the undisciplined
+state the WARN exists to make visible. I recommend widening the sweep predicate to "sweep any region
+that is not the region the frame in force owns", which is `currentRegion() == null` and still never
+touches a caller's live region. Not built: it is Cipher's rule to widen, not mine.
+
+**S-4b, coordination, for the record.** Cipher's change 5 asks that Isis's S-8 fix land first. It had
+not been pushed at the agreed hour (Dollar told), so the epoch's close half is built as a separate
+method - `refuseIfClosedUnderAnotherEntry`, called as `closeRegion`'s **last** statement, after the
+region's own unpaid-debt refusal, so S-8's more specific message wins wherever both apply. Isis's
+in-progress S-8 replaces `closeRegion`'s call to `unwindTo` with an inline loop; that loop **must**
+call `restoreEpoch(region)` for every region it pops, as `unwindTo`'s javadoc now states. A merge
+that drops it leaves the thread's entry epoch naming a frame that has returned and fails
+`CipherProbeRegionEpochTest.probe_an_inner_entry_and_its_caller_each_serve_only_their_own_decodes`
+and `CipherProbeReadScopeTest.probe_a_repository_call_nested_inside_a_read_bracket_leaves_the_outer_region_alone`
+at once.
 
 The `S-1 / S-5` interaction this note would have flagged is #25 above, already resolved: `S-5`'s
 startup refusal is what made `CipherProbeBatchedInsertCheckTest`'s original fixture unstartable, and

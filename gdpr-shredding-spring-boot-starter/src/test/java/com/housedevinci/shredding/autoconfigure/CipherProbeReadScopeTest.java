@@ -10,9 +10,11 @@ import com.housedevinci.shredding.autoconfigure.fixture.Widget;
 import com.housedevinci.shredding.autoconfigure.fixture.WidgetRepository;
 import com.housedevinci.shredding.domain.ErrorCodes;
 import com.housedevinci.shredding.domain.ShreddingException;
+import com.housedevinci.shredding.jpa.ShreddingContext;
 import jakarta.persistence.EntityManager;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.SpringBootConfiguration;
@@ -237,6 +239,88 @@ class CipherProbeReadScopeTest {
               return docs.findByOwnerId(bob).get(0).getBody();
             });
     assertThat(bobBody).isEqualTo("bob body");
+  }
+
+  // -- design addendum 2: the entry epoch, on the real read path -------------------------------
+
+  /**
+   * Addendum 2 change 3. The nested case has to keep working, and it is the case an unconditional
+   * sweep would have broken: a repository call made from inside another bracketed entry opens its
+   * own region, and the outer call's region - same thread, one epoch older - must survive it with
+   * its own pending decodes intact.
+   *
+   * <p>Both values come back in plaintext and neither call refuses. Before the epoch, the two
+   * regions were told apart by nothing at all; with an unconditional sweep, the inner call would
+   * have destroyed the outer region and the outer close would have raised {@code
+   * SHRED-READ-UNVERIFIED} on every nested repository call in the application.
+   */
+  @Test
+  void probe_a_repository_call_nested_inside_a_read_bracket_leaves_the_outer_region_alone() {
+    String owner = "nested-outer-" + System.nanoTime();
+    String other = "nested-inner-" + System.nanoTime();
+    transactions.executeWithoutResult(
+        s -> {
+          docs.save(new Doc(owner, "OUTER-TITLE", "outer body"));
+          docs.save(new Doc(other, "INNER-TITLE", "inner body"));
+        });
+
+    var seen =
+        transactions.execute(
+            s -> {
+              entityManager.clear();
+              return ShreddingContext.withReadBracket(
+                  () -> {
+                    Doc outer =
+                        entityManager
+                            .createQuery("select d from Doc d where d.ownerId = :o", Doc.class)
+                            .setParameter("o", owner)
+                            .getSingleResult();
+                    // a repository call - a second, nested bracketed entry - in the middle of it
+                    String innerTitle = docs.findByOwnerId(other).get(0).getTitle();
+                    // and the outer region still serves the outer call's own lazy work
+                    entityManager.refresh(outer);
+                    return List.of(outer.getTitle(), innerTitle, outer.getBody());
+                  });
+            });
+    assertThat(seen).containsExactly("OUTER-TITLE", "INNER-TITLE", "outer body");
+  }
+
+  /**
+   * Addendum 2 change 2, second case, on the real read path. A region opened directly with {@code
+   * ShreddingContext.openRegion()} from inside a call - what a user {@code @PostLoad} method, an
+   * {@code @EntityListeners} bean or a hand-written DAO reached from a repository default method
+   * can do - sits on top of the deque and would otherwise take every remaining decode of that call
+   * and hand it back at drain time with nothing verifying it. It carries no entry epoch, so the
+   * decrypt behind it is refused: the call fails closed instead of being served out of a region
+   * nobody owns. This is S-4 itself.
+   */
+  @Test
+  void probe_a_raw_region_opened_inside_a_call_refuses_that_calls_later_decodes() {
+    String owner = "raw-region-" + System.nanoTime();
+    transactions.executeWithoutResult(s -> docs.save(new Doc(owner, "RAW-TITLE", "raw body")));
+
+    assertThatThrownBy(
+            () ->
+                transactions.execute(
+                    s -> {
+                      entityManager.clear();
+                      return ShreddingContext.withReadBracket(
+                          () -> {
+                            Doc doc =
+                                entityManager
+                                    .createQuery(
+                                        "select d from Doc d where d.ownerId = :o", Doc.class)
+                                    .setParameter("o", owner)
+                                    .getSingleResult();
+                            assertThat(doc.getTitle()).isEqualTo("RAW-TITLE");
+                            // the undisciplined region, opened mid-call and never closed
+                            long raw = ShreddingContext.openRegion();
+                            assertThat(raw).isPositive();
+                            entityManager.clear();
+                            return entityManager.find(Doc.class, doc.getId()).getTitle();
+                          });
+                    }))
+        .satisfies(t -> assertThat(shreddingCode(t)).isEqualTo(ErrorCodes.READ_UNSCOPED));
   }
 
   private void moveColumn(String table, String column, String fromOwner, String toOwner)

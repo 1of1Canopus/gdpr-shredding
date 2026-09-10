@@ -10,14 +10,18 @@ S-4 R1 is unblocked once those land, and is not counted as a finding this pass. 
 `docs/SECURITY-REVIEW-feat-shredding-core.md`, "Seventh pass (e2c2bdd)".
 
 
-**S-4 (region residue) — BLOCKED on Cipher, design only (Thor, 2026-09-10).** The design stop is
-taken and pushed: `docs/plans/read-path-design.md`, "Design addendum 2: region residue", weighs
-session/transaction binding, an epoch stamped at proxy entry, and an entry-time sweep, and recommends
-the **epoch** with the sweep as a free complement. The other two leave S-4's R1 probe red on the
-evidence, not on taste. No mechanism was built: the instruction for this recommendation is that
-Cipher reviews the design before anything is written. `CipherProbeRegionResidueTest.java` therefore
-stays in `src/test-pending/java` and S-4 stays open in QUESTIONS.md. No production code changed on
-this commit; the tree is otherwise `9f9f9b1`.
+**S-4 (region residue) — CLOSED, built (Thor, 2026-09-10).** Design addendum 2 was approved with six
+changes and all six are built and marked "applied §2.x" in `docs/plans/read-path-design.md`: epochs
+compared for equality only; a distinguished `NO_ENTRY` epoch that public `openRegion()` stamps
+explicitly (and `enterRegion()` added for the two real entries); the entry-time sweep made
+epoch-conditional and loud at `WARN`; the predicate moved into one private `currentRegion()` used by
+`recordDecoded`, `drain`, `pendingKeysFor` and `closeRegion`; the close half built as a separate
+method (`refuseIfClosedUnderAnotherEntry`, called last) so it merges cleanly with Isis's S-8 fix,
+which had not landed at the agreed hour; and the two probes Cipher listed. `CipherProbeRegionResidueTest`
+is promoted out of `src/test-pending` and green, `CipherProbeRegionEpochTest` adds six,
+`CipherProbeReadScopeTest` two on the real read path, and `CipherProbeBracketUnwindTest` is unchanged
+at 0/200. The one residual is stated in `SECURITY-NOTES.md` in Cipher's words: **a leaked region
+costs a refusal, never a value.**
 
 Sixth pass corrections (2026-09-10): Cipher's `## Sixth pass (75af7ea)` review of the read-path
 redesign found one HIGH design stop (S-1, `hibernate.jdbc.batch_size` silently switches off the
@@ -123,9 +127,9 @@ Full `./mvnw -B clean verify` green with Docker up.
 | Module | Tests | Notes |
 |---|---|---|
 | `gdpr-shredding-core` | 92 | includes the CIPHER-01/02/03/04/05/10/15 probes, the Testcontainers PostgreSQL suite, and the sixth pass's `RowIdTest` (7), `EncryptedValueV2Test` (4) and `FieldCipherRowBindingTest` (4) |
-| `gdpr-shredding-spring-boot-starter` | 88 | includes the sixth pass's `FrameworkMatrixTest` (13, the §2 matrix), `LoadedStateHostileMappingsTest` (3, the D4 startup refusals), and the six promoted fifth-pass probes - `CipherProbeFifthPassTest` (3: C-33/C-34/C-35), `CipherProbeEvictionTest` (1: C-36), `CipherProbeBracketUnwindTest` (4); and `ShreddingIntegrationTest` (real Hibernate/Testcontainers coverage of the event listener, the context stack and the auto-configuration bean graph), `CipherProbeSpelTest`'s L12 probe, the third pass's `CipherProbeReadScopeTest` (C-17/18/22/23/C-30), `CipherProbeReverseScanTest` (C-19, isolated context), `CipherProbeMatrixTest`/`CipherProbeMatrix2Test` (the read-path and `@Immutable` sweeps, C-20/21/C-31), the fourth pass's `CipherProbeFrameTest` (C-26/C-27, six probes) and `CipherProbeEmbeddableScanTest` (C-29, two probes: `@Embedded` and `@ElementCollection`), and the fifth pass's `CipherProbeScanDepthTest` (C-37, four probes: two levels of `@Embeddable`, an `@ElementCollection` of basic values, and the map-key index descriptor) and `CipherProbeCompositeIdTest` (C-38, two probes) |
+| `gdpr-shredding-spring-boot-starter` | 121 | includes the sixth pass's `FrameworkMatrixTest` (13, the §2 matrix), `LoadedStateHostileMappingsTest` (3, the D4 startup refusals), and the six promoted fifth-pass probes - `CipherProbeFifthPassTest` (3: C-33/C-34/C-35), `CipherProbeEvictionTest` (1: C-36), `CipherProbeBracketUnwindTest` (4); and `ShreddingIntegrationTest` (real Hibernate/Testcontainers coverage of the event listener, the context stack and the auto-configuration bean graph), `CipherProbeSpelTest`'s L12 probe, the third pass's `CipherProbeReadScopeTest` (C-17/18/22/23/C-30), `CipherProbeReverseScanTest` (C-19, isolated context), `CipherProbeMatrixTest`/`CipherProbeMatrix2Test` (the read-path and `@Immutable` sweeps, C-20/21/C-31), the fourth pass's `CipherProbeFrameTest` (C-26/C-27, six probes) and `CipherProbeEmbeddableScanTest` (C-29, two probes: `@Embedded` and `@ElementCollection`), and the fifth pass's `CipherProbeScanDepthTest` (C-37, four probes: two levels of `@Embeddable`, an `@ElementCollection` of basic values, and the map-key index descriptor) and `CipherProbeCompositeIdTest` (C-38, two probes); and the seventh pass's region-residue set - `CipherProbeRegionEpochTest` (6), `CipherProbeRegionResidueTest` (2, promoted from `src/test-pending`) and two more in `CipherProbeReadScopeTest` |
 | `gdpr-shredding-sample` | 17 | includes the CIPHER-01 (moved-blob), QUESTIONS #4 (detached-merge, now wrapped in `ShreddingContext.withReadBracket`), CIPHER-08 (stale-scope), the live-actuator and the log-scan probes |
-| **total** | **197** | |
+| **total** | **230** | |
 
 Nothing is skipped and nothing is `@Disabled`.
 
@@ -134,7 +138,7 @@ Nothing is skipped and nothing is `@Disabled`.
 | Module | Covered / Total | % | Gate |
 |---|---|---|---|
 | `gdpr-shredding-core` | — | 85.3% | 80% |
-| `gdpr-shredding-spring-boot-starter` | — | 85.1% | 80% |
+| `gdpr-shredding-spring-boot-starter` | — | 88.1% | 80% |
 | `gdpr-shredding-sample` | 63 / 95 | 66.3% | 30% smoke gate (L2) |
 
 The JaCoCo executions moved from `gdpr-shredding-core`'s own POM to the parent's
@@ -337,6 +341,18 @@ shredded write is fixed in the same branch. **S-2 to S-6 are Isis's, in the main
 not touched here.** Open: QUESTIONS #25 (S-1's own probe collides with S-5's startup refusal and is
 therefore left in `src/test-pending`, green), #26 (ledger cost on a stateless import), #27 (three
 deliberately unreachable lines).
+
+Seventh pass - S-4, region residue (2026-09-10, Thor). Design addendum 2 was approved with six
+changes; all six are built, each marked "applied §2.x" in `docs/plans/read-path-design.md`, with an
+"Addendum 2 as built" section stating what each one became. One deviation is stated rather than
+hidden: Cipher's sweep rule is applied literally, so a `NO_ENTRY` region left on a thread where
+nothing is in force is not swept - it can serve nothing and the enclosing unwind pops it - and
+QUESTIONS S-4 records the option of sweeping it too, for Cipher to rule on. The close half is built
+as a separate method called last in `closeRegion`, because Isis's S-8 fix (which rewrites
+`closeRegion`'s unwind inline) had not been pushed at the agreed hour; Dollar was told. The one line
+this adds inside `unwindTo` - `restoreEpoch(region)` - carries the contract in javadoc, and two
+nested probes fail immediately if a merge drops it. `./mvnw verify` green in the worktree and in a
+fresh clone; coverage gates held; nothing skipped.
 
 ## Deliberately not done
 

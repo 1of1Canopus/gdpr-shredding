@@ -305,8 +305,11 @@ public final class ShreddingContext {
    * by an earlier caller that never closed it - the public, unpaired {@link #openRegion()} makes
    * that state reachable (QUESTIONS #21) - and doing that soundly needs a second piece of
    * call-scoped state whose own unwind-safety would have to be argued from scratch, the same way
-   * {@link #popWrite(long)}'s javadoc argues it for write scopes. That is a new mechanism, not a
-   * correction, and it is not in this fix: see QUESTIONS.md S-4.
+   * {@link #popWrite(long)}'s javadoc argues it for write scopes.
+   *
+   * <p>That second piece of state is now the entry epoch (design addendum 2), and it is what makes
+   * the distinction: the region a decode may use is the one this thread's bracketed <em>entry</em>
+   * opened, compared by epoch equality, and nothing else on the deque is reachable at all.
    */
   private record Pending(byte[] plaintext) {}
 
@@ -319,10 +322,35 @@ public final class ShreddingContext {
    */
   private static final class Region {
     private final long token;
+
+    /**
+     * The entry epoch in force at the moment this region was constructed, captured once and never
+     * re-read (addendum 2 change 2). {@link #NO_ENTRY} for a region opened by the public {@link
+     * #openRegion()} outside any entry: such a region can never serve a decode.
+     */
+    private final long epoch;
+
+    /** For an entry region, the epoch to put back on the thread when this region unwinds. */
+    private final long previousEpoch;
+
     private final Map<FrameKey, List<Pending>> pending = new HashMap<>();
 
-    Region(long token) {
+    Region(long token, long epoch, long previousEpoch) {
       this.token = token;
+      this.epoch = epoch;
+      this.previousEpoch = previousEpoch;
+    }
+
+    boolean isEntry() {
+      return epoch != NO_ENTRY;
+    }
+
+    String firstPendingName() {
+      if (pending.isEmpty()) {
+        return null;
+      }
+      FrameKey first = pending.keySet().iterator().next();
+      return first.entity() + "." + first.field();
     }
 
     int total() {
@@ -333,11 +361,125 @@ public final class ShreddingContext {
   private static final ThreadLocal<Deque<Region>> REGIONS =
       ThreadLocal.withInitial(ArrayDeque::new);
 
-  /** Reentrant: a repository call can trigger a lazy load of another shredded entity. */
+  /**
+   * "No bracketed entry is in force on this thread". Never assigned to a region by an entry: {@link
+   * #TOKENS} starts at zero and {@code incrementAndGet()} never returns it.
+   */
+  private static final long NO_ENTRY = 0L;
+
+  /**
+   * Which bracketed entry is in force on this thread (design addendum 2, option (b)).
+   *
+   * <p>An <em>epoch</em>, not a depth counter. A counter is accumulated state, so one exit missed
+   * under a {@link StackOverflowError} (C-32) is permanently wrong in the <em>permissive</em>
+   * direction - stuck positive, still authorising. An epoch is replaced state: {@link
+   * #enterRegion()} assigns a fresh value unconditionally, nothing accumulates, and a missed
+   * restore is overwritten by the next entry in the <em>refusing</em> direction, because a region
+   * stamped with any other epoch is thereby residue. Correctness on entry, never on exit - {@link
+   * #pushWrite}'s own argument.
+   *
+   * <p>Compared for <strong>equality only, never for age</strong> (Cipher, addendum 2 change 1). A
+   * leftover region can carry an epoch <em>newer</em> than the thread's: an inner entry stamps
+   * {@code n+1}, an {@link Error} inside it leaves its region on the deque, the outer frame's
+   * restore puts {@code n} back and the outer call carries on. Under "older is residue" that
+   * leftover is not older, so it would authorise - and it is the region on top, so it is the one
+   * every later decode of the outer call would be filed into. Equality refuses both directions, and
+   * takes overflow off the table: an ordering test is the one shape where a single wraparound
+   * inverts every comparison at once.
+   *
+   * <p>A plain {@link ThreadLocal}, never an {@code InheritableThreadLocal} and never anything a
+   * task decorator may copy - both this and {@link #REGIONS}. An inherited epoch would match an
+   * inherited region and authorise the one case the design gets for free today, silently.
+   */
+  private static final ThreadLocal<Long> EPOCH = ThreadLocal.withInitial(() -> NO_ENTRY);
+
+  /**
+   * Opens a read region for a <em>bracketed entry</em> - the repository proxy or {@link
+   * #withReadBracket} - stamping a fresh epoch for the call. These two are the only writers of a
+   * real epoch in the module; every other way of getting a region on the deque produces one that
+   * can never serve (see {@link #openRegion()}).
+   *
+   * <p>Before opening, any region on top whose epoch is not the epoch in force <em>at entry</em> is
+   * discarded, at WARN with the count and the first {@code entity.field} (addendum 2 change 3, the
+   * complement (c) of option (b)): it bounds the residual to "no entry since the failed restore",
+   * and the sweep is the only moment an operator ever learns an undisciplined region existed. The
+   * comparison is against the epoch in force at entry and not against the fresh one, because a
+   * nested repository call must not destroy the outer call's still-live region - its pending
+   * decodes would vanish and the outer close would refuse, on every nested call in the application.
+   *
+   * @return the token that closes this region, which is also the token {@link #closeRegion(long)}
+   *     and {@link #discardRegion(long)} take
+   */
+  public static long enterRegion() {
+    Deque<Region> stack = REGIONS.get();
+    long inForce = EPOCH.get();
+    sweepForeignRegions(stack, inForce);
+    long epoch = TOKENS.incrementAndGet();
+    long token = TOKENS.incrementAndGet();
+    stack.push(new Region(token, epoch, inForce));
+    EPOCH.set(epoch);
+    return token;
+  }
+
+  /**
+   * Opens a region that authorises nothing (addendum 2 change 2).
+   *
+   * <p>It is stamped {@link #NO_ENTRY} explicitly rather than with the epoch in force, and every
+   * region access refuses a region whose epoch is not the thread's current entry epoch, so neither
+   * of the two shapes Cipher named can serve a decode: a raw call on a thread that never entered an
+   * entry (where "the initial value" would otherwise compare equal to itself and authorise), and a
+   * raw call from <em>inside</em> a proxied call - a user {@code @PostLoad} method, an
+   * {@code @EntityListeners} bean, a hand-written DAO reached from a repository default method -
+   * whose region would otherwise sit on top of the deque and take every remaining decode of that
+   * call. That second shape is S-4 itself.
+   *
+   * <p>Kept public only because unpaired region bookkeeping is observable in tests and because
+   * removing a published method is a breaking change; there is no use for it in an application.
+   * {@link #withReadBracket} is the supported entry, and {@link #closeRegion(long)} refuses a
+   * region opened this way.
+   *
+   * @deprecated use {@link #withReadBracket} (applications) or {@link #enterRegion()} (a framework
+   *     integration that owns the call boundary). A region opened here can never serve a decode.
+   */
+  @Deprecated(since = "0.1.0")
   public static long openRegion() {
     long token = TOKENS.incrementAndGet();
-    REGIONS.get().push(new Region(token));
+    REGIONS.get().push(new Region(token, NO_ENTRY, NO_ENTRY));
     return token;
+  }
+
+  private static void sweepForeignRegions(Deque<Region> stack, long inForce) {
+    int swept = 0;
+    String first = null;
+    while (!stack.isEmpty() && stack.peek().epoch != inForce) {
+      Region region = stack.pop();
+      swept++;
+      if (first == null) {
+        first = region.firstPendingName();
+      }
+    }
+    if (swept > 0) {
+      log.warn(
+          "shredding: dropping {} read region(s) left on this thread by a call that never closed"
+              + " them{}; their decrypts were never verified and nothing was installed from them",
+          swept,
+          first == null ? "" : ", the first holding " + first);
+    }
+  }
+
+  /**
+   * The one region a decode may be filed into, drained from or counted in on this thread, or {@code
+   * null} (addendum 2 change 4: one predicate, four callers). A region access with no bracketed
+   * entry in force, or against a region stamped by another entry, is not a region access at all -
+   * it is residue reaching for authority.
+   */
+  private static Region currentRegion() {
+    Region top = REGIONS.get().peek();
+    if (top == null) {
+      return null;
+    }
+    long inForce = EPOCH.get();
+    return inForce != NO_ENTRY && top.epoch == inForce ? top : null;
   }
 
   /**
@@ -349,6 +491,7 @@ public final class ShreddingContext {
    * region, and continuing as if the close had happened would let the next call inherit it.
    */
   public static void closeRegion(long token) {
+    long epochAtClose = EPOCH.get();
     Region region = unwindTo(token);
     if (region == null) {
       throw new ShreddingException(
@@ -374,6 +517,33 @@ public final class ShreddingContext {
               + " converter without going through an entity load, is refused rather than returned."
               + " Nothing was handed back: the converter returns a placeholder, never the value.");
     }
+    refuseIfClosedUnderAnotherEntry(region, epochAtClose);
+  }
+
+  /**
+   * Addendum 2 change 4, the close half. A region is closed by the entry that opened it or by
+   * nobody: closing one stamped by another entry means the epoch in force is not the one this
+   * region was opened under - an inner entry whose restore was skipped, or a region opened outside
+   * any entry at all - and the decrypts it was accountable for cannot be shown to have been
+   * verified by the call that is now returning.
+   *
+   * <p>Deliberately last, after the region's own unpaid-debt refusal: where both apply, the debt is
+   * the more specific report and names the field.
+   */
+  private static void refuseIfClosedUnderAnotherEntry(Region region, long epochAtClose) {
+    if (epochAtClose != NO_ENTRY && region.epoch == epochAtClose) {
+      return;
+    }
+    throw new ShreddingException(
+        ErrorCodes.READ_UNVERIFIED,
+        "a read region was closed by something other than the bracketed entry that opened it"
+            + (region.isEntry()
+                ? ". An inner region's unwind did not put this thread's entry epoch back - an Error"
+                    + " between the entry and its close - so this close cannot be shown to belong"
+                    + " to the call that opened the region."
+                : ". The region was opened by ShreddingContext.openRegion() outside any repository"
+                    + " call or ShreddingContext.withReadBracket(...), which stamps no entry epoch"
+                    + " and can therefore never have served a decrypt."));
   }
 
   /**
@@ -386,11 +556,23 @@ public final class ShreddingContext {
     unwindTo(token);
   }
 
+  /**
+   * Pops regions down to {@code token}, restoring the entry epoch of every one it pops.
+   *
+   * <p><strong>Contract for anything that unwinds the region deque, here or elsewhere.</strong>
+   * Every pop must be paired with {@link #restoreEpoch(Region)}. An unwind that pops an entry
+   * region without restoring leaves this thread's entry epoch naming a frame that has already
+   * returned, and every later region access on that thread compares against it and refuses - fail
+   * closed, but wrong, and wrong for the whole rest of the thread's life. The nested probes in
+   * {@code CipherProbeRegionEpochTest} and {@code CipherProbeReadScopeTest} fail immediately if a
+   * second unwind path is ever added without the restore.
+   */
   private static Region unwindTo(long token) {
     Deque<Region> stack = REGIONS.get();
     Region found = null;
     while (!stack.isEmpty()) {
       Region region = stack.pop();
+      restoreEpoch(region);
       if (region.token == token) {
         found = region;
         break;
@@ -402,7 +584,29 @@ public final class ShreddingContext {
     return found;
   }
 
-  /** Whether a read region is open. An accusation, never an authority: see the class javadoc. */
+  /**
+   * Puts back the epoch an entry region was opened under. Called for every region an unwind pops,
+   * so the value left on the thread is the one belonging to the frame being returned to, whether
+   * the unwind stopped at its token or ran past it. A region that is not an entry carries no epoch
+   * of its own and restores nothing.
+   */
+  private static void restoreEpoch(Region region) {
+    if (!region.isEntry()) {
+      return;
+    }
+    if (region.previousEpoch == NO_ENTRY) {
+      EPOCH.remove();
+    } else {
+      EPOCH.set(region.previousEpoch);
+    }
+  }
+
+  /**
+   * Whether a read region is open. An accusation, never an authority: see the class javadoc. Says
+   * nothing about whether that region may serve anything - a region left behind by a call that
+   * never closed it, and a region opened by {@link #openRegion()}, are both "open" here and are
+   * both refused by every access.
+   */
   public static boolean inReadBracket() {
     return !REGIONS.get().isEmpty();
   }
@@ -420,7 +624,7 @@ public final class ShreddingContext {
    * <p>C-32: the region unwinds on any {@link Throwable}, not only a {@link RuntimeException}.
    */
   public static <T> T withReadBracket(java.util.function.Supplier<T> body) {
-    long token = openRegion();
+    long token = enterRegion();
     boolean threw = true;
     try {
       T result = body.get();
@@ -446,8 +650,8 @@ public final class ShreddingContext {
    *     repository call returned, or an {@code @Async} continuation.
    */
   public static void recordDecoded(FrameKey key, byte[] plaintext) {
-    Deque<Region> stack = REGIONS.get();
-    if (stack.isEmpty()) {
+    Region region = currentRegion();
+    if (region == null) {
       throw new ShreddingException(
           ErrorCodes.READ_UNSCOPED,
           "no read region while decrypting "
@@ -465,9 +669,11 @@ public final class ShreddingContext {
               + " own EntityManager rather than a Spring Data Repository, which this module never"
               + " brackets automatically; a StatelessSession, which fires no PostLoad event at all;"
               + " or any other EntityManager use that was not itself wrapped in"
-              + " withReadBracket(...).");
+              + " withReadBracket(...). A region that is on this thread but was not opened by the"
+              + " call now running - one left behind by a call that never closed it, or one opened"
+              + " directly with ShreddingContext.openRegion() - is not a region this decrypt may"
+              + " use, and is refused here for the same reason as no region at all.");
     }
-    Region region = stack.peek();
     region.pending.computeIfAbsent(key, k -> new ArrayList<>()).add(new Pending(plaintext));
   }
 
@@ -484,15 +690,18 @@ public final class ShreddingContext {
    * the shape {@code CipherProbeRegionResidueTest} builds from the public, unpaired {@link
    * #openRegion()} (QUESTIONS #21) - can therefore never be handed back in place of the value this
    * call itself just decrypted. It can still be handed back <em>instead of nothing</em> when the
-   * current call never recorded one of its own; that residual - an ownerless region still on the
-   * deque authorising a call that opened no region of its own - is not closed here (QUESTIONS S-4).
+   * current call never recorded one of its own. That residual - an ownerless region on the deque
+   * serving a call that opened no region of its own - is what the entry epoch closes (addendum 2):
+   * {@link #currentRegion()} hands back nothing at all unless the region on top is the one the
+   * bracketed entry now in force opened. What remains is stated in SECURITY-NOTES.md: a read
+   * opening no region of its own, on a thread where an {@link Error} skipped exactly the frame that
+   * restores the epoch, still sees a matching one. A leaked region costs a refusal, never a value.
    */
   public static Optional<byte[]> drain(FrameKey key) {
-    Deque<Region> stack = REGIONS.get();
-    if (stack.isEmpty()) {
+    Region region = currentRegion();
+    if (region == null) {
       return Optional.empty();
     }
-    Region region = stack.peek();
     List<Pending> entries = region.pending.get(key);
     if (entries == null || entries.isEmpty()) {
       return Optional.empty();
@@ -511,11 +720,11 @@ public final class ShreddingContext {
    * SHRED-ROW-MISMATCH}, and nothing at all is {@code SHRED-READ-UNVERIFIED}.
    */
   public static List<FrameKey> pendingKeysFor(String entity, String field) {
-    Deque<Region> stack = REGIONS.get();
-    if (stack.isEmpty()) {
+    Region region = currentRegion();
+    if (region == null) {
       return List.of();
     }
-    return stack.peek().pending.keySet().stream()
+    return region.pending.keySet().stream()
         .filter(k -> k.entity().equals(entity) && k.field().equals(field))
         .toList();
   }

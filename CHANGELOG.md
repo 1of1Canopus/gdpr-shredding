@@ -6,6 +6,40 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed (seventh pass at `14da2f7`, S-4: region residue, the entry epoch)
+
+**A read region left on a pooled thread by a call that never closed it could serve the next call's
+decrypts.** `recordDecoded`, `drain`, `pendingKeysFor` and `closeRegion` all asked one question -
+"is this thread's region deque non-empty" - so a region a returned call left behind was the same
+object at `stack.peek()` as one legitimately open. The sixth pass closed the data-loss half (a stale
+value is never installed over a fresh one); this closes the rest. Design addendum 2 in
+`docs/plans/read-path-design.md` weighs three shapes; Cipher approved option (b) with six changes,
+each marked "applied §2.x" there.
+
+- **A decrypt is served only inside a region opened by the bracketed entry that is reading.** The
+  repository proxy and `withReadBracket` - the only two entries - stamp the thread with a fresh
+  **entry epoch**; a region records the epoch in force when it is constructed; every region access
+  compares the two **for equality**, never for age, so a leftover region carrying a *newer* epoch is
+  refused as surely as an older one, and no counter accumulates a permission an unwind can miss.
+- **`ShreddingContext.openRegion()` is deprecated and stamps a distinguished "no entry" epoch**, so a
+  region opened outside an entry can never serve a decrypt - neither on a thread that never entered
+  nor from inside a repository call, which is the case that mattered: a user `@PostLoad` method or an
+  `@EntityListeners` bean opening one would otherwise take every remaining decode of that call.
+  `ShreddingContext.enterRegion()` is added for a framework integration that owns a call boundary,
+  and `closeRegion` refuses a region that no entry opened.
+- **Entering sweeps residue, loudly and conditionally.** Regions on top whose epoch is not the one in
+  force at entry are discarded with a `WARN` naming the count and the first `entity.field`; a
+  region whose epoch matches - the caller's own, in a nested repository call - is never touched.
+- **`REGIONS` and the epoch are plain `ThreadLocal`s** and are documented as never inheritable: an
+  inherited epoch would match an inherited region and authorise the `@Async` case that is refused
+  for free today.
+
+`SECURITY-NOTES.md` states the one remaining residual in the words Cipher asked for: a read that
+opens no region of its own, on a thread where an `Error` skipped exactly the frame that restores the
+epoch, before the next entry - **a leaked region costs a refusal, never a value.** Probes: S-4's two
+promoted from `src/test-pending` and green, six in `CipherProbeRegionEpochTest`, two on the real read
+path in `CipherProbeReadScopeTest`, and `CipherProbeBracketUnwindTest` unchanged at 0/200.
+
 ### Fixed (sixth pass at `05ca185`, S-1: the write-side verification under a JDBC batch size)
 
 **A standard Hibernate performance property switched the insert-side header check off, and personal

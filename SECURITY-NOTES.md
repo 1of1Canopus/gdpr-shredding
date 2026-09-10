@@ -232,17 +232,47 @@ Hibernate session it does not know is instrumented. That is defence in depth, no
 control — the primary control is that a converter with no region refuses — and it could not be
 exercised by its own integration test: registering a second `EntityManagerFactory`-typed bean the
 ordinary Spring way trips Spring Boot's own `@ConditionalOnMissingBean` on its auto-configured (and
-therefore instrumented) factory. See `QUESTIONS.md` C-20. Separately, a read region left behind by a
-`StackOverflowError` is still *open* as far as `inReadBracket()` can tell, so a later call on that
-pooled thread that opens no region of its own loses the `SHRED-READ-UNSCOPED` signal it should have
-had. It cannot lose a value — the drain is token-checked and the converter returns no plaintext —
-but the loudness is missing, and it is recorded in `QUESTIONS.md` for Cipher rather than claimed
-closed.
+therefore instrumented) factory. See `QUESTIONS.md` C-20. Region residue has its own section below.
 
 Probes: `CipherProbeFifthPassTest` (C-33 P1, C-34 P2, C-35 P3), `CipherProbeBracketUnwindTest`,
 `CipherProbeEvictionTest` (C-36), `CipherProbeFrameTest`, `CipherProbeReadScopeTest`,
 `CipherProbeMatrixTest`, `CipherProbeMatrix2Test`, `FrameworkMatrixTest`,
 `LoadedStateHostileMappingsTest`, `FieldCipherRowBindingTest`, `EncryptedValueV2Test`, `RowIdTest`.
+
+### Region residue: a leaked region costs a refusal, never a value (S-4, addendum 2)
+
+A decrypt is served only inside a region opened by the bracketed entry that is doing the reading, on
+the same thread. There are two entries and no third: the Spring Data repository proxy
+(`ShreddingReadBracketCustomizer`) and `ShreddingContext.withReadBracket(...)`. Each stamps the
+thread with a fresh **entry epoch**, each region records the epoch in force when it was constructed,
+and every region access - file a decode, drain one, count what is pending, close the region -
+compares the two **for equality**. Not for age: a region can carry an epoch newer than the thread's
+(an inner entry whose region an `Error` left behind), and "older is residue" would authorise it.
+
+Consequences worth knowing when operating this:
+
+- A region opened by `ShreddingContext.openRegion()` outside either entry - it is public,
+  `@Deprecated`, and there is no reason for an application to call it - carries the distinguished
+  "no entry" epoch. It can never serve a decrypt, on a thread that never entered *and* from inside a
+  repository call, which is the case that matters: a user `@PostLoad` method or an
+  `@EntityListeners` bean opening one would otherwise take every remaining decode of that call.
+- Entering discards any region on top left by a call that never closed its own, at `WARN` with the
+  count and the first `entity.field`. That log line is the only moment an operator learns an
+  undisciplined region existed; it is never silent. It never discards the caller's own live region,
+  so nested repository calls work unchanged.
+- `REGIONS` and the epoch are plain `ThreadLocal`s. They must never become `InheritableThreadLocal`
+  and must never be copied by a task decorator: an inherited epoch would match an inherited region
+  and authorise an `@Async` continuation, which today is refused for free.
+
+**The residual, stated.** A read that opens no region of its own, on a thread where an `Error`
+skipped exactly the frame that restores the epoch, and before the next entry, still sees a matching
+epoch. It is the same window `ShreddingContext.popWrite`'s javadoc concedes for write scopes and
+that `CipherProbeBracketUnwindTest` measures at 0/200. Its cost is bounded: an ownerless region can
+serve nothing but this row's own current value, verified by `onPostLoad` against this row's tenant,
+subject and identifier, with the per-decrypt key-state check still in force. **A leaked region costs
+a refusal, never a value.** See `QUESTIONS.md` #21 and S-4. Probes:
+`CipherProbeRegionEpochTest`, `CipherProbeRegionResidueTest`, `CipherProbeBracketUnwindTest`,
+`CipherProbeReadScopeTest`.
 
 ### A `@Shredded` field inside an `@Embeddable` or an `@ElementCollection` is not supported (C-29)
 

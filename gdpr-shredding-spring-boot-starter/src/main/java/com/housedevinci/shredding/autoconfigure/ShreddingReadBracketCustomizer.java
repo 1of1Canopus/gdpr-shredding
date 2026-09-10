@@ -137,7 +137,12 @@ public final class ShreddingReadBracketCustomizer
         // reasonably expect to behave like the target's own.
         return method.invoke(target, args);
       }
-      long token = ShreddingContext.openRegion();
+      // enterRegion, not openRegion: this is one of the module's two bracketed entries, and the
+      // only kind of region that may serve a decode is one an entry opened (design addendum 2). A
+      // region opened any other way - including by a user @PostLoad method or an @EntityListeners
+      // bean calling openRegion() from inside this very call - carries no entry epoch and is
+      // refused by every access.
+      long token = ShreddingContext.enterRegion();
       Object result;
       try {
         result = method.invoke(target, args);
