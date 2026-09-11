@@ -17,8 +17,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Dollar's mandated companion to {@code CipherProbeEmbeddableScanTest}'s {@code Vault} (C-29): a
- * {@code @Shredded} field declared inside an {@code @Embeddable} reached through an
+ * The maintainers' mandated companion to {@code CipherProbeEmbeddableScanTest}'s {@code Vault}
+ * (C-29): a {@code @Shredded} field declared inside an {@code @Embeddable} reached through an
  * {@code @ElementCollection}, not a plain {@code @Embedded} singular component - so {@code
  * refuseUnmodelledShreddedConverters} has to recurse through a {@code PluralAttributeMapping} whose
  * element descriptor is itself embeddable-valued, not just an {@code EmbeddableValuedModelPart}

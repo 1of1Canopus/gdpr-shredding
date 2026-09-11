@@ -41,7 +41,10 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
-/** Cipher probes that need a real PostgreSQL: the erasure transaction, the race, the index. */
+/**
+ * The security review's probes that need a real PostgreSQL: the erasure transaction, the race, the
+ * index.
+ */
 @Testcontainers
 class CipherProbeJdbcTest {
 

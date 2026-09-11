@@ -17,9 +17,9 @@ import java.time.LocalDate;
 
 /**
  * The framework matrix's fixture (design §2). Deliberately carries the two types that have no
- * erased sentinel - {@code BigDecimal} and {@code LocalDate} - because those are the ones Cipher's
- * item 2 is about: with a {@code null} placeholder, an entity whose install never ran wrote {@code
- * NULL} over their live ciphertext on the next UPDATE, unseen.
+ * erased sentinel - {@code BigDecimal} and {@code LocalDate} - because those are the ones the
+ * security review's item 2 is about: with a {@code null} placeholder, an entity whose install never
+ * ran wrote {@code NULL} over their live ciphertext on the next UPDATE, unseen.
  *
  * <p>It also carries a JPA {@code @PostLoad} callback that records what it was handed, which is
  * item 8's test: while the module's listener was appended rather than prepended, this callback saw

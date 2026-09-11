@@ -21,7 +21,7 @@ import org.hibernate.engine.spi.SharedSessionContractImplementor;
 import org.hibernate.engine.spi.TransactionCompletionCallbacks;
 
 /**
- * Design addendum "insert-side binding under batching" (2026-09-10), Cipher S-1.
+ * Design addendum "insert-side binding under batching" (2026-09-10), S-1.
  *
  * <p>The property this class exists for: <em>no row of a {@code @Shredded} entity commits whose
  * stored header is not bound to that row's own id, subject and tenant - at any {@code
@@ -63,11 +63,11 @@ final class WriteVerification {
   private static final int CHUNK = 500;
 
   /**
-   * QUESTIONS #26 (Cipher seventh pass): {@code shredding.write-verification.max-outstanding},
-   * configured once by {@link ShreddingStartupCheck} at boot. A ledger this session's debts would
-   * exceed is refused rather than left to grow without bound - a {@code StatelessSession} import of
-   * millions of rows in one transaction is the only realistic way to reach it, and the remedy is a
-   * transaction per chunk, not a bigger heap.
+   * The seventh pass: {@code shredding.write-verification.max-outstanding}, configured once by
+   * {@link ShreddingStartupCheck} at boot. A ledger this session's debts would exceed is refused
+   * rather than left to grow without bound - a {@code StatelessSession} import of millions of rows
+   * in one transaction is the only realistic way to reach it, and the remedy is a transaction per
+   * chunk, not a bigger heap.
    *
    * <p>S-16: a {@code static volatile}, shared by every Spring context in the JVM, the same as
    * {@link com.housedevinci.shredding.jpa.ShreddingRuntime}. {@link ShreddingStartupCheck} refuses
@@ -160,7 +160,7 @@ final class WriteVerification {
    * Settles every outstanding debt of this session, or throws. Called at the end of every flush and
    * auto-flush, and again from the before-completion callback.
    *
-   * <p><strong>#27 (Cipher seventh pass).</strong> A debt is removed from the ledger only after the
+   * <p><strong>#27 (the seventh pass).</strong> A debt is removed from the ledger only after the
    * check that discharges it has actually passed - not before, on the assumption that it is about
    * to. The old shape cleared the whole ledger up front, on the reasoning that a refusal below
    * throws out of the flush and aborts the transaction anyway, so nothing downstream would ever see
@@ -172,9 +172,9 @@ final class WriteVerification {
    * leaves every debt it had not yet reached - correctly - still outstanding <em>in this method's
    * own data</em>.
    *
-   * <p><strong>S-18 (Cipher eighth pass) corrects #27's own claim.</strong> That residual debt is
-   * not what makes {@code beforeCompletion}'s "still outstanding at completion" branch reachable,
-   * and #27 was wrong to say it does: {@code settle} still only ever returns normally after it has
+   * <p><strong>S-18 (the eighth pass) corrects #27's own claim.</strong> That residual debt is not
+   * what makes {@code beforeCompletion}'s "still outstanding at completion" branch reachable, and
+   * #27 was wrong to say it does: {@code settle} still only ever returns normally after it has
    * emptied every debt it started with, or throws before returning at all - a throw from inside
    * this method propagates straight out of the {@code beforeCompletion} callback, past the branch
    * that checks the ledger afterwards, every time. That branch is unreachable by construction
@@ -359,7 +359,7 @@ final class WriteVerification {
    * or as {@code BigInteger}, an {@code int} column as {@code Integer}. Both sides of the
    * comparison go through here so settlement matches rows rather than boxes.
    *
-   * <p><strong>S-9 (Cipher seventh pass).</strong> Must be injective over every identifier type JPA
+   * <p><strong>S-9 (the seventh pass).</strong> Must be injective over every identifier type JPA
    * allows. It used to map every {@link Number} through {@code longValue()}, which truncates a
    * {@link BigDecimal}, {@code Double} or {@code Float} id: {@code 1} and {@code 1.5} normalised to
    * the same key, so the second row's debt silently replaced the first's in {@code owe}'s {@code

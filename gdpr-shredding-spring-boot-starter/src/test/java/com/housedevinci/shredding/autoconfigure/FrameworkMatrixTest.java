@@ -36,12 +36,12 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * The framework integration matrix of {@code docs/plans/read-path-design.md} §2: one test per path
- * Hibernate offers to reach a {@code @Shredded} column, written before the mechanism that closes
- * it. A control on one event is not a control.
+ * The framework integration matrix of the read-path design addendum §2: one test per path Hibernate
+ * offers to reach a {@code @Shredded} column, written before the mechanism that closes it. A
+ * control on one event is not a control.
  *
  * <p>Rows this class covers are the ones the earlier passes had no test for: the {@code @PostLoad}
- * ordering (Cipher item 8), the placeholder write-back on a type with no sentinel (item 2), a
+ * ordering (finding item 8), the placeholder write-back on a type with no sentinel (item 2), a
  * forged placeholder in the column (item 3), {@code merge} and {@code refresh}, a {@code
  * StatelessSession}, a {@code Stream} drained after the call, {@code equals}/{@code hashCode} (item
  * 11), and the {@code IDENTITY} rebind window (items 5, 6). The rest are covered by the {@code
@@ -114,7 +114,7 @@ class FrameworkMatrixTest {
     assertThat(loaded).extracting(MatrixLedger::getDue).allSatisfy(d -> assertThat(d).isNotNull());
   }
 
-  // -- §2 row 17: Cipher item 8, the listener must be prepended ---------------------------------
+  // -- §2 row 17: finding item 8, the listener must be prepended ---------------------------------
 
   /**
    * The module's {@code POST_LOAD} listener has to run <em>before</em> Hibernate's own {@code
@@ -140,7 +140,7 @@ class FrameworkMatrixTest {
     assertThat(MatrixLedger.lastPostLoadSawAmount).isEqualByComparingTo("5.00");
   }
 
-  // -- §2 row 16: Cipher item 2, the null-placeholder data-loss hole ----------------------------
+  // -- §2 row 16: finding item 2, the null-placeholder data-loss hole ----------------------------
 
   /**
    * The hole a {@code null} placeholder opened, on the two types that have no erased sentinel. Load
@@ -196,7 +196,7 @@ class FrameworkMatrixTest {
         .extracting(e -> ((ShreddingException) e).code())
         .isEqualTo(ErrorCodes.PLACEHOLDER);
 
-    // S-3 (Cipher sixth pass), correcting Cipher item 3: an equal-but-distinct instance IS the
+    // S-3 (the sixth pass), correcting finding item 3: an equal-but-distinct instance IS the
     // placeholder as far as write-back is concerned - a refused load leaves the entity holding the
     // marker instance and detaches it, and the ordinary things an application does to a detached
     // entity (a DTO round trip, new String(...), trim(), a defensive clone()) all produce a
@@ -206,7 +206,7 @@ class FrameworkMatrixTest {
     assertThat(Placeholders.isPlaceholder(new String(Placeholders.STRING))).isTrue();
     assertThat(Placeholders.isPlaceholder(new BigDecimal(Placeholders.BIG_DECIMAL.toPlainString())))
         .isTrue();
-    // S-10 (Cipher seventh pass): the marker used to be exactly LocalDate.MIN, an ordinary
+    // S-10 (the seventh pass): the marker used to be exactly LocalDate.MIN, an ordinary
     // application value; it no longer is, and LocalDate.MIN is no longer taken for it.
     assertThat(Placeholders.isPlaceholder(LocalDate.of(-999_999_999, 1, 1))).isFalse();
   }
@@ -310,7 +310,8 @@ class FrameworkMatrixTest {
     assertThat(outcome).doesNotContain("STREAM-SECRET");
   }
 
-  // -- §2 row 20: Cipher item 11, equals/hashCode -------------------------------------------------
+  // -- §2 row 20: finding item 11, equals/hashCode
+  // -------------------------------------------------
 
   /**
    * The documented hazard, demonstrated rather than asserted away. A shredded field holds the
@@ -352,10 +353,10 @@ class FrameworkMatrixTest {
   }
 
   /**
-   * Cipher item 5: whatever the intermediate is, it verifies against no row. A reader that captured
-   * the pre-rebind bytes - change data capture, an {@code AFTER INSERT} trigger, a physical replica
-   * caught between the two statements - holds a blob bound to a 128-bit random value that no
-   * identifier's canonical encoding can equal.
+   * finding item 5: whatever the intermediate is, it verifies against no row. A reader that
+   * captured the pre-rebind bytes - change data capture, an {@code AFTER INSERT} trigger, a
+   * physical replica caught between the two statements - holds a blob bound to a 128-bit random
+   * value that no identifier's canonical encoding can equal.
    */
   @Test
   void an_identity_insert_intermediate_is_bound_to_no_row() {

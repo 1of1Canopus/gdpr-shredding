@@ -60,8 +60,8 @@ import org.testcontainers.utility.DockerImageName;
  * other statement in this module has - {@code SELECT "id", ... FROM "table" WHERE "id" IN (...)}. A
  * path is covered when a settlement statement naming that table ran before the commit.
  *
- * <p><strong>S-12 (Cipher seventh pass).</strong> S-1's original probe, {@code
- * CipherProbeBatchedInsertCheckTest}, was rewritten per QUESTIONS #25 into what is now {@code
+ * <p><strong>S-12 (the seventh pass).</strong> S-1's original probe, {@code
+ * CipherProbeBatchedInsertCheckTest}, was rewritten into what is now {@code
  * CipherProbePropertyAccessSequenceTest} - a startup-refusal assertion, once S-5 made its
  * property-access fixture unstartable - and no longer exercises batching or the insert check by
  * name. This class is what carries S-1's property in the default build.
@@ -303,8 +303,8 @@ class BatchedWriteVerificationTest {
   // -- updates ----------------------------------------------------------------------------------
 
   /**
-   * The update half of S-1, which Cipher reasoned about but did not reproduce: with the UPDATE
-   * still in the batch, the per-row check read the pre-update row and passed vacuously.
+   * The update half of S-1, which the security review reasoned about but did not reproduce: with
+   * the UPDATE still in the batch, the per-row check read the pre-update row and passed vacuously.
    */
   @Test
   void a_batched_update_is_settled_before_the_commit() {
@@ -460,8 +460,8 @@ class BatchedWriteVerificationTest {
   }
 
   /**
-   * #27 (Cipher seventh pass). {@code settle} used to clear its whole ledger before it verified any
-   * of it, on the reasoning that a refusal aborts the transaction anyway - which made {@code
+   * #27 (the seventh pass). {@code settle} used to clear its whole ledger before it verified any of
+   * it, on the reasoning that a refusal aborts the transaction anyway - which made {@code
    * beforeCompletion}'s own "still outstanding" refusal permanently unreachable and meant a caught
    * settlement refusal (the shape {@link SwallowedWriteRefusalTest} exercises) discharged debts it
    * had never actually checked. A debt is now removed only once the check that discharges it has

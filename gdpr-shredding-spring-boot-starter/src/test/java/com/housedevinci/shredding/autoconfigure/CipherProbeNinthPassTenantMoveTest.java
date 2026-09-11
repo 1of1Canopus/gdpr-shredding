@@ -29,10 +29,10 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Cipher, ninth pass. Addendum 3 change 7's residual, executed rather than argued: a row whose
- * tenant column is moved by native SQL, then read, then erased under the tenant its key belongs to.
- * What must hold is that the read never yields plaintext under the new tenant, and that the erasure
- * does not silently claim to have destroyed an index it cannot reach.
+ * The ninth pass. Addendum 3 change 7's residual, executed rather than argued: a row whose tenant
+ * column is moved by native SQL, then read, then erased under the tenant its key belongs to. What
+ * must hold is that the read never yields plaintext under the new tenant, and that the erasure does
+ * not silently claim to have destroyed an index it cannot reach.
  */
 @SpringBootTest(classes = CipherProbeNinthPassTenantMoveTest.MoveApp.class)
 @Testcontainers

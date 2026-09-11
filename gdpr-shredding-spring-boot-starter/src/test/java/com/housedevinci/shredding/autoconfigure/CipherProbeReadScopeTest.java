@@ -32,7 +32,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Cipher third pass (8095d2c): attacks on the read-scope design introduced at 4eb0e98.
+ * The third pass (8095d2c): attacks on the read-scope design introduced at 4eb0e98.
  *
  * <p>C-19's repro ({@code Ledger}, a class-level {@code @Convert} column with no field-level
  * {@code @Shredded}) is deliberately not part of this class's shared context: once the C-19 fix is

@@ -13,7 +13,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Cipher, eighth pass (fa6f477). Design addendum 2 as built, attacked.
+ * The eighth pass (fa6f477). Design addendum 2 as built, attacked.
  *
  * <p>Four of these six are green today and are here to hold the ground the addendum won: three
  * entries deep each serving only their own decodes, a {@code withReadBracket} inside an entry and
@@ -29,10 +29,9 @@ import org.junit.jupiter.api.Test;
  *       call refuses instead of serving - but the outer call did nothing wrong, and the same lever
  *       is available to any caller of {@code closeRegion}/{@code discardRegion} with a token from
  *       another frame.
- *   <li><strong>S-15 (QUESTIONS S-4a).</strong> A region opened outside any entry is never swept
- *       when nothing is in force ({@code NO_ENTRY == NO_ENTRY}), so leaked raw regions accumulate
- *       on a pooled thread for the life of that thread and {@code inReadBracket()} stays true
- *       forever.
+ *   <li><strong>S-15 (S-4a).</strong> A region opened outside any entry is never swept when nothing
+ *       is in force ({@code NO_ENTRY == NO_ENTRY}), so leaked raw regions accumulate on a pooled
+ *       thread for the life of that thread and {@code inReadBracket()} stays true forever.
  * </ul>
  */
 class CipherProbeEighthPassRegionTest {
@@ -47,7 +46,7 @@ class CipherProbeEighthPassRegionTest {
   }
 
   /**
-   * S-14 (Cipher eighth pass): {@code discardRegion(-1L)} - a token that is on no stack - no longer
+   * S-14 (the eighth pass): {@code discardRegion(-1L)} - a token that is on no stack - no longer
    * empties the deque, so this thread's own {@code ShreddingContext.resetForTests()} is what leaves
    * a clean thread for the next test.
    */

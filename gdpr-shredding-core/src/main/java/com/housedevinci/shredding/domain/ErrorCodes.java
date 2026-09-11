@@ -43,7 +43,7 @@ public final class ErrorCodes {
   public static final String ROW_MISMATCH = "SHRED-ROW-MISMATCH";
 
   /**
-   * Design §1.1, Cipher item 2: an attempt to persist the marker a {@code @Shredded} read returns
+   * Design §1.1, finding item 2: an attempt to persist the marker a {@code @Shredded} read returns
    * before {@code onPostLoad} installs the verified value. Writing it would destroy a live
    * ciphertext, which is what a {@code null} placeholder did silently for the types that have no
    * sentinel.

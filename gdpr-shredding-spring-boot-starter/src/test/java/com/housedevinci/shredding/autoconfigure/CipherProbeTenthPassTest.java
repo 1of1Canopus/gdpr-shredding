@@ -30,10 +30,9 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Cipher, tenth pass: the surfaces change 9 made live, promoted out of {@code src/test-pending}
- * once design addendum 4 closed S-22 and S-24. Every method here is green by its own assertions - a
- * real erasure, or a startup refusal this module names - not by the escape hatch it was written
- * with.
+ * The tenth pass: the surfaces change 9 made live, promoted out of {@code src/test-pending} once
+ * design addendum 4 closed S-22 and S-24. Every method here is green by its own assertions - a real
+ * erasure, or a startup refusal this module names - not by the escape hatch it was written with.
  */
 @Testcontainers
 class CipherProbeTenthPassTest {

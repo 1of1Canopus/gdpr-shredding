@@ -23,8 +23,8 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Cipher, eleventh pass, E-1 and E-2: both close as a startup refusal (design addendum 4, §4.5 and
- * §4.2). Promoted from {@code src/test-pending} once Isis's fixes made them green.
+ * The eleventh pass, E-1 and E-2: both close as a startup refusal (design addendum 4, §4.5 and
+ * §4.2). Promoted from {@code src/test-pending} once the fixes made them green.
  */
 @Testcontainers
 class CipherProbeEleventhPassStartupRefusalsTest {
@@ -135,9 +135,9 @@ class CipherProbeEleventhPassStartupRefusalsTest {
    * entities mapped to one table that index the same column collided in one {@code LinkedHashMap}:
    * the second {@code put} overwrote the first and {@code Map.copyOf} said nothing. The erasure
    * would then have verified one of the two blind indexes with the <em>other</em> entity's query -
-   * the S-22 net, silently pointed at the wrong subject column. Isis's fix (E-1): the constructor
-   * now refuses at startup, naming both entities, the shared table and the shared column, rather
-   * than keeping only one of the two independent read-backs.
+   * the S-22 net, silently pointed at the wrong subject column. The fix (E-1): the constructor now
+   * refuses at startup, naming both entities, the shared table and the shared column, rather than
+   * keeping only one of the two independent read-backs.
    */
   @Test
   void probe_two_entities_on_one_table_do_not_share_one_independent_read_back() throws Exception {

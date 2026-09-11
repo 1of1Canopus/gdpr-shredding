@@ -12,7 +12,7 @@ import jakarta.persistence.Table;
 import org.hibernate.annotations.NaturalId;
 
 /**
- * Cipher item 10 / D4: a {@code @Shredded} column that is also part of the natural id. Natural-id
+ * finding item 10 / D4: a {@code @Shredded} column that is also part of the natural id. Natural-id
  * resolution reads the column through the converter outside any load event, so it sees the read
  * placeholder - and a natural id that is personal data cannot be an index key in the first place.
  */

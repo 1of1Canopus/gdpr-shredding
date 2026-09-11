@@ -9,7 +9,7 @@ import javax.crypto.spec.SecretKeySpec;
 
 /**
  * Hash chain over {@link ErasureRecord}s. Module B's audit chain, copied and adapted (control 8);
- * extracting a shared library is a later decision, QUESTIONS #2.
+ * extracting a shared library is a later decision.
  *
  * <p>{@code hash = H(canonical(record, keyId) || prevHash)} where {@code H} is SHA-256 ({@link
  * #unkeyed()}, version {@code sh1}, key id {@link #UNKEYED_KEY_ID}) or HMAC-SHA-256 with a secret

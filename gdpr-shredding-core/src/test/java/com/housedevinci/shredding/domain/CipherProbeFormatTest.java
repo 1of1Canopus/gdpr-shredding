@@ -5,7 +5,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.Test;
 
-/** Cipher probe: the stored format is strict, with no plaintext fallback (controls 4 and 17). */
+/**
+ * The security review's probe: the stored format is strict, with no plaintext fallback (controls 4
+ * and 17).
+ */
 class CipherProbeFormatTest {
 
   /**

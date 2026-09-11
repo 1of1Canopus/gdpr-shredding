@@ -268,11 +268,11 @@ public class ShreddingProperties {
   }
 
   /**
-   * QUESTIONS #26 (Cipher seventh pass). Settlement discharges its ledger at the end of every
-   * flush, so an ordinary {@code @Transactional} write holds at most one flush worth of debt - but
-   * {@code StatelessSession} fires no flush event, so a stateless import of N rows in one
-   * transaction holds N debts, each a subject and a tenant, until {@code beforeCompletion}. This is
-   * the hard cap: refuse rather than degrade, so the worst case is a typed error naming the fix - a
+   * The seventh pass. Settlement discharges its ledger at the end of every flush, so an ordinary
+   * {@code @Transactional} write holds at most one flush worth of debt - but {@code
+   * StatelessSession} fires no flush event, so a stateless import of N rows in one transaction
+   * holds N debts, each a subject and a tenant, until {@code beforeCompletion}. This is the hard
+   * cap: refuse rather than degrade, so the worst case is a typed error naming the fix - a
    * transaction per chunk - never an unbounded ledger and an OOM heap dump holding personal data.
    */
   public static class WriteVerificationProperties {

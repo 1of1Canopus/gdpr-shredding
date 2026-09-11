@@ -20,13 +20,13 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Cipher fifth pass, QUESTIONS #20 / C-38: the composite-identifier residual. Before the fix, a
- * {@code @Shredded} entity with a composite id started up and then could never be read - every load
- * returns before {@code onPostLoad} can drain the frame - which is fail-closed but unusable and
- * discovered on the first read in production instead of at boot. The fix refuses this mapping at
- * startup, alongside the existing {@code @SecondaryTable} refusal, so both probes below now build
- * their own context (in the shape of {@code CipherProbeScanDepthTest}) instead of sharing a
- * class-level {@code @SpringBootTest} context, which can no longer come up at all.
+ * The fifth pass, C-38: the composite-identifier residual. Before the fix, a {@code @Shredded}
+ * entity with a composite id started up and then could never be read - every load returns before
+ * {@code onPostLoad} can drain the frame - which is fail-closed but unusable and discovered on the
+ * first read in production instead of at boot. The fix refuses this mapping at startup, alongside
+ * the existing {@code @SecondaryTable} refusal, so both probes below now build their own context
+ * (in the shape of {@code CipherProbeScanDepthTest}) instead of sharing a class-level
+ * {@code @SpringBootTest} context, which can no longer come up at all.
  */
 @Testcontainers
 class CipherProbeCompositeIdTest {

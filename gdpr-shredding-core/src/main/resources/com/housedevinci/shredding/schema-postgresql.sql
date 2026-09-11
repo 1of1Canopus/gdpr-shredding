@@ -3,7 +3,7 @@
 -- transaction under the store's advisory lock (see JdbcSupport.initializeSchema).
 SELECT pg_advisory_xact_lock(6072873668427846209);
 
--- Keyed-from-birth, module B's ruling carried over (control 8): shredding_erasure.key_id and
+-- Keyed-from-birth, module B's decision carried over (control 8): shredding_erasure.key_id and
 -- shredding_erasure_anchor.keyed are NOT NULL in the CREATE TABLE bodies below, with no backfill.
 -- This branch is unreleased, so there is no upgrade path from a database written by an earlier
 -- build. A pre-redesign table is refused here with a clear message rather than left to fail later

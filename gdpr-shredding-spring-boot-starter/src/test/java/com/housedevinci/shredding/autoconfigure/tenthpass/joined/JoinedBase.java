@@ -13,7 +13,7 @@ import jakarta.persistence.Inheritance;
 import jakarta.persistence.InheritanceType;
 import jakarta.persistence.Table;
 
-/** Cipher, tenth pass: a @Shredded field on the root of a JOINED hierarchy. */
+/** The tenth pass: a @Shredded field on the root of a JOINED hierarchy. */
 @Entity
 @Table(name = "joined_base")
 @Inheritance(strategy = InheritanceType.JOINED)

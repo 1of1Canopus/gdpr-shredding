@@ -5,8 +5,8 @@ import java.util.Objects;
 
 /**
  * The single source of randomness for nonces and data keys, so a test can substitute a narrow or
- * broken generator and the module can notice (control 3: Cipher replaced the useless "100k
- * encryptions, no nonce collision" property test with exactly this).
+ * broken generator and the module can notice (control 3: the security review replaced the useless
+ * "100k encryptions, no nonce collision" property test with exactly this).
  *
  * <p>Production always uses {@link #secure()}, which is {@link SecureRandom}.
  */

@@ -27,7 +27,7 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
-/** Cipher fourth pass: attacks on the read-bracket frame accounting introduced at 3b1ced1. */
+/** The fourth pass: attacks on the read-bracket frame accounting introduced at 3b1ced1. */
 @SpringBootTest(classes = CipherProbeFrameTest.TestApp.class)
 @Testcontainers
 @DirtiesContext
@@ -265,13 +265,14 @@ class CipherProbeFrameTest {
   // -- F6: the legitimate multi-row, multi-subject read -----------------------------------------
 
   /**
-   * Dollar's mandated companion to the leak repro above: two genuine subjects, nothing moved, one
-   * {@code findAll(Sort)} spanning both rows. Before the C-26 fix this refused with
+   * The maintainers' mandated companion to the leak repro above: two genuine subjects, nothing
+   * moved, one {@code findAll(Sort)} spanning both rows. Before the C-26 fix this refused with
    * SHRED-SUBJECT-MISMATCH - the third pass's flat {@code entity.field} key meant bob's row drained
    * whatever alice's converter had last written there, an artefact of the map rather than a real
    * mismatch (the finding's own "mirror" repro). After the fix each row is verified against its
-   * own, independently re-read header, so the call must succeed and - the stronger assertion Dollar
-   * asked for beyond "no exception" - each row must decrypt to its own value, not the other's.
+   * own, independently re-read header, so the call must succeed and - the stronger assertion the
+   * maintainers asked for beyond "no exception" - each row must decrypt to its own value, not the
+   * other's.
    */
   @Test
   void probe_two_rows_of_two_subjects_read_in_one_query() {

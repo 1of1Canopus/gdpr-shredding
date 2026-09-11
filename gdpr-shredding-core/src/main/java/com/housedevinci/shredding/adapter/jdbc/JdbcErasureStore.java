@@ -32,7 +32,7 @@ import org.slf4j.LoggerFactory;
  * The erasure half in PostgreSQL: key destruction, blind-index clearing and the chained erasure
  * record, in one transaction (control 6, 8, 10).
  *
- * <p>A trail is keyed from row 1 or unkeyed forever (module B's keyed-from-birth ruling): the
+ * <p>A trail is keyed from row 1 or unkeyed forever (module B's keyed-from-birth decision): the
  * anchor's {@code keyed} column records which, once, and every later append must agree with it or
  * is refused with {@link ErrorCodes#ERASURE_KEY_MISMATCH}. A trail with rows and no anchor is never
  * re-derived by guessing; it is refused with {@link ErrorCodes#ERASURE_ANCHOR_MISSING}, both at

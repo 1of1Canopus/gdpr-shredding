@@ -72,7 +72,7 @@
 
   <build>
     <!--
-      Same fix as agent-guard's M7 (docs/SECURITY-REVIEW-feat-release-pipeline.md, B repo):
+      Same fix as agent-guard's M7:
       the project's own LICENSE and NOTICE, copied into META-INF/ of the published jar.
       FSL-1.1-ALv2's Redistribution clause requires a copy of (or a link to) the Terms and
       Conditions to accompany redistributed copies; NOTICE travels with it by the same

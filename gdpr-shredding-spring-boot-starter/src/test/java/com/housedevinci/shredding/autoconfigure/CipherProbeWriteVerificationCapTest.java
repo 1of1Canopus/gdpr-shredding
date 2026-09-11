@@ -28,7 +28,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * QUESTIONS #26, Cipher's ruling on the seventh pass (2026-09-10, accepted with a number).
+ * The security review's decision on the seventh pass (2026-09-10, accepted with a number).
  *
  * <p>Settlement discharges the write-verification ledger at the end of every flush, so an ordinary
  * {@code @Transactional} write never holds more than one flush worth of debt. {@code

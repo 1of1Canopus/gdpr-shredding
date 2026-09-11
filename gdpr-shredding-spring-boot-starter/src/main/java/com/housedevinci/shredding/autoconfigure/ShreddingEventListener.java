@@ -75,7 +75,7 @@ public final class ShreddingEventListener
 
   /**
    * The token of the write scope this thread's in-flight bind pushed, so the matching {@code Post*}
-   * listener pops exactly that one and never another entity's (Cipher item 14).
+   * listener pops exactly that one and never another entity's (finding item 14).
    */
   private static final ThreadLocal<Long> writeScopeToken = new ThreadLocal<>();
 
@@ -121,7 +121,7 @@ public final class ShreddingEventListener
     Object id = event.getId();
     RowId rowId = id == null ? RowId.unboundIntermediate(random) : RowId.ofIdentifier(id);
     var scope = scopeFor(event.getEntity(), fields, rowId);
-    // Cipher item 14: on the state array, before writeBlindIndexes, so a placeholder never reaches
+    // finding item 14: on the state array, before writeBlindIndexes, so a placeholder never reaches
     // a blind index and the refusal names the entity rather than only the column.
     refusePlaceholdersInState(event.getPersister(), event.getState(), fields);
     registerTransactionBoundaryClear(event.getSession());
@@ -145,9 +145,10 @@ public final class ShreddingEventListener
    * and then checks post hoc that what actually reached the database is bound to this row and this
    * subject.
    *
-   * <p>Both halves throw out of the flush on failure, which aborts the transaction (Cipher item 6).
-   * There is no "log and carry on" branch: a row left bound to an intermediate would be permanently
-   * unreadable, and a row bound to the wrong subject would sit in the wrong erasure scope.
+   * <p>Both halves throw out of the flush on failure, which aborts the transaction (finding item
+   * 6). There is no "log and carry on" branch: a row left bound to an intermediate would be
+   * permanently unreadable, and a row bound to the wrong subject would sit in the wrong erasure
+   * scope.
    */
   @Override
   public void onPostInsert(PostInsertEvent event) {
@@ -194,14 +195,14 @@ public final class ShreddingEventListener
     }
     WriteVerification.requireSettlementAnchor(event.getSession(), entityName(event.getPersister()));
     var scope = scopeFor(event.getEntity(), fields, RowId.ofIdentifier(event.getId()));
-    // QUESTIONS #4, ruling (c): the previous subject is read from the stored blob's own header,
+    // Decision (c): the previous subject is read from the stored blob's own header,
     // not from a cache of what this process happened to load.
     //
-    // The ruling's proposed optimisation - skip the round trip when no @Shredded field is dirty -
+    // The decision's proposed optimisation - skip the round trip when no @Shredded field is dirty -
     // is unsound for an entity mapped the ordinary way (no @DynamicUpdate): Hibernate's default
     // UPDATE rewrites every basic column, including every shredded one, so every converter runs
-    // again regardless of whether its Java value changed. Recorded in QUESTIONS.md CIPHER-01/#4 as
-    // a considered deviation. Cipher item 14: this runs on every update, unconditionally, and its
+    // again regardless of whether its Java value changed. Recorded as
+    // a considered deviation. finding item 14: this runs on every update, unconditionally, and its
     // insert-side counterpart is the post-hoc check in onPostInsert.
     refuseIfSubjectMoved(event.getSession(), event.getPersister(), event.getId(), fields, scope);
     refusePlaceholdersInState(event.getPersister(), event.getState(), fields);
@@ -312,7 +313,7 @@ public final class ShreddingEventListener
   /**
    * The verifier (design §1, §4). Runs <strong>prepended</strong>, before Hibernate's own {@code
    * PostLoadEventListenerStandardImpl}, so no user {@code @PostLoad} method and no
-   * {@code @EntityListeners} bean ever sees a placeholder (Cipher item 8).
+   * {@code @EntityListeners} bean ever sees a placeholder (finding item 8).
    *
    * <p>For each shredded field whose value is currently the placeholder - which is exactly the
    * fields a converter ran on, so no query is needed to find them (C-35: this method issues no SQL
@@ -321,8 +322,8 @@ public final class ShreddingEventListener
    * subject resolved from the now-hydrated entity, and the row id built from {@code event.getId()}.
    *
    * <ul>
-   *   <li>Found ⇒ verified. It is this row's own header, under this region's own token (Cipher item
-   *       4), so a decode left behind by another region is discarded rather than installed.
+   *   <li>Found ⇒ verified. It is this row's own header, under this region's own token (finding
+   *       item 4), so a decode left behind by another region is discarded rather than installed.
    *   <li>Not found, but the region holds a decode for this field under another subject or tenant ⇒
    *       {@code SHRED-SUBJECT-MISMATCH}: this row holds someone else's ciphertext.
    *   <li>Not found, but under this subject and another row ⇒ {@code SHRED-ROW-MISMATCH}: C-34, a
@@ -330,8 +331,8 @@ public final class ShreddingEventListener
    *   <li>Nothing at all ⇒ {@code SHRED-READ-UNVERIFIED}.
    * </ul>
    *
-   * <p><strong>Every field is verified before any field is installed</strong> (Cipher item 9), so a
-   * row that is refused is left holding placeholders: a first-level-cache retry that dodges the
+   * <p><strong>Every field is verified before any field is installed</strong> (finding item 9), so
+   * a row that is refused is left holding placeholders: a first-level-cache retry that dodges the
    * eviction yields the marker, never the value.
    */
   @Override
@@ -380,7 +381,7 @@ public final class ShreddingEventListener
     SubjectId subjectId = SubjectId.of(trueSubject);
     RowId rowId = RowId.ofIdentifier(event.getId());
 
-    // Verify first (Cipher item 9): collect every plaintext, refusing on the first field that
+    // Verify first (finding item 9): collect every plaintext, refusing on the first field that
     // cannot be accounted for, and only then write anything into the entity.
     var verified = new java.util.ArrayList<byte[]>(awaiting.size());
     for (var field : awaiting) {
@@ -511,7 +512,7 @@ public final class ShreddingEventListener
   /**
    * Writes the verified plaintext into the entity <em>and</em> into the persistence context's
    * loaded state, so Hibernate's dirty checking compares plaintext against plaintext and a load
-   * followed by a flush does not rewrite the column (Cipher item 11's second half). Both sides are
+   * followed by a flush does not rewrite the column (finding item 11's second half). Both sides are
    * written together; there is no window in which one holds the value and the other the marker.
    */
   private void install(
@@ -547,16 +548,16 @@ public final class ShreddingEventListener
    * no {@code PostLoad} - handing the instance straight back. Evicting it forces the next read
    * through a real load and through this check again.
    *
-   * <p>Cipher item 9 makes the eviction a second line rather than the only one: because
+   * <p>finding item 9 makes the eviction a second line rather than the only one: because
    * verification runs before any install, the evicted instance is holding placeholders, not
    * plaintext, so even a caller that kept a reference to it has nothing.
    *
-   * <p><strong>Deviation from Cipher's C-27 fix text (QUESTIONS.md): the transaction is not also
-   * marked rollback-only.</strong> Cipher's own probes for this finding catch the refusal inside
-   * the transactional callback and return a plain value; marking rollback-only makes every one of
-   * them fail on {@code UnexpectedRollbackException} from the commit, outside their own try/catch.
-   * One cannot both swallow the exception and avoid the commit-time one that marking rollback-only
-   * exists to cause.
+   * <p><strong>Deviation from the security review's C-27 fix text (QUESTIONS.md): the transaction
+   * is not also marked rollback-only.</strong> the security review's own probes for this finding
+   * catch the refusal inside the transactional callback and return a plain value; marking
+   * rollback-only makes every one of them fail on {@code UnexpectedRollbackException} from the
+   * commit, outside their own try/catch. One cannot both swallow the exception and avoid the
+   * commit-time one that marking rollback-only exists to cause.
    */
   private ShreddingException refuseLoad(PostLoadEvent event, ShreddingException cause) {
     var session = (org.hibernate.event.spi.EventSource) event.getSession();
@@ -572,7 +573,7 @@ public final class ShreddingEventListener
   }
 
   /**
-   * Design §3.1, Cipher item 6: rewrites an {@code IDENTITY} row's shredded columns bound to the
+   * Design §3.1, finding item 6: rewrites an {@code IDENTITY} row's shredded columns bound to the
    * identifier the database has just generated, in one {@code UPDATE}, in the same transaction,
    * over raw JDBC.
    *
@@ -665,7 +666,7 @@ public final class ShreddingEventListener
   }
 
   /**
-   * Design §1.3, Cipher item 14: after the flush has written the row, what is actually stored is
+   * Design §1.3, finding item 14: after the flush has written the row, what is actually stored is
    * read back and every header is compared against the scope the row was written under. A bind
    * performed under a residual scope - the shape C-41 demonstrated - is refused here, inside the
    * same flush and before the commit, rather than left sitting in another subject's erasure scope.
@@ -708,7 +709,7 @@ public final class ShreddingEventListener
   }
 
   /**
-   * Cipher item 14: the placeholder check, run on the state array in the {@code Pre*} listeners,
+   * finding item 14: the placeholder check, run on the state array in the {@code Pre*} listeners,
    * before {@code writeBlindIndexes}. The converter refuses one too, but only once Hibernate has
    * decided to bind that column; catching it here names the entity, keeps the marker out of a blind
    * index, and covers a mapping whose column is written without the converter running.
@@ -774,17 +775,17 @@ public final class ShreddingEventListener
   }
 
   /**
-   * QUESTIONS #4, ruling (c): a second fetch of the row's current shredded columns, decoded only
-   * for the header - no key material is touched. When the stored row has no shredded blob at all
-   * (every shredded column null, or the field was only just added to the entity) there is nothing
-   * that could have been moved out of an erasure scope, and the update is allowed.
+   * Decision (c): a second fetch of the row's current shredded columns, decoded only for the header
+   * - no key material is touched. When the stored row has no shredded blob at all (every shredded
+   * column null, or the field was only just added to the entity) there is nothing that could have
+   * been moved out of an erasure scope, and the update is allowed.
    *
    * <p>CIPHER-14: every shredded column of the entity is read in this one query, not only {@code
    * fields.get(0)}. Checking a single column let a row whose first shredded column was null and
    * whose second held a live ciphertext escape unchecked: the subject changed, Hibernate's default
    * (non-{@code @DynamicUpdate}) UPDATE re-encrypted every shredded column under the new subject's
    * key on the very next flush, and the row left the original subject's erasure scope for good.
-   * Early return happens only when *every* shredded column is null, which is the case the ruling
+   * Early return happens only when *every* shredded column is null, which is the case the decision
    * actually blessed.
    */
   private void refuseIfSubjectMoved(
@@ -818,7 +819,7 @@ public final class ShreddingEventListener
       byte[] column = (byte[]) stored[i];
       if (column == null) {
         // Not the whole row - just this one shredded column, unwritten so far. Keep checking the
-        // rest; only "every column null" is the residual the ruling accepts.
+        // rest; only "every column null" is the residual the decision accepts.
         continue;
       }
       var header = EncryptedValue.decode(column);
@@ -841,7 +842,7 @@ public final class ShreddingEventListener
   /**
    * A fresh {@code SELECT} of one row's own shredded columns, by id, decoded only for the header -
    * no key material is touched. Shared by {@link #refuseIfSubjectMoved} (the write path, QUESTIONS
-   * #4 ruling (c)) and {@link #onPostLoad} (the read path, C-26): both need to know what a row's
+   * #4 decision (c)) and {@link #onPostLoad} (the read path, C-26): both need to know what a row's
    * shredded columns currently, actually hold, independent of whatever a converter running on a
    * different row of the same query happened to record.
    *

@@ -10,8 +10,8 @@ import java.util.function.Supplier;
 import org.junit.jupiter.api.Test;
 
 /**
- * Cipher fifth pass: C-32's {@code Throwable} unwind, exercised with the {@code Error} its own
- * javadoc names - a {@code StackOverflowError} from a deep object graph - rather than a {@code
+ * The fifth pass: C-32's {@code Throwable} unwind, exercised with the {@code Error} its own javadoc
+ * names - a {@code StackOverflowError} from a deep object graph - rather than a {@code
  * RuntimeException} standing in for one.
  *
  * <p>{@code try}/{@code finally} does not survive a {@code StackOverflowError}: the {@code finally}
@@ -27,7 +27,7 @@ import org.junit.jupiter.api.Test;
  *   <li>a drain reads the region currently on top of this thread's stack, so a decode filed inside
  *       a region an {@code Error} unwound past - popped off that stack, along with everything above
  *       it, by {@code ShreddingContext.unwindTo} - is never installed by a later, unrelated call:
- *       there is no region left on the stack to drain it from. (S-4, Cipher sixth pass, corrected
+ *       there is no region left on the stack to drain it from. (S-4, the sixth pass, corrected
  *       this: the owner-token comparison this javadoc used to cite was never reachable - a decode
  *       is always read back from the very region it was recorded into - and has been removed; what
  *       actually does the work is the region stack itself, exercised below.) What turns D6's "a
@@ -68,7 +68,7 @@ class CipherProbeBracketUnwindTest {
   /**
    * And when one does survive - {@code ShreddingContext.pushWrite} is the second line: a scope
    * still live when the next bind starts is by construction residue, so it is dropped rather than
-   * consumed (Cipher item 14).
+   * consumed (finding item 14).
    */
   @Test
   void probe_a_leaked_write_scope_is_dropped_by_the_next_bind_rather_than_consumed() {
@@ -90,10 +90,10 @@ class CipherProbeBracketUnwindTest {
   }
 
   /**
-   * Cipher item 4, the property that replaces "no frame survives". A region left behind by a {@code
-   * StackOverflowError} keeps whatever it was holding, but nothing in a later call can take it out:
-   * a drain reads the region currently on top, and an entry filed under another region's token is
-   * discarded rather than installed. The load that asked for it refuses.
+   * finding item 4, the property that replaces "no frame survives". A region left behind by a
+   * {@code StackOverflowError} keeps whatever it was holding, but nothing in a later call can take
+   * it out: a drain reads the region currently on top, and an entry filed under another region's
+   * token is discarded rather than installed. The load that asked for it refuses.
    */
   @Test
   void probe_a_decode_filed_in_a_region_an_error_unwound_past_is_never_drained_later() {

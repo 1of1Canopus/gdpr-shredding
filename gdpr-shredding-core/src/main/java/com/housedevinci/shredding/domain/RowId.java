@@ -16,7 +16,7 @@ import java.util.UUID;
  * authenticate.
  *
  * <p><strong>The bytes come from the identifier's column value, never {@code toString()}</strong>
- * (Cipher item 7). {@code Long 1} and {@code String "1"} have the same {@code toString()} and are
+ * (finding item 7). {@code Long 1} and {@code String "1"} have the same {@code toString()} and are
  * different rows of different tables; a one-byte type tag in front of a canonical encoding keeps
  * them apart, and an identifier type this module has not been taught is refused at startup rather
  * than encoded by a guess.
@@ -47,7 +47,7 @@ public record RowId(byte[] bytes) {
   public RowId {
     Objects.requireNonNull(bytes, "bytes");
     if (bytes.length == 0) {
-      // Cipher item 5: no unbound header exists. A zero-length row id in a v2 header that still
+      // finding item 5: no unbound header exists. A zero-length row id in a v2 header that still
       // verified would reopen C-34 for anyone holding UPDATE.
       throw new ShreddingException(ErrorCodes.INVALID, "a row id must not be empty");
     }

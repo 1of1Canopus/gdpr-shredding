@@ -14,16 +14,16 @@ import java.util.Arrays;
  * ShreddingEventListener.onPostLoad}, the one hook that knows the row, verifies and then installs
  * the real value over the marker.
  *
- * <p><strong>Never {@code null}</strong> (Cipher item 2). A {@code null} placeholder for a type
+ * <p><strong>Never {@code null}</strong> (finding item 2). A {@code null} placeholder for a type
  * with no sentinel - {@code LocalDate}, {@code BigDecimal}, a JSON column - is silent destruction:
  * an entity whose install never ran would hold {@code null} in the field <em>and</em> in the
  * persistence context's loaded state, and the next ordinary (non-{@code @DynamicUpdate}) UPDATE
  * would write {@code NULL} over a live ciphertext with nothing to notice it. A non-null marker
  * turns that same write into {@code SHRED-PLACEHOLDER-001}.
  *
- * <p><strong>Matched by value as well as by reference identity</strong> (Cipher items 2, 3; S-3,
- * Cipher sixth pass). An attacker holding {@code UPDATE} still cannot store a value that reads back
- * as a placeholder - that would need a ciphertext of the marker under the subject's own data key,
+ * <p><strong>Matched by value as well as by reference identity</strong> (finding items 2, 3; S-3,
+ * the sixth pass). An attacker holding {@code UPDATE} still cannot store a value that reads back as
+ * a placeholder - that would need a ciphertext of the marker under the subject's own data key,
  * which no amount of {@code UPDATE} gives them, and is exactly the residual {@code
  * a_forged_placeholder_in_the_column_is_refused} covers. What value equality closes is a different
  * hole: a refused load leaves the entity holding the marker <em>instance</em> and detaches it, and
@@ -46,7 +46,7 @@ public final class Placeholders {
   public static final byte[] BYTES = randomBytes();
 
   /**
-   * {@code LocalDate} columns. S-10 (Cipher seventh pass): this used to be exactly {@link
+   * {@code LocalDate} columns. S-10 (the seventh pass): this used to be exactly {@link
    * LocalDate#MIN}, an ordinary application value for an open-ended validity range - so an
    * application storing {@code LocalDate.MIN} in a {@code @Shredded LocalDate} field had every
    * insert and update of that entity refused, permanently, by a message calling its own data this
@@ -61,7 +61,7 @@ public final class Placeholders {
    * SecureRandom}, a precision no application's own {@code BigDecimal} data plausibly carries,
    * rather than a single fixed literal.
    *
-   * <p><strong>S-17 (Cipher eighth pass).</strong> The scale is in the low thousands, not "of the
+   * <p><strong>S-17 (the eighth pass).</strong> The scale is in the low thousands, not "of the
    * order of 10^6" as the seventh pass's own fix text said - that prescription was careless. The
    * unguessability this marker needs comes from the 64 random bits of the unscaled value; the scale
    * decides only what {@code toString()}/{@code toPlainString()} render, and a refused load is

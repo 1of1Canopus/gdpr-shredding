@@ -7,7 +7,7 @@ import java.math.BigDecimal;
 import org.junit.jupiter.api.Test;
 
 /**
- * Cipher, seventh pass (e2c2bdd). {@code WriteVerification} identifies a written row by {@code
+ * The seventh pass (e2c2bdd). {@code WriteVerification} identifies a written row by {@code
  * (entityName, normalise(id))} - both in the ledger's own key, where a collision <em>drops</em> a
  * debt, and in the settlement result map, where a collision verifies one row's debt against another
  * row's stored bytes.

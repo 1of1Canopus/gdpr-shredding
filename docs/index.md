@@ -81,12 +81,12 @@ declare the field, its `@Convert` and its own converter directly on each concret
 > not a bug to fix later. **Assign a whole new array to change the value**
 > (`document.setPayload(newArray)`); never mutate the one already there. Covered end to end (insert,
 > read, erase, re-read) under both `IDENTITY` and `SEQUENCE` id strategies, and the in-place-mutation
-> trap itself has its own probe (`CipherProbeMatrixTest`). See QUESTIONS.md #15 and C-21.
+> trap itself has its own probe (`CipherProbeMatrixTest`) (C-21).
 
 > Two lines per field is boilerplate, and we know it. An annotation processor that generates these
 > converters from `@Shredded` alone is a later improvement, deliberately not in this release: the
 > generated code would sit in the one part of the module that has to be obviously correct, and it
-> buys convenience rather than a control. (Dollar's ruling on QUESTIONS #1, 2026-09-08.)
+> buys convenience rather than a control. (The maintainers' decision, 2026-09-08.)
 
 `LocalDate` and `BigDecimal` have no value that can stand for "erased". `0` and `LocalDate.EPOCH`
 are deliberately not used: a zero balance is a fact and an erased balance is not. The rule is:
@@ -392,7 +392,7 @@ application that is merely returning erased values.
 
 ## Regulatory references
 
-Verified by Odin, 2026-09-08.
+Verified 2026-09-08.
 
 - **GDPR** Art. 17(1) (right to erasure) and Art. 32(1)(a) (security of processing:
   "pseudonymisation and encryption of personal data"), Regulation (EU) 2016/679, EUR-Lex

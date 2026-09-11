@@ -27,7 +27,7 @@ import java.util.Objects;
  * 28+t+s+r  n  ciphertext || 16-byte tag
  * </pre>
  *
- * <p><strong>Format v2 (design §3, C-34, Cipher items 5, 7 and 12).</strong> The row id is what
+ * <p><strong>Format v2 (design §3, C-34, finding items 5, 7 and 12).</strong> The row id is what
  * stops a ciphertext being moved between two rows of the <em>same</em> subject, which v1 decrypted
  * and displayed: tenant and subject alone made two rows of one person interchangeable. A v1 header
  * is <em>refused</em>, not read - there is no downgrade path and no dual-format reader, because
@@ -60,7 +60,7 @@ public record EncryptedValue(
   /** The only format this module writes or reads. */
   public static final byte FORMAT_VERSION = 0x02;
 
-  /** Row-blind, and therefore refused rather than read (Cipher item 12). */
+  /** Row-blind, and therefore refused rather than read (finding item 12). */
   public static final byte FORMAT_VERSION_V1_UNBOUND = 0x01;
 
   public static final byte ALG_AES_256_GCM = 0x01;
@@ -189,7 +189,7 @@ public record EncryptedValue(
   }
 
   /**
-   * Cipher item 12: a v1 blob is refused with the same code an unknown magic gets. Naming the
+   * finding item 12: a v1 blob is refused with the same code an unknown magic gets. Naming the
    * version in the message, and nothing else about the value, is what lets an operator tell a
    * pre-v2 row apart from corruption without a second tool.
    */

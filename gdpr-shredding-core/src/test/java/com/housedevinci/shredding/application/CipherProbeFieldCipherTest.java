@@ -21,7 +21,10 @@ import java.time.ZoneOffset;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-/** Cipher probes on the value path: AAD binding, key-store outage, tenant isolation, key limits. */
+/**
+ * The security review's probes on the value path: AAD binding, key-store outage, tenant isolation,
+ * key limits.
+ */
 class CipherProbeFieldCipherTest {
 
   /** Design §3: every stored value is bound to a row; these probes use one fixed row. */

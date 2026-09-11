@@ -5,7 +5,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.actuate.endpoint.SanitizableData;
 
-/** Cipher probe: the master key is out of the actuator by name, not by luck (control 5). */
+/**
+ * The security review's probe: the master key is out of the actuator by name, not by luck (control
+ * 5).
+ */
 class CipherProbeActuatorTest {
 
   private final org.springframework.boot.actuate.endpoint.SanitizingFunction function =

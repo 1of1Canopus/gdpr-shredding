@@ -31,7 +31,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Cipher, seventh pass (e2c2bdd), S-7 (HIGH) - closed here for good, on the terms design addendum 3
+ * The seventh pass (e2c2bdd), S-7 (HIGH) - closed here for good, on the terms design addendum 3
  * change 4 sets ("On relaxing S-7's startup refusal": agreed, and change 4 is what makes it safe).
  *
  * <p>S-7's own fix was a startup refusal: a {@code @BlindIndex(of = ...)} field could not declare

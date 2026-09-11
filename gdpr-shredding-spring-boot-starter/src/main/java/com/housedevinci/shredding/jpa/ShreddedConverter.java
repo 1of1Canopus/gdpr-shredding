@@ -24,8 +24,8 @@ import java.util.Objects;
  * <p>One class per shredded field is the price of using an {@code AttributeConverter} at all:
  * Hibernate resolves a converter through the managed-bean registry, which caches one instance per
  * <em>class</em>, so a single shared converter could not know which entity and field it was
- * protecting - and that pair is exactly what the AAD binds. See QUESTIONS #1 for the alternative
- * (generating a class per field at bootstrap) and why it was not taken for the free core.
+ * protecting - and that pair is exactly what the AAD binds. The alternative (generating a class per
+ * field at bootstrap) and why it was not taken for the free core.
  *
  * <p>The startup scan cross-checks every {@code @Shredded} field against the converter that maps it
  * and refuses to start if the names disagree, so a copy-pasted converter cannot silently bind two
@@ -70,7 +70,7 @@ public abstract class ShreddedConverter<T> implements AttributeConverter<T, byte
    * date and every number is a legitimate value, and picking {@code 0} or {@code LocalDate.EPOCH}
    * would make an erased amount indistinguishable from a real zero balance. Those fields read as
    * {@code null} under the {@code sentinel} policy, and the startup check WARNs with the full list
-   * so nobody discovers it from a null pointer (Dollar's ruling on QUESTIONS #5). Under the {@code
+   * so nobody discovers it from a null pointer (the maintainers' decision). Under the {@code
    * exception} policy they throw like every other type.
    */
   public boolean carriesSentinel() {
@@ -83,7 +83,7 @@ public abstract class ShreddedConverter<T> implements AttributeConverter<T, byte
       return null;
     }
     if (Placeholders.isPlaceholder(attribute)) {
-      // Design §1.1, Cipher item 2. This value never came from the application: it is what
+      // Design §1.1, finding item 2. This value never came from the application: it is what
       // convertToEntityAttribute returns while onPostLoad has not yet installed the real one. An
       // entity whose install never ran - a projection into a managed type, a refused load caught
       // and flushed anyway, a detached instance carried across a region - would otherwise write
@@ -141,7 +141,7 @@ public abstract class ShreddedConverter<T> implements AttributeConverter<T, byte
    *
    * <ul>
    *   <li>No open region ⇒ {@code SHRED-READ-UNSCOPED}, thrown from {@link
-   *       ShreddingContext#recordDecoded} before anything is returned (Cipher item 1). A
+   *       ShreddingContext#recordDecoded} before anything is returned (finding item 1). A
    *       projection, a hand-written DAO, a {@code Stream} drained after the call returned: all
    *       loud.
    *   <li>A decrypt inside a region that no verifier ever installs ⇒ {@code SHRED-READ-UNVERIFIED}
@@ -175,7 +175,7 @@ public abstract class ShreddedConverter<T> implements AttributeConverter<T, byte
 
   /**
    * The marker this converter returns until {@code onPostLoad} installs the verified value. Never
-   * {@code null} (Cipher item 2), always the same instance, always compared by reference identity.
+   * {@code null} (finding item 2), always the same instance, always compared by reference identity.
    */
   protected abstract T placeholder();
 

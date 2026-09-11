@@ -7,7 +7,7 @@ import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
 /**
- * Design §3, Cipher item 7: the row identity bound into every header and every AAD comes from the
+ * Design §3, finding item 7: the row identity bound into every header and every AAD comes from the
  * identifier's column value under a canonical, type-tagged encoding - never {@code toString()},
  * whose output for two different identifier types can coincide ({@code Long 1} and {@code String
  * "1"}), and never a guess for a type this module has not been taught.
@@ -21,7 +21,7 @@ class RowIdTest {
         .isEqualTo(RowId.ofIdentifier(1).bytes());
   }
 
-  /** Cipher item 7: a {@code Long} 1 and a {@code String} "1" must not bind to the same row. */
+  /** finding item 7: a {@code Long} 1 and a {@code String} "1" must not bind to the same row. */
   @Test
   void two_identifier_types_that_share_a_to_string_do_not_share_a_row_id() {
     assertThat(RowId.ofIdentifier(1L)).isNotEqualTo(RowId.ofIdentifier("1"));
@@ -43,7 +43,7 @@ class RowIdTest {
     assertThatThrownBy(() -> RowId.ofIdentifier(null)).isInstanceOf(ShreddingException.class);
   }
 
-  /** Design §3, Cipher item 5: no unbound header exists. */
+  /** Design §3, finding item 5: no unbound header exists. */
   @Test
   void an_empty_or_all_zero_row_id_is_refused() {
     assertThatThrownBy(() -> new RowId(new byte[0])).isInstanceOf(ShreddingException.class);

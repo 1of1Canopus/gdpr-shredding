@@ -6,7 +6,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.housedevinci.shredding.domain.ShreddingException;
 import org.junit.jupiter.api.Test;
 
-/** Cipher probe: the subject expression is a field path, not a scripting hook (control 14). */
+/**
+ * The security review's probe: the subject expression is a field path, not a scripting hook
+ * (control 14).
+ */
 class CipherProbeSpelTest {
 
   public static class Owner {

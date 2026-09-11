@@ -25,7 +25,7 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
-/** Cipher fifth pass: attacks on the C-26/C-27 re-keying and per-row re-read landed at 733ada4. */
+/** The fifth pass: attacks on the C-26/C-27 re-keying and per-row re-read landed at 733ada4. */
 @SpringBootTest(classes = CipherProbeFifthPassTest.TestApp.class)
 @Testcontainers
 @DirtiesContext

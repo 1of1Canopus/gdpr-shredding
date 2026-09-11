@@ -19,7 +19,10 @@ import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-/** Cipher probes on the erasure path: hook outcomes, chain keying, and the honest residual. */
+/**
+ * The security review's probes on the erasure path: hook outcomes, chain keying, and the honest
+ * residual.
+ */
 class CipherProbeErasureTest {
 
   /** Design §3: every stored value is bound to a row; these probes use one fixed row. */

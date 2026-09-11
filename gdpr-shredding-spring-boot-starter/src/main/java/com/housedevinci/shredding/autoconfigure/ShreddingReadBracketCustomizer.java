@@ -22,9 +22,10 @@ import org.springframework.util.ClassUtils;
  * {@code ShreddedConverter.convertToEntityAttribute} sees the bracket open and defers verification
  * to {@code ShreddingEventListener.onPostLoad}/{@code refuseIfSubjectMoved}, the same as today.
  *
- * <p>This is the mechanism that makes the entity-load path "the relaxation, not the mechanism"
- * (Cipher's fix text): Hibernate itself gives no hook earlier than the converter for any load, so
- * the bracket is opened one layer up, at the point the application actually asked for a read.
+ * <p>This is the mechanism that makes the entity-load path "the relaxation, not the mechanism" (the
+ * security review's fix text): Hibernate itself gives no hook earlier than the converter for any
+ * load, so the bracket is opened one layer up, at the point the application actually asked for a
+ * read.
  *
  * <p>A {@code BeanPostProcessor} rather than a {@code RepositoryFactoryCustomizer}: the latter is
  * the documented Spring Data extension point for exactly this, but registering it as a plain
@@ -38,19 +39,19 @@ import org.springframework.util.ClassUtils;
  * {@code ShreddingContext.withRead(...)}, most notably a bare JPQL projection run straight off an
  * {@code EntityManager}, has the bracket closed and is refused ({@code SHRED-READ-UNSCOPED}).
  *
- * <p><strong>Third pass (C-17/C-18/C-20/C-22).</strong> Cipher's re-verification found that the
- * bracket as first written was an unconditional permission granted by the caller's identity ("you
- * are inside a repository call"), not a proof that a verifier would run: a repository
- * {@code @Query} projection, a Spring Data interface projection, and a repository bound to a
- * second, uninstrumented {@code EntityManagerFactory} all decrypted with the bracket open and
+ * <p><strong>Third pass (C-17/C-18/C-20/C-22).</strong> the security review's re-verification found
+ * that the bracket as first written was an unconditional permission granted by the caller's
+ * identity ("you are inside a repository call"), not a proof that a verifier would run: a
+ * repository {@code @Query} projection, a Spring Data interface projection, and a repository bound
+ * to a second, uninstrumented {@code EntityManagerFactory} all decrypted with the bracket open and
  * nothing ever draining the decode. {@link ShreddingContext#popReadBracket()} now owes a debt
  * rather than granting a permission - see its javadoc - and this class is what makes that debt
  * actually get checked before the repository method's result reaches its caller (below). The second
  * half of C-20 - a bracket cannot vouch for a session it does not know is instrumented - is closed
  * by {@link #afterSingletonsInstantiated()}: with more than one {@code EntityManagerFactory} bean
  * in the context, there is no reliable, version-independent way for this processor to tell which
- * factory an arbitrary repository bean is bound to (QUESTIONS.md C-20), so every repository is
- * refused at startup rather than bracketed on the chance it belongs to the wrong one.
+ * factory an arbitrary repository bean is bound to (C-20), so every repository is refused at
+ * startup rather than bracketed on the chance it belongs to the wrong one.
  */
 public final class ShreddingReadBracketCustomizer
     implements BeanPostProcessor, Ordered, SmartInitializingSingleton {
@@ -94,9 +95,9 @@ public final class ShreddingReadBracketCustomizer
    * C-20, second half - defence in depth. Runs once, after every singleton in the context has been
    * created. Coarser than "only the repositories actually bound to the other factory" - it refuses
    * the whole application rather than resolving, bean by bean, which factory backs which repository
-   * - and, per QUESTIONS.md C-20, could not be exercised by its own dedicated integration test: a
-   * second {@code EntityManagerFactory}-typed bean registered the ordinary Spring way trips Spring
-   * Boot's own {@code @ConditionalOnMissingBean({LocalContainerEntityManagerFactoryBean.class,
+   * - and, per C-20, could not be exercised by its own dedicated integration test: a second {@code
+   * EntityManagerFactory}-typed bean registered the ordinary Spring way trips Spring Boot's own
+   * {@code @ConditionalOnMissingBean({LocalContainerEntityManagerFactoryBean.class,
    * EntityManagerFactory.class})} on {@code HibernateJpaConfiguration}, which suppresses the
    * auto-configured (and therefore instrumented) factory entirely rather than letting both coexist,
    * so the exact shape this check is written for cannot be constructed through ordinary

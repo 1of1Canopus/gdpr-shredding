@@ -12,10 +12,9 @@ import java.io.Serializable;
 import java.util.Objects;
 
 /**
- * Cipher fifth pass, QUESTIONS #20: a shredded entity with a composite identifier. Both {@code
- * refuseIfSubjectMoved} and {@code onPostLoad} skip their check outright when {@code
- * getIdentifierColumnNames().length != 1}, which QUESTIONS.md records as "undemonstrated rather
- * than proven safe". This entity demonstrates it.
+ * The fifth pass: a shredded entity with a composite identifier. Both {@code refuseIfSubjectMoved}
+ * and {@code onPostLoad} skip their check outright when {@code getIdentifierColumnNames().length !=
+ * 1}, which is recorded as "undemonstrated rather than proven safe". This entity demonstrates it.
  */
 @Entity
 @Table(name = "ticket")

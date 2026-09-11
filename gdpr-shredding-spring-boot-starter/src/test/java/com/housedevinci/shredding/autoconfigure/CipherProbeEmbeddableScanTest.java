@@ -23,9 +23,9 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Cipher fourth pass: C-19's reverse metamodel scan against a {@code @Shredded} field declared
- * inside an {@code @Embeddable}. Neither the forward field scan (entity class and superclasses) nor
- * the reverse scan (top-level {@code BasicValuedModelPart} attributes only) can see it.
+ * The fourth pass: C-19's reverse metamodel scan against a {@code @Shredded} field declared inside
+ * an {@code @Embeddable}. Neither the forward field scan (entity class and superclasses) nor the
+ * reverse scan (top-level {@code BasicValuedModelPart} attributes only) can see it.
  */
 @Testcontainers
 class CipherProbeEmbeddableScanTest {
@@ -98,11 +98,11 @@ class CipherProbeEmbeddableScanTest {
   }
 
   /**
-   * Dollar's mandated companion probe: the same defect through an {@code @ElementCollection} of an
-   * {@code @Embeddable} instead of a plain {@code @Embedded} singular component - {@code
-   * refuseUnmodelledShreddedConverters} has to recurse through a {@code PluralAttributeMapping}
-   * whose element descriptor is itself embeddable-valued, not just an {@code
-   * EmbeddableValuedModelPart} directly on the entity.
+   * The maintainers' mandated companion probe: the same defect through an
+   * {@code @ElementCollection} of an {@code @Embeddable} instead of a plain {@code @Embedded}
+   * singular component - {@code refuseUnmodelledShreddedConverters} has to recurse through a {@code
+   * PluralAttributeMapping} whose element descriptor is itself embeddable-valued, not just an
+   * {@code EmbeddableValuedModelPart} directly on the entity.
    */
   @SpringBootConfiguration
   @EnableAutoConfiguration

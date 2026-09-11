@@ -20,7 +20,10 @@ import jakarta.persistence.Table;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
-/** Cipher probes that must be caught at startup, not by convention (controls 5, 12, 14). */
+/**
+ * The security review's probes that must be caught at startup, not by convention (controls 5, 12,
+ * 14).
+ */
 class CipherProbeStartupTest {
 
   @Converter
@@ -248,8 +251,8 @@ class CipherProbeStartupTest {
   }
 
   /**
-   * Dollar's ruling on QUESTIONS #5: no fake sentinel values, but the operator is told which fields
-   * will read as null before they find out from a null pointer.
+   * The maintainers' decision: no fake sentinel values, but the operator is told which fields will
+   * read as null before they find out from a null pointer.
    */
   @Test
   void the_scan_names_the_fields_whose_type_cannot_carry_a_sentinel() {
@@ -261,8 +264,8 @@ class CipherProbeStartupTest {
   }
 
   /**
-   * Dollar's ruling on QUESTIONS #9: the record and Lombok cases fire at startup, with no test in
-   * the user's build. A record generates toString, equals and hashCode over every component, so a
+   * The maintainers' decision: the record and Lombok cases fire at startup, with no test in the
+   * user's build. A record generates toString, equals and hashCode over every component, so a
    * decrypted value reaches the first log line that renders the entity.
    */
   @Test
@@ -460,7 +463,7 @@ class CipherProbeStartupTest {
 
     var config = new ShreddingAutoConfiguration();
     // The chain WARN is what an operator actually reads; it must name the pepper consequence, not
-    // only the chain's own integrity note (Dollar's ruling on CIPHER-07).
+    // only the chain's own integrity note (the maintainers' decision on CIPHER-07).
     assertThatCode(() -> config.shreddingErasureChain(properties)).doesNotThrowAnyException();
     assertThatCode(() -> config.shreddingPseudonymiser(properties)).doesNotThrowAnyException();
   }

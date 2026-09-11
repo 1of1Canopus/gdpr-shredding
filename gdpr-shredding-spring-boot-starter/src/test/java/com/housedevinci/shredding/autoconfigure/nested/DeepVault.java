@@ -13,7 +13,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
 /**
- * Cipher fifth pass: C-29's reverse-scan recursion at depth two. {@code Vault} proves one level of
+ * The fifth pass: C-29's reverse-scan recursion at depth two. {@code Vault} proves one level of
  * {@code @Embedded}; this entity puts the {@code @Shredded} field inside an {@code @Embeddable}
  * nested inside another {@code @Embeddable}, so {@code scanAttribute} has to recurse through two
  * {@code EmbeddableValuedModelPart}s before it reaches the {@code BasicValuedModelPart}.

@@ -82,7 +82,8 @@ class Aes256GcmTest {
 
   @Test
   void the_nonce_source_is_secure_random_and_a_narrow_source_is_detectable() {
-    // Cipher replaced the spec's "100k encryptions, no nonce collision" property test: 100k draws
+    // The security review replaced the spec's "100k encryptions, no nonce collision" property test:
+    // 100k draws
     // from 2^96 collide with probability about 2^-64, so that test cannot fail even against a
     // badly broken generator. What can be tested is that the nonce comes from a source we control
     // and that a narrow one is visible.

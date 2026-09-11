@@ -20,8 +20,8 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Cipher sixth pass, design item 14's insert half - QUESTIONS #25; renamed per S-12 (Cipher seventh
- * pass) to what this class actually asserts.
+ * The sixth pass, design item 14's insert half; renamed per S-12 (the seventh pass) to what this
+ * class actually asserts.
  *
  * <p>This probe originally demonstrated S-1 (a batched {@code INSERT} silently skipping the
  * insert-side post-hoc header check) through {@code PropSeqWidget}, an

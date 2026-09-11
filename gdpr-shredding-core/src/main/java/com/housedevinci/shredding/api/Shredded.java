@@ -13,7 +13,7 @@ import java.lang.annotation.Target;
  * Shredded*Converter} base classes with this entity and field name; the starter cross-checks the
  * two at startup and refuses to start if they disagree. A Hibernate {@code AttributeConverter} is
  * instantiated once per class, not once per attribute, so the entity and field it protects have to
- * come from the converter class itself. See QUESTIONS #1.
+ * come from the converter class itself.
  *
  * <p>{@link #subject()} is a SpEL expression over the entity, evaluated in a read-only property
  * context: no bean references, no {@code T()} type references, no constructors, no method calls. It

@@ -12,8 +12,8 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
 /**
- * Cipher, tenth pass: the subject column is named {@code user}, a PostgreSQL reserved word that is
- * also a valid scalar expression. The mapping quotes it, as it must; the erasure interpolates it
+ * The tenth pass: the subject column is named {@code user}, a PostgreSQL reserved word that is also
+ * a valid scalar expression. The mapping quotes it, as it must; the erasure interpolates it
  * unquoted.
  */
 @Entity

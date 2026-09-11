@@ -35,7 +35,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Cipher, ninth pass, S-21b. {@code refuseIfSubjectMoved} is the write path's subject-immutability
+ * The ninth pass, S-21b. {@code refuseIfSubjectMoved} is the write path's subject-immutability
  * check: before every {@code UPDATE} of a {@code @Shredded} row, it re-reads that row's own stored
  * shredded columns by id and compares the header against the scope the write is happening under.
  * {@code readStoredShreddedColumns} returns {@code null} when its {@code SELECT ... WHERE id = ?}

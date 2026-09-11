@@ -258,7 +258,7 @@ public class ShreddingAutoConfiguration {
   @Bean
   public HibernatePropertiesCustomizer shreddingHibernateCustomizer(
       ShreddingEventListener shreddingEventListener) {
-    // S-6 (Cipher sixth pass): JpaSettings.INTEGRATOR_PROVIDER holds one value. An unconditional
+    // S-6 (the sixth pass): JpaSettings.INTEGRATOR_PROVIDER holds one value. An unconditional
     // put() replaces whatever a library that ships its own integrator, or an application's own
     // HibernatePropertiesCustomizer, already stored there - discarded silently, an application's
     // own auditing or security integrator included. Composed instead: whatever IntegratorProvider

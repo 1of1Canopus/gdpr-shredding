@@ -18,7 +18,7 @@ import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 
 /**
- * Design addendum 2 (region residue) and Cipher's six changes to it, one probe each.
+ * Design addendum 2 (region residue) and the security review's six changes to it, one probe each.
  *
  * <p>The property under test: <em>a decrypt is served only inside a region opened by the same
  * bracketed entry that is reading, on the same thread; residue from an earlier call, however it
@@ -43,7 +43,7 @@ class CipherProbeRegionEpochTest {
 
   @AfterEach
   void leaveTheThreadClean() {
-    // S-14 (Cipher eighth pass): discardRegion(-1L) no longer empties the deque for a token that
+    // S-14 (the eighth pass): discardRegion(-1L) no longer empties the deque for a token that
     // is not on it, so this thread's own resetForTests() replaces the loop that used to rely on
     // that behaviour.
     ShreddingContext.resetForTests();

@@ -5,7 +5,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.Repository;
 import org.springframework.data.repository.query.Param;
 
-/** Cipher third pass: the same projections CIPHER-11 refuses, declared on a repository instead. */
+/** The third pass: the same projections CIPHER-11 refuses, declared on a repository instead. */
 public interface DocProjectionRepository extends Repository<Doc, Long> {
 
   @Query("select d.title from Doc d where d.ownerId = :id")

@@ -33,7 +33,7 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
-/** Cipher, eleventh pass: the surfaces design addendum 4 left open. */
+/** The eleventh pass: the surfaces design addendum 4 left open. */
 @Testcontainers
 class CipherProbeEleventhPassTest {
 

@@ -11,7 +11,7 @@ import jakarta.persistence.Table;
 import java.io.Serializable;
 
 /**
- * Cipher item 7: a <em>single-column</em> {@code @EmbeddedId}. It passes C-38's column count check
+ * finding item 7: a <em>single-column</em> {@code @EmbeddedId}. It passes C-38's column count check
  * - there is exactly one identifier column - but it is not a basic value, so its Java value is a
  * component object with no canonical byte form {@code RowId} could bind to. A guessed row binding
  * is no binding, so the mapping is refused at startup.

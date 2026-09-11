@@ -12,9 +12,7 @@ import jakarta.persistence.SequenceGenerator;
 import jakarta.persistence.Table;
 import org.hibernate.annotations.Immutable;
 
-/**
- * {@link Blob}'s field, mapped under {@code SEQUENCE} instead of {@code IDENTITY} (QUESTIONS #15).
- */
+/** {@link Blob}'s field, mapped under {@code SEQUENCE} instead of {@code IDENTITY}. */
 @Entity
 @Table(name = "blob_seq")
 public class BlobSeq {

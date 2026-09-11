@@ -16,7 +16,7 @@ if [ ${#subject} -gt 72 ]; then
   echo "commit-msg: subject is ${#subject} chars, max 72" >&2; exit 1
 fi
 if grep -Eiq '^(Co-Authored-By|Claude-Session|Generated-by|Signed-off-by: .*claude)' "$msg_file"; then
-  echo "commit-msg: attribution trailers are forbidden (Souhaile's rule)" >&2; exit 1
+  echo "commit-msg: attribution trailers are forbidden (the maintainer's rule)" >&2; exit 1
 fi
 if grep -q '—' "$msg_file"; then
   echo "commit-msg: no em-dashes in commit messages" >&2; exit 1

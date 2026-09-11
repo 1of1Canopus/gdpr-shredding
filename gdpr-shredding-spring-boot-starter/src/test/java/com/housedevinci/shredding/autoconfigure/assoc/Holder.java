@@ -11,7 +11,7 @@ import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
 
 /**
- * Cipher fifth pass, C-36: an ordinary, non-shredded entity holding a reference to a shredded one.
+ * The fifth pass, C-36: an ordinary, non-shredded entity holding a reference to a shredded one.
  * {@code ShreddingEventListener.refuseLoad} evicts the refused {@code Widget} from the persistence
  * context, but eviction removes the session's own entry - it cannot reach into another managed
  * instance that already holds a Java reference to the same, fully decrypted object.

@@ -29,9 +29,9 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Cipher, ninth pass. Three surfaces addendum 3 opened or left open: two blind indexes on one
- * entity, an index table in a schema of its own (the K1 lesson - an unqualified identifier resolves
- * against {@code search_path}), and an {@code @ElementCollection} whose element carries the
+ * The ninth pass. Three surfaces addendum 3 opened or left open: two blind indexes on one entity,
+ * an index table in a schema of its own (the K1 lesson - an unqualified identifier resolves against
+ * {@code search_path}), and an {@code @ElementCollection} whose element carries the
  * {@code @Shredded} value and its index.
  */
 @Testcontainers

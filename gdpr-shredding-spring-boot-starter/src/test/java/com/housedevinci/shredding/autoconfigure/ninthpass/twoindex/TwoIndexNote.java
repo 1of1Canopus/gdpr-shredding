@@ -11,7 +11,7 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
-/** Cipher, ninth pass: two blind indexes on one entity, over two different {@code of} fields. */
+/** The ninth pass: two blind indexes on one entity, over two different {@code of} fields. */
 @Entity
 @Table(name = "two_index_note")
 public class TwoIndexNote {

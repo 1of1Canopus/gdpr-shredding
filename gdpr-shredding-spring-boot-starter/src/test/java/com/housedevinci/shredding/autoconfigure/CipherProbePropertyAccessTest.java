@@ -20,7 +20,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Cipher sixth pass. {@code @Access(AccessType.PROPERTY)} moves the mapping to the getters and JPA
+ * The sixth pass. {@code @Access(AccessType.PROPERTY)} moves the mapping to the getters and JPA
  * then ignores the annotations on the fields - the {@code @Convert} among them. The startup scan
  * reads {@code @Shredded} and {@code @Convert} off the <em>field</em> and accepts the mapping; the
  * C-19 reverse check walks the metamodel for attributes whose resolved converter is a {@code

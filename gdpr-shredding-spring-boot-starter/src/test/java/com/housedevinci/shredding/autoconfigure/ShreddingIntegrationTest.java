@@ -332,7 +332,7 @@ class ShreddingIntegrationTest {
   }
 
   /**
-   * Design §1, Cipher item 1: {@code withRead} is gone. It vouched for a projection with a
+   * Design §1, finding item 1: {@code withRead} is gone. It vouched for a projection with a
    * caller-supplied subject, which is exactly the "ambient state authorises" shape five review
    * passes kept breaking. A projection inside an open read region now decrypts nothing a caller can
    * see - the converter returns a placeholder - and the region refuses when it closes.
@@ -360,7 +360,7 @@ class ShreddingIntegrationTest {
 
   /**
    * And the same projection with no region at all: refused at the decrypt, before anything is
-   * returned. Cipher item 1 - a placeholder handed out with nothing that will ever close a region
+   * returned. finding item 1 - a placeholder handed out with nothing that will ever close a region
    * is a value crossing the boundary with no signal.
    */
   @Test
@@ -419,7 +419,9 @@ class ShreddingIntegrationTest {
         .satisfies(t -> assertThat(shreddingCode(t)).isEqualTo(ErrorCodes.SUBJECT_UNRESOLVED));
   }
 
-  /** The other half of the ruling: no shredded value on the row, an unresolvable subject loads. */
+  /**
+   * The other half of the decision: no shredded value on the row, an unresolvable subject loads.
+   */
   @Test
   void a_row_with_no_shredded_value_loads_despite_an_unresolvable_subject() throws Exception {
     Doc row = docs.save(new Doc("owner-empty-" + System.nanoTime(), null, null));
@@ -505,7 +507,7 @@ class ShreddingIntegrationTest {
     assertThat(afterErasure.getBody()).isEqualTo(ErasedValue.MARKER);
   }
 
-  // -- CIPHER-16 / QUESTIONS #15: byte[] + IDENTITY (and SEQUENCE) round-trips ------------------
+  // -- CIPHER-16: byte[] + IDENTITY (and SEQUENCE) round-trips ------------------------------
 
   @Test
   void a_shredded_byte_array_field_round_trips_under_identity() {

@@ -15,7 +15,7 @@ import jakarta.persistence.InheritanceType;
 import jakarta.persistence.Table;
 
 /**
- * Cipher, twelfth pass: a SINGLE_TABLE hierarchy. Root and subclass are two entity names over one
+ * The twelfth pass: a SINGLE_TABLE hierarchy. Root and subclass are two entity names over one
  * table, and {@code allFields} walks the superclass, so the one {@code @BlindIndex} field is
  * scanned twice and collides with itself on (table, column) - the shape E-1's refusal now names as
  * "two entities mapped to one table". The refusal a developer must see here is the inheritance one.

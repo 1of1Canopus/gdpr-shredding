@@ -5,7 +5,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import org.junit.jupiter.api.Test;
 
-/** Cipher probe: the blind index is per tenant, versioned, and a prefilter only (control 10). */
+/**
+ * The security review's probe: the blind index is per tenant, versioned, and a prefilter only
+ * (control 10).
+ */
 class CipherProbeBlindIndexTest {
 
   private static final byte[] SECRET =

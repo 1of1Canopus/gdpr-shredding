@@ -141,7 +141,7 @@ the resumable batch migrator that encrypts existing plaintext columns.
 ## Documentation
 
 `docs/index.md` (quickstart, configuration table, error codes, FAQ) - `SECURITY-NOTES.md`
-(residuals and threat model) - `CHANGELOG.md` - `QUESTIONS.md` (open decisions).
+(residuals and threat model) - `CHANGELOG.md`.
 
 ## Build
 

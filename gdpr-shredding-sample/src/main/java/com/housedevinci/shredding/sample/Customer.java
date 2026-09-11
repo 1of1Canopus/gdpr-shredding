@@ -17,7 +17,7 @@ import jakarta.persistence.Table;
  * <p>{@code email} and {@code phone} are encrypted under this customer's own data key. Erasing the
  * customer destroys that key; this row, and every row that points at {@code customerId}, survives.
  *
- * <p>Neither field carries a {@code @BlindIndex}. S-7 (Cipher seventh pass): a {@code @BlindIndex}
+ * <p>Neither field carries a {@code @BlindIndex}. S-7 (the seventh pass): a {@code @BlindIndex}
  * whose {@code of} field declares its own {@code @Shredded(tenant=...)} is refused at startup - the
  * index would be derived under that declared tenant, but the erasure meant to destroy it matches
  * only the row's own {@code tenant_id} column, and the module cannot prove the two always agree

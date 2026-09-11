@@ -37,7 +37,7 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
-/** Cipher third pass: em.find/getReference, @Async, and a second EntityManagerFactory. */
+/** The third pass: em.find/getReference, @Async, and a second EntityManagerFactory. */
 @SpringBootTest(classes = CipherProbeMatrix2Test.TestApp.class)
 @Testcontainers
 @DirtiesContext
@@ -166,11 +166,11 @@ class CipherProbeMatrix2Test {
    * decode is recorded into the bracket's frame same as any other; no {@code onPostLoad} exists on
    * this uninstrumented factory to drain it (there is no {@code ShreddingIntegrator} registered
    * against it at all), and the frame closes with the entry still in it - {@code withReadBracket}
-   * itself throws, before {@code leaked} is ever assigned. This is the runtime path Cipher's repro
-   * used, and the frame accounting alone already closes it; see QUESTIONS.md C-20 for why the
-   * separate, coarser startup-time defence ({@code ShreddingReadBracketCustomizer} refusing
-   * outright when more than one {@code EntityManagerFactory} bean exists) ships without its own
-   * dedicated integration probe.
+   * itself throws, before {@code leaked} is ever assigned. This is the runtime path the security
+   * review's repro used, and the frame accounting alone already closes it; per C-20, the separate,
+   * coarser startup-time defence ({@code ShreddingReadBracketCustomizer} refusing outright when
+   * more than one {@code EntityManagerFactory} bean exists) ships without its own dedicated
+   * integration probe.
    */
   @Test
   void probe_a_second_entity_manager_factory_decrypts_a_moved_ciphertext() throws Exception {

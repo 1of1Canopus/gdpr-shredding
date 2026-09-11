@@ -12,7 +12,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
 /**
- * Cipher, eleventh pass: a @ColumnTransformer that only rewrites the <em>write</em>. The existing
+ * The eleventh pass: a @ColumnTransformer that only rewrites the <em>write</em>. The existing
  * change-4 fixture sets both read and write, so a predicate that only looked at the read expression
  * would still refuse it. This one leaves the read plain: the column stores upper(value) while the
  * erasure binds the value as given, so WHERE owner_id = ? matches nothing.

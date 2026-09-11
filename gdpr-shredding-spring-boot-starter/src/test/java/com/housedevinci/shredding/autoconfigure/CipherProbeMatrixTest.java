@@ -33,7 +33,7 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
-/** Cipher third pass: the read-path matrix. Each case prints REFUSE / VERIFY / LEAK. */
+/** The third pass: the read-path matrix. Each case prints REFUSE / VERIFY / LEAK. */
 @SpringBootTest(classes = CipherProbeMatrixTest.TestApp.class)
 @Testcontainers
 @DirtiesContext
@@ -249,8 +249,8 @@ class CipherProbeMatrixTest {
    * array a {@code @Shredded byte[]} field holds is compared against itself and is never seen as
    * dirty. No exception, no log line, no {@code UPDATE} - this probe demonstrates exactly that,
    * confirming the documentation this pass corrects (README.md, docs/index.md, and the startup
-   * message in {@code ShreddedModel}) tells the truth. See QUESTIONS.md C-21: making this probe
-   * assert the opposite would mean deep-copying the array again, which reopens CIPHER-16.
+   * message in {@code ShreddedModel}) tells the truth. Per C-21, making this probe assert the
+   * opposite would mean deep-copying the array again, which reopens CIPHER-16.
    */
   @Test
   /**
@@ -258,9 +258,9 @@ class CipherProbeMatrixTest {
    * probe_an_in_place_mutation_of_an_immutable_byte_array_is_persisted}. The old name promised the
    * opposite of what the body asserts: the assertion ({@code reloaded[0] == 1}, i.e. the mutation
    * is lost) is correct and was correct before this rename too - it is what C-21's corrected
-   * documentation says happens, and Cipher's own third-pass fix text for C-21 rules out making the
-   * mutation actually persist (that would reintroduce CIPHER-16's IDENTITY-insert failure). Only
-   * the name was wrong; QUESTIONS.md #18 records the ruling.
+   * documentation says happens, and the security review's own third-pass fix text for C-21 rules
+   * out making the mutation actually persist (that would reintroduce CIPHER-16's IDENTITY-insert
+   * failure). Only the name was wrong.
    */
   void probe_an_in_place_mutation_of_an_immutable_byte_array_is_silently_discarded() {
     String owner = "blob-mut-" + System.nanoTime();

@@ -49,8 +49,8 @@ public final class ShreddingStartupCheck implements InitializingBean {
   @Override
   public void afterPropertiesSet() {
     ShreddingRuntime.set(new ShreddingRuntime(cipher, properties.getErasedValue().getPolicy()));
-    // #26 (Cipher seventh pass): the write-verification ledger's hard cap, configured once at boot
-    // the same way ShreddingRuntime is. S-16 (Cipher eighth pass): a cap below 1 boots cleanly and
+    // #26 (the seventh pass): the write-verification ledger's hard cap, configured once at boot
+    // the same way ShreddingRuntime is. S-16 (the eighth pass): a cap below 1 boots cleanly and
     // then refuses the application's very first shredded write - checked here, before it is ever
     // handed to WriteVerification.
     refuseIfLedgerCapBelowOne();
@@ -77,7 +77,7 @@ public final class ShreddingStartupCheck implements InitializingBean {
     }
     if (properties.getErasedValue().getPolicy() == ErasedValuePolicy.SENTINEL
         && !model.fieldsWithoutSentinel().isEmpty()) {
-      // Dollar's ruling on QUESTIONS #5: no fake sentinel values, but nobody should discover this
+      // The maintainers' decision: no fake sentinel values, but nobody should discover this
       // from a null pointer at three in the morning.
       log.warn(
           "shredding: shredding.erased-value.policy=sentinel, but these field(s) have a type with"
@@ -154,7 +154,7 @@ public final class ShreddingStartupCheck implements InitializingBean {
   }
 
   /**
-   * S-16 (Cipher eighth pass). {@code shredding.write-verification.max-outstanding} below 1 boots
+   * S-16 (the eighth pass). {@code shredding.write-verification.max-outstanding} below 1 boots
    * cleanly and then turns every write of a {@code @Shredded} entity into a refusal: {@code owe}
    * compares the ledger's size against the cap <em>before</em> adding a genuinely new debt, so a
    * cap of {@code 0} or negative is already exceeded before the first row. This module's own
@@ -175,15 +175,15 @@ public final class ShreddingStartupCheck implements InitializingBean {
   }
 
   /**
-   * S-6 (Cipher sixth pass), widened by S-11 (Cipher seventh pass). {@code
-   * ShreddingHibernateCustomizer} composes with whatever {@code IntegratorProvider} another library
-   * or the application already installed, so this module's listener is never silently discarded -
-   * but composing is a best effort, not a proof: nothing checked, until S-6, that the composition
-   * actually reached Hibernate and that this module's {@code POST_LOAD} listener is still the first
-   * one called. Run once, after the {@code SessionFactory} is actually built (this bean depends on
-   * {@code EntityManagerFactory}, so Spring has already finished building it by the time this
-   * runs), against the real, live {@code EventListenerRegistry} rather than assumed from the
-   * customizer having run without an exception.
+   * S-6 (the sixth pass), widened by S-11 (the seventh pass). {@code ShreddingHibernateCustomizer}
+   * composes with whatever {@code IntegratorProvider} another library or the application already
+   * installed, so this module's listener is never silently discarded - but composing is a best
+   * effort, not a proof: nothing checked, until S-6, that the composition actually reached
+   * Hibernate and that this module's {@code POST_LOAD} listener is still the first one called. Run
+   * once, after the {@code SessionFactory} is actually built (this bean depends on {@code
+   * EntityManagerFactory}, so Spring has already finished building it by the time this runs),
+   * against the real, live {@code EventListenerRegistry} rather than assumed from the customizer
+   * having run without an exception.
    *
    * <p><strong>S-11.</strong> S-6's check covered five of the seven event types {@link
    * ShreddingIntegrator} registers - {@code PRE_INSERT}, {@code PRE_UPDATE}, {@code POST_INSERT},
@@ -198,7 +198,7 @@ public final class ShreddingStartupCheck implements InitializingBean {
    * {@link ShreddingIntegrator#integrate} registers, so a type added there cannot silently go
    * unchecked here.
    *
-   * <p><strong>What this check does and does not prove (S-11, accepted residual, Cipher eighth
+   * <p><strong>What this check does and does not prove (S-11, accepted residual, the eighth
    * pass).</strong> It proves, against the live {@code EventListenerRegistry} after the {@code
    * SessionFactory} is built, that this module's listener is registered on all eight event types
    * above and is in the position it registered for. It does not prove that the listeners Hibernate
@@ -293,7 +293,7 @@ public final class ShreddingStartupCheck implements InitializingBean {
                 ? "It has to run before any other listener on this type - a user @PostLoad method,"
                     + " an @EntityListeners bean, or another library's own integrator - or that"
                     + " listener sees the read placeholder instead of the decrypted value, or binds"
-                    + " before the scope is pushed (Cipher item 8)."
+                    + " before the scope is pushed (finding item 8)."
                 : "It has to run after every other listener on this type - the post-hoc header"
                     + " check and the settlement machinery must see what actually reached the"
                     + " database, after every other listener has had its turn.")

@@ -13,7 +13,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Cipher, seventh pass (e2c2bdd). Two properties the read-region bookkeeping and the placeholder
+ * The seventh pass (e2c2bdd). Two properties the read-region bookkeeping and the placeholder
  * markers claim and do not have. Both are pure, in-process probes: no Hibernate, no container.
  */
 class CipherProbeSeventhPassTest {
@@ -28,7 +28,7 @@ class CipherProbeSeventhPassTest {
 
   @AfterEach
   void clean() {
-    // S-14 (Cipher eighth pass): discardRegion(-1L) no longer empties the deque for a token that
+    // S-14 (the eighth pass): discardRegion(-1L) no longer empties the deque for a token that
     // is not on it, so this thread's own resetForTests() replaces the loop that used to rely on
     // that behaviour.
     ShreddingContext.resetForTests();

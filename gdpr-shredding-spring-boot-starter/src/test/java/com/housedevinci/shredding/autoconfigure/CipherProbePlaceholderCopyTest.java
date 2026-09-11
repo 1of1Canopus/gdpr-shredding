@@ -27,7 +27,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Cipher sixth pass. Design item 2's whole reason for a non-null placeholder is that the write-back
+ * The sixth pass. Design item 2's whole reason for a non-null placeholder is that the write-back
  * check turns "an entity whose install never ran, flushed anyway" into {@code
  * SHRED-PLACEHOLDER-001} instead of a live ciphertext overwritten with a marker. Item 3 then made
  * the comparison reference identity, and {@code

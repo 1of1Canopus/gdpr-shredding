@@ -12,7 +12,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
 /**
- * Cipher, eleventh pass: two entities over one table, each with its own subject column and both
+ * The eleventh pass: two entities over one table, each with its own subject column and both
  * indexing the same physical blind-index column. HibernateBlindIndexResidual keys its residuals on
  * (table, index column), so these two collide in one LinkedHashMap and one of them is dropped.
  */

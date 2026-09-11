@@ -26,7 +26,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Cipher fifth pass, C-36: {@code refuseLoad}'s eviction versus an instance the session has already
+ * The fifth pass, C-36: {@code refuseLoad}'s eviction versus an instance the session has already
  * handed to another managed entity.
  */
 @SpringBootTest(classes = CipherProbeEvictionTest.TestApp.class)

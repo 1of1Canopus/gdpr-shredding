@@ -24,7 +24,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Cipher fifth pass: how deep C-29's reverse metamodel scan actually goes. {@code
+ * The fifth pass: how deep C-29's reverse metamodel scan actually goes. {@code
  * CipherProbeEmbeddableScanTest} covers one level of {@code @Embedded} and an
  * {@code @ElementCollection} of {@code @Embeddable}s. These three go one step past each of those.
  */

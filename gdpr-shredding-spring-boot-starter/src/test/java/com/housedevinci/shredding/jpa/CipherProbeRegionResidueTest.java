@@ -13,14 +13,14 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Cipher sixth pass, QUESTIONS #21 and #24, design item 4 - S-4's two probes, promoted from {@code
- * src/test-pending/java} by design addendum 2 and green.
+ * The sixth pass, design item 4 - S-4's two probes, promoted from {@code src/test-pending/java} by
+ * design addendum 2 and green.
  *
  * <p>What they were written against: a region still on the thread's deque with no owner alive, the
- * state #21 describes. Cipher could not reproduce it from a {@code StackOverflowError} - measured
- * 0/200, because {@code unwindTo} pops every region above the token it is given - and built it the
- * honest way instead, from the public, unpaired {@code openRegion()} that nothing pairs with a
- * close. Both probes keep that construction.
+ * state #21 describes. The security review could not reproduce it from a {@code StackOverflowError}
+ * - measured 0/200, because {@code unwindTo} pops every region above the token it is given - and
+ * built it the honest way instead, from the public, unpaired {@code openRegion()} that nothing
+ * pairs with a close. Both probes keep that construction.
  *
  * <p>What changed under addendum 2: a region carries the <em>entry epoch</em> in force when it was
  * constructed, and {@code openRegion()} stamps the distinguished "no entry in force" value. So the
@@ -38,7 +38,7 @@ class CipherProbeRegionResidueTest {
 
   @AfterEach
   void leaveTheThreadClean() {
-    // S-14 (Cipher eighth pass): discardRegion(-1L) no longer empties the deque for a token that
+    // S-14 (the eighth pass): discardRegion(-1L) no longer empties the deque for a token that
     // is not on it, so this thread's own resetForTests() replaces the loop that used to rely on
     // that behaviour.
     ShreddingContext.resetForTests();

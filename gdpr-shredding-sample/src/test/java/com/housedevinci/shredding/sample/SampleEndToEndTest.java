@@ -105,7 +105,7 @@ class SampleEndToEndTest {
     var result = service.erase("acme", customerId, "dpo", "art 17 request");
     assertThat(result.complete()).isTrue();
     assertThat(result.keysDestroyed()).isEqualTo(1);
-    // S-7 (Cipher seventh pass): Customer carries no @BlindIndex - the tenant every @Shredded
+    // S-7 (the seventh pass): Customer carries no @BlindIndex - the tenant every @Shredded
     // field here has to declare (there is no ambient TenantSupplier in this sample) rules one out.
     assertThat(result.blindIndexColumnsCleared()).isEqualTo(0);
 
@@ -128,9 +128,9 @@ class SampleEndToEndTest {
   }
 
   /**
-   * Cipher probe: Hibernate's dirty checking must not decide the sentinel is a change and write a
-   * fresh ciphertext over the shredded column. That would give the erased subject a brand new
-   * encrypted value of the string "[erased]" and, worse, need a key to do it.
+   * The security review's probe: Hibernate's dirty checking must not decide the sentinel is a
+   * change and write a fresh ciphertext over the shredded column. That would give the erased
+   * subject a brand new encrypted value of the string "[erased]" and, worse, need a key to do it.
    */
   @Test
   void probe_reading_an_erased_entity_rewrites_the_column_on_flush() throws Exception {
@@ -168,8 +168,8 @@ class SampleEndToEndTest {
   }
 
   /**
-   * Cipher probe: a generated toString over every field is the commonest way a decrypted value
-   * lands in a log. The sample greps its own entity rendering for the fixture.
+   * The security review's probe: a generated toString over every field is the commonest way a
+   * decrypted value lands in a log. The sample greps its own entity rendering for the fixture.
    */
   @Test
   void probe_entity_tostring_leaks_the_decrypted_value() {
@@ -182,8 +182,8 @@ class SampleEndToEndTest {
   }
 
   /**
-   * Cipher probe: changing the subject expression's source on a persisted row would re-encrypt it
-   * under someone else's key, so the first subject's erasure would leave it readable.
+   * The security review's probe: changing the subject expression's source on a persisted row would
+   * re-encrypt it under someone else's key, so the first subject's erasure would leave it readable.
    */
   @Test
   void probe_changing_the_subject_expression_moves_a_row_out_of_erasure_scope() {
@@ -279,11 +279,11 @@ class SampleEndToEndTest {
   }
 
   /**
-   * QUESTIONS #4, ruling (c): the case the old per-thread map could not catch. The row is loaded
-   * and detached in one transaction/thread, its subject changed, then merged in a brand new session
-   * that never loaded it - so a cache of "what this process loaded" has nothing on it. The
-   * second-query check in {@code onPreUpdate} still catches it, because it reads the row's current
-   * header from the database rather than from anything this process remembered.
+   * Decision (c): the case the old per-thread map could not catch. The row is loaded and detached
+   * in one transaction/thread, its subject changed, then merged in a brand new session that never
+   * loaded it - so a cache of "what this process loaded" has nothing on it. The second-query check
+   * in {@code onPreUpdate} still catches it, because it reads the row's current header from the
+   * database rather than from anything this process remembered.
    *
    * <p>CIPHER-11: {@code EntityManager.merge} re-loads the row's current persisted state internally
    * to reconcile it against the detached instance, which reaches a shredded converter exactly like

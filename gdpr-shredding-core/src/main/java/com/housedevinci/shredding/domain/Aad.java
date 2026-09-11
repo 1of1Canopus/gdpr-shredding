@@ -38,7 +38,7 @@ public final class Aad {
    * Binds a stored value to its tenant, subject, <strong>row</strong>, entity, field, key version
    * and algorithm.
    *
-   * <p>The row id (design §3, C-34, Cipher item 7) is the component that stops a ciphertext being
+   * <p>The row id (design §3, C-34, finding item 7) is the component that stops a ciphertext being
    * moved between two rows of the same subject. It is the identifier's canonical column encoding,
    * hex-rendered here so the AAD stays a well-formed, length-prefixed text - never {@code
    * Object.toString()} of the identifier, which cannot tell a {@code Long 1} from a {@code String

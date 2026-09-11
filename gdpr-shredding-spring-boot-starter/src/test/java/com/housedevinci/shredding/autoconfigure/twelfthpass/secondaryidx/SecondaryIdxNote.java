@@ -14,7 +14,7 @@ import jakarta.persistence.SecondaryTable;
 import jakarta.persistence.Table;
 
 /**
- * Cipher, twelfth pass: the one axis with no {@code @SecondaryTable} refusal. The {@code @Shredded}
+ * The twelfth pass: the one axis with no {@code @SecondaryTable} refusal. The {@code @Shredded}
  * column and both index axes stay on the primary table - only the {@code @BlindIndex} byte[] moves
  * to the secondary one, which {@code resolveIndexColumns} never compares against {@code
  * primaryTable(persister)}.

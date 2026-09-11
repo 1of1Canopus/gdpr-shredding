@@ -5,8 +5,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import org.junit.jupiter.api.Test;
 
 /**
- * Cipher, eighth pass (fa6f477). S-17 (INFO), and the prescription that caused it is Cipher's own:
- * the seventh pass told S-10 to draw {@code BIG_DECIMAL} "at a scale of the order of 10^6".
+ * The eighth pass (fa6f477). S-17 (INFO), and the prescription that caused it is the security
+ * review's own: the seventh pass told S-10 to draw {@code BIG_DECIMAL} "at a scale of the order of
+ * 10^6".
  *
  * <p>The unguessability of the marker comes from the 64 random bits of the unscaled value, not from
  * the exponent - but the exponent decides what the marker <em>renders</em> as. {@code toString()}

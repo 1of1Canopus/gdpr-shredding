@@ -14,7 +14,7 @@ import org.hibernate.annotations.OptimisticLockType;
 import org.hibernate.annotations.OptimisticLocking;
 
 /**
- * Cipher item 10 / D4: all-column optimistic locking. The UPDATE's {@code WHERE} clause is built
+ * finding item 10 / D4: all-column optimistic locking. The UPDATE's {@code WHERE} clause is built
  * from the persistence context's loaded state, into which {@code onPostLoad} installs the verified
  * plaintext - so it would carry the plaintext against a column holding ciphertext, and no update
  * would ever match its row.

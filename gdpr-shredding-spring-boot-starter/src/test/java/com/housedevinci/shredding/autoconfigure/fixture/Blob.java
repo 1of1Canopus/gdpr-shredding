@@ -12,14 +12,14 @@ import jakarta.persistence.Table;
 import org.hibernate.annotations.Immutable;
 
 /**
- * CIPHER-16 / QUESTIONS #15: a {@code byte[]} {@code @Shredded} field under
- * {@code @GeneratedValue(IDENTITY)}. {@code @Immutable} is what stops {@code
- * AttributeConverterMutabilityPlan} deep-copying the converted value (a second, out-of-bracket call
- * to the converter) to build the dirty-checking snapshot. Top-level, not nested: a nested
- * {@code @Entity} makes {@code ShreddingEventListener.entityName} (which strips only up to the last
- * {@code '.'}) and {@code ShreddedModel.entityName} (which uses {@code Class.getSimpleName()})
- * disagree on the entity's name for a {@code $}-qualified persister name, which is a different,
- * uninteresting bug that has nothing to do with this fixture's actual purpose.
+ * CIPHER-16: a {@code byte[]} {@code @Shredded} field under {@code @GeneratedValue(IDENTITY)}.
+ * {@code @Immutable} is what stops {@code AttributeConverterMutabilityPlan} deep-copying the
+ * converted value (a second, out-of-bracket call to the converter) to build the dirty-checking
+ * snapshot. Top-level, not nested: a nested {@code @Entity} makes {@code
+ * ShreddingEventListener.entityName} (which strips only up to the last {@code '.'}) and {@code
+ * ShreddedModel.entityName} (which uses {@code Class.getSimpleName()}) disagree on the entity's
+ * name for a {@code $}-qualified persister name, which is a different, uninteresting bug that has
+ * nothing to do with this fixture's actual purpose.
  */
 @Entity
 @Table(name = "blob")

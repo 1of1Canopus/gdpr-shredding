@@ -10,12 +10,12 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
 /**
- * Change 8, the case Cipher left open and §3.8a decides: {@code subjectColumn} naming the entity's
- * identifier column. It is refused, explicitly, and the message says why - the identifier is not in
- * the state array the write path reads, under {@code GenerationType.IDENTITY} it does not exist at
- * all when {@code onPreInsert} derives the index, and a {@code SubjectId} is a string while an
- * identifier is a {@code Long} here, so the equality change 8 exists to make would need a rendering
- * this module would have to invent.
+ * Change 8, the case the security review left open and §3.8a decides: {@code subjectColumn} naming
+ * the entity's identifier column. It is refused, explicitly, and the message says why - the
+ * identifier is not in the state array the write path reads, under {@code GenerationType.IDENTITY}
+ * it does not exist at all when {@code onPreInsert} derives the index, and a {@code SubjectId} is a
+ * string while an identifier is a {@code Long} here, so the equality change 8 exists to make would
+ * need a rendering this module would have to invent.
  */
 @Entity
 @Table(name = "identifier_subject_note")

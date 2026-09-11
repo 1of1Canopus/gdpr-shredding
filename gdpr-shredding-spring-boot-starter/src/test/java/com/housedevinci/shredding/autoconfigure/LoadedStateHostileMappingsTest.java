@@ -20,7 +20,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Design §2 rows 13 and 14, Cipher items 7 and 10 (ruling D4). {@code onPostLoad} installs the
+ * Design §2 rows 13 and 14, finding items 7 and 10 (decision D4). {@code onPostLoad} installs the
  * verified plaintext into the entity <em>and</em> into the persistence context's loaded state, and
  * a handful of Hibernate mappings make that unsound. Each is refused at startup, naming what to
  * change, rather than discovered as a row that can never be updated or a natural id that never
@@ -58,7 +58,7 @@ class LoadedStateHostileMappingsTest {
     assertThat(outcome).contains("NaturalIdRow").contains("natural id");
   }
 
-  /** Cipher item 7: single-column, so C-38's column count check waves it through. */
+  /** finding item 7: single-column, so C-38's column count check waves it through. */
   @Test
   void a_single_column_embedded_id_is_refused_at_startup() {
     String outcome = startup(EmbeddedIdApp.class);

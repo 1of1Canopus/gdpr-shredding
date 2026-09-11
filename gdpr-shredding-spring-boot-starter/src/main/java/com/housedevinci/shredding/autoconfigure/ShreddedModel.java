@@ -174,7 +174,7 @@ public final class ShreddedModel {
     return shreddedFields.size();
   }
 
-  /** Fields whose type has no value that can stand for "erased" (QUESTIONS #5). */
+  /** Fields whose type has no value that can stand for "erased". */
   public List<String> fieldsWithoutSentinel() {
     return shreddedFields.stream()
         .filter(f -> !f.carriesSentinel())
@@ -481,14 +481,13 @@ public final class ShreddedModel {
    * {@code @Column(name = "\"Email\"")} therefore settles here, at startup, instead of booting and
    * failing on whichever row the application writes first.
    *
-   * <p>F-1 (Cipher twelfth pass): the column's own containing table is compared against the
-   * entity's primary table here, the same way {@code refuseSecondaryTableSplit} and {@code
-   * resolveAxis} already compare theirs. Without it, a {@code @BlindIndex} field mapped
-   * {@code @Column(table = "...")} onto a {@code @SecondaryTable} resolves to a {@link
-   * BlindIndexColumn} naming the entity's primary table and a column that only exists on the
-   * secondary one - the mapping boots, and every erasure of that entity then fails with
-   * SHRED-KEY-UNAVAILABLE because the erasure's UPDATE names a column the primary table does not
-   * have.
+   * <p>F-1 (the twelfth pass): the column's own containing table is compared against the entity's
+   * primary table here, the same way {@code refuseSecondaryTableSplit} and {@code resolveAxis}
+   * already compare theirs. Without it, a {@code @BlindIndex} field mapped {@code @Column(table =
+   * "...")} onto a {@code @SecondaryTable} resolves to a {@link BlindIndexColumn} naming the
+   * entity's primary table and a column that only exists on the secondary one - the mapping boots,
+   * and every erasure of that entity then fails with SHRED-KEY-UNAVAILABLE because the erasure's
+   * UPDATE names a column the primary table does not have.
    */
   private static ColumnRef indexColumnOf(
       org.hibernate.persister.entity.EntityPersister persister,
@@ -731,7 +730,8 @@ public final class ShreddedModel {
       var identifier = persister.getIdentifierMapping();
       if (identifier instanceof org.hibernate.metamodel.mapping.BasicValuedModelPart id
           && ColumnRefs.of(id, index.entityName() + " identifier", dialect).text().equals(wanted)) {
-        // Change 8 (§3.8a) decides the case Cipher left open on the subject axis, and it is the
+        // Change 8 (§3.8a) decides the case the security review left open on the subject axis, and
+        // it is the
         // same answer the tenant axis already gave, for one more reason: the identifier is not in
         // the state array the write path reads, under GenerationType.IDENTITY it does not exist at
         // all when onPreInsert derives the index, and a SubjectId is a string while an identifier
@@ -1018,7 +1018,7 @@ public final class ShreddedModel {
   }
 
   /**
-   * S-5 (Cipher sixth pass). The forward direction of the C-19 check: for every field-level
+   * S-5 (the sixth pass). The forward direction of the C-19 check: for every field-level
    * {@code @Shredded} the class scan above found, the metamodel attribute of that name must resolve
    * to that field's own declared {@code ShreddedConverter}. This is the case C-19's reverse check
    * cannot catch: {@code @Access(AccessType.PROPERTY)} moves the mapping to the getters, so
@@ -1111,7 +1111,7 @@ public final class ShreddedModel {
           }
           var idMapping = persister.getIdentifierMapping();
           if (!(idMapping instanceof org.hibernate.metamodel.mapping.BasicValuedModelPart)) {
-            // Cipher item 7: a single-column @EmbeddedId passes the column count below but is not
+            // finding item 7: a single-column @EmbeddedId passes the column count below but is not
             // basic, so its value is a component object with no canonical byte form. RowId would
             // have to guess, and a guessed row binding is no binding.
             throw config(
@@ -1237,7 +1237,7 @@ public final class ShreddedModel {
   }
 
   /**
-   * S-23 (Cipher tenth pass). {@link #allFields} walks the whole superclass chain, so a
+   * S-23 (the tenth pass). {@link #allFields} walks the whole superclass chain, so a
    * {@code @Shredded} field declared on an entity's ancestor is scanned once per entity that
    * inherits it - {@code entityName} is a different string each time, so no pair the field's one
    * converter can declare satisfies every scan, and the refusal that used to fire named the
@@ -1290,7 +1290,7 @@ public final class ShreddedModel {
               + entityName
               + "\", \""
               + field.getName()
-              + "\"). See QUESTIONS #1 for why the converter carries the names.");
+              + "\"). The converter carries the names for this reason.");
     }
     Class<?> converterType = convert.converter();
     if (!ShreddedConverter.class.isAssignableFrom(converterType)) {
@@ -1389,10 +1389,10 @@ public final class ShreddedModel {
    * for the Lombok case - see {@code docs/index.md}.
    */
   /**
-   * Cipher item 10 / ruling D4. {@code onPostLoad} installs the verified plaintext into the entity
-   * <em>and</em> into the persistence context's loaded state, and three Hibernate mappings make
-   * that unsound. Each is refused at startup, naming what to change, rather than discovered as a
-   * row that cannot be updated.
+   * finding item 10 / decision D4. {@code onPostLoad} installs the verified plaintext into the
+   * entity <em>and</em> into the persistence context's loaded state, and three Hibernate mappings
+   * make that unsound. Each is refused at startup, naming what to change, rather than discovered as
+   * a row that cannot be updated.
    *
    * <p>Read off the runtime persister rather than off the annotations (the module's
    * framework-integration rule): {@code @SelectBeforeUpdate} does not even exist as an annotation

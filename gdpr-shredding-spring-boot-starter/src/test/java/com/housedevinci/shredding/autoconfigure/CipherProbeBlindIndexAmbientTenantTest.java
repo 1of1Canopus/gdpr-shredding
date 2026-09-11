@@ -37,14 +37,14 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Cipher, eighth pass (fa6f477). S-13 / S-7b - the general case of S-7 - and the shape design
- * addendum 3 replaces it with.
+ * The eighth pass (fa6f477). S-13 / S-7b - the general case of S-7 - and the shape design addendum
+ * 3 replaces it with.
  *
  * <p><b>The property (addendum 3).</b> <em>Every blind index value that exists is reachable and
- * destroyed by the erasure of the subject it was derived for.</em> Cipher's original repro on this
- * file was RED: {@code Note} declares no tenant anywhere, so the index was derived under the
- * ambient {@code TenantSupplier} ({@code org-a}) while the erasure matched the row's own {@code
- * tenant_id} ({@code org-b}); the erasure destroyed the key, killed the ciphertext, reported
+ * destroyed by the erasure of the subject it was derived for.</em> the security review's original
+ * repro on this file was RED: {@code Note} declares no tenant anywhere, so the index was derived
+ * under the ambient {@code TenantSupplier} ({@code org-a}) while the erasure matched the row's own
+ * {@code tenant_id} ({@code org-b}); the erasure destroyed the key, killed the ciphertext, reported
  * success and left {@code HMAC(secret, org-a | Note | email | victim@example.test)} in the table.
  *
  * <p><b>What the fix is, and why this file's first probe asserts a refusal rather than a clearing
@@ -109,10 +109,10 @@ class CipherProbeBlindIndexAmbientTenantTest {
   @Autowired ShreddedModel model;
 
   /**
-   * Change 4. The shape Cipher's repro used - the index would be derived under a tenant the erasure
-   * cannot match, and the ciphertext under a third one - never reaches the table at all. The
-   * message names both tenants, the field and the column, because the application's fix is to
-   * choose which of the two is the owning organisation.
+   * Change 4. The shape the security review's repro used - the index would be derived under a
+   * tenant the erasure cannot match, and the ciphertext under a third one - never reaches the table
+   * at all. The message names both tenants, the field and the column, because the application's fix
+   * is to choose which of the two is the owning organisation.
    */
   @Test
   void probe_a_write_whose_field_tenant_and_tenant_column_disagree_is_refused() throws Exception {

@@ -12,7 +12,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
 /**
- * Cipher, tenth pass: two columns whose names differ only in case - the quoted {@code "Owner"} the
+ * The tenth pass: two columns whose names differ only in case - the quoted {@code "Owner"} the
  * subject lives in, and the plain {@code owner} beside it. {@code ShreddedModel.unquote} folds the
  * first to the second before it compares, and the erasure interpolates the folded form unquoted.
  */

@@ -12,8 +12,8 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
 /**
- * Cipher, eleventh pass: the two identifier shapes Hibernate's IdentifierHelper quotes beyond what
- * the mapping says and ColumnRef's own pattern admits unquoted - a leading underscore and a dollar
+ * The eleventh pass: the two identifier shapes Hibernate's IdentifierHelper quotes beyond what the
+ * mapping says and ColumnRef's own pattern admits unquoted - a leading underscore and a dollar
  * sign. Both are legal unquoted PostgreSQL identifiers.
  */
 @Entity

@@ -69,7 +69,7 @@ to your real retention.
 ```
 
 `SampleEndToEndTest` proves the whole acceptance check against a Testcontainers PostgreSQL, and
-carries several of Cipher's probes.
+carries several of the security review's probes.
 
 ## L7: this endpoint shape, not this security model
 

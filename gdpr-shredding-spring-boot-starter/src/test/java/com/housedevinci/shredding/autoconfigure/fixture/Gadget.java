@@ -26,8 +26,8 @@ import java.time.LocalDate;
  * field and {@code @GeneratedValue(IDENTITY)} refuses its own first insert with {@code
  * SHRED-CONTEXT-001}, because Hibernate deep-copies a mutable attribute's value - calling the
  * converter again - to build the entity's dirty-checking snapshot, outside the
- * onPreInsert/onPostInsert bracket). That is out of scope for this remediation pass (not one of
- * Cipher's findings) and is flagged instead in {@code QUESTIONS.md} for the next review.
+ * onPreInsert/onPostInsert bracket). That is out of scope for this remediation pass (not one of the
+ * security review's findings) and is flagged instead for the next review.
  */
 @Entity
 @Table(name = "gadget")
@@ -52,7 +52,7 @@ public class Gadget {
   @Column(name = "installed_on")
   LocalDate installedOn;
 
-  // S-7 (Cipher seventh pass): no explicit tenant expression here, deliberately - the field a
+  // S-7 (the seventh pass): no explicit tenant expression here, deliberately - the field a
   // @BlindIndex names in of= may not declare its own @Shredded(tenant=...), because
   // writeBlindIndexes would derive the index under that declared tenant while the erasure that is
   // meant to destroy it matches on this row's own tenant_id column value, and startup now refuses

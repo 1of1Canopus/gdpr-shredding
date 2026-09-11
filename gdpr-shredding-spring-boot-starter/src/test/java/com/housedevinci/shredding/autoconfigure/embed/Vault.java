@@ -13,7 +13,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
 /**
- * Cipher fourth pass: a @Shredded field declared inside an @Embeddable component. The forward field
+ * The fourth pass: a @Shredded field declared inside an @Embeddable component. The forward field
  * scan walks the entity class and its superclasses only; the reverse metamodel scan looks at
  * BasicValuedModelPart attributes of the entity persister only, and an @Embedded component is an
  * EmbeddableValuedModelPart. Neither sees `secrets.token`.

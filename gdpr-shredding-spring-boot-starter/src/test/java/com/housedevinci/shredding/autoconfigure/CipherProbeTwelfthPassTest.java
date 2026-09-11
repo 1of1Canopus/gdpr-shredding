@@ -25,7 +25,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Cipher, twelfth pass: the surfaces the eleventh pass's two fixes left open.
+ * The twelfth pass: the surfaces the eleventh pass's two fixes left open.
  *
  * <ul>
  *   <li>E-1 was verified through a test that supplies its own {@code JdbcErasureStore} bean, so the

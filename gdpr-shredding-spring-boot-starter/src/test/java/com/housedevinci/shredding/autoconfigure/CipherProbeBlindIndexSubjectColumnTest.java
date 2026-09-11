@@ -37,9 +37,9 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Cipher, ninth pass. S-20: design addendum 3 bound one of the two axes of a blind index to the
- * row. {@code tenantColumn} is resolved to a property at startup, read out of the state array at
- * write time and refused when it disagrees with the tenant the data key is derived under. {@code
+ * The ninth pass. S-20: design addendum 3 bound one of the two axes of a blind index to the row.
+ * {@code tenantColumn} is resolved to a property at startup, read out of the state array at write
+ * time and refused when it disagrees with the tenant the data key is derived under. {@code
  * subjectColumn} got none of that: it was validated as an identifier and then interpolated into the
  * erasure's {@code WHERE}, and nothing ever compared it with {@code @Shredded(subject = ...)}. An
  * entity whose subject expression evaluates to something other than the subject column wrote an

@@ -9,7 +9,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Design §3: format {@code SH1} v2 carries the row id, and a v1 header is refused rather than read
- * (Cipher item 12).
+ * (finding item 12).
  */
 class EncryptedValueV2Test {
 
@@ -35,7 +35,7 @@ class EncryptedValueV2Test {
   }
 
   /**
-   * Cipher item 12. There is no dual-format reader and no downgrade: either would let an attacker
+   * finding item 12. There is no dual-format reader and no downgrade: either would let an attacker
    * holding {@code UPDATE} strip the row binding by writing a v1 blob over a v2 one.
    */
   @Test

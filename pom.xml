@@ -39,7 +39,7 @@
     <developer>
       <id>canopus</id>
       <name>Souhaile (Canopus)</name>
-      <!-- Role address, not a personal mailbox. See QUESTIONS.md #21. -->
+      <!-- Role address, not a personal mailbox. -->
       <email>oss@housedevinci.com</email>
       <organization>HouseDevinci</organization>
       <organizationUrl>https://housedevinci.com</organizationUrl>
@@ -286,7 +286,7 @@
                   EPL-2.0       Jakarta APIs and Logback. Weak copyleft, file-level, and it does
                                 not reach our code because we only link against them.
                   Public Domain org.json and HdrHistogram's CC0 half. No obligations at all.
-                Everything else, GPL/LGPL/AGPL/MPL/CDDL/SSPL included, fails. See QUESTIONS.md #22.
+                Everything else, GPL/LGPL/AGPL/MPL/CDDL/SSPL included, fails.
               -->
               <force>true</force>
               <includedLicenses>Apache-2.0|MIT|BSD|EPL-2.0|Public Domain</includedLicenses>
@@ -388,7 +388,7 @@
             <configuration>
               <!-- settings.xml <server><id>central</id>, username/password = Central user token. -->
               <publishingServerId>central</publishingServerId>
-              <!-- Souhaile presses Publish on the portal. Never flip this to true. -->
+              <!-- the maintainer presses Publish on the portal. Never flip this to true. -->
               <autoPublish>false</autoPublish>
               <waitUntil>validated</waitUntil>
               <deploymentName>gdpr-shredding ${project.version}</deploymentName>
@@ -426,8 +426,8 @@
 
     <profile>
       <!--
-        Dollar's standing convention (fourth pass, 2026-09-09): a hand-off probe from Cipher's
-        review lives in the repo, in src/test-pending/java of the module it belongs to - never in
+        the maintainers' standing convention (fourth pass, 2026-09-09): a hand-off probe from the
+        security review lives in the repo, in src/test-pending/java of the module it belongs to - never in
         the session scratchpad, which is invisible to git and to the next person who opens this
         repo. The default build (`./mvnw verify`, no profile) never compiles or runs anything under
         test-pending: it does not exist as a test source root at all unless this profile is active,
@@ -436,8 +436,8 @@
 
           ./mvnw -Pprobes-pending test      compiles and runs whatever is under test-pending too
 
-        Workflow: Cipher commits a new probe under <module>/src/test-pending/java/... (failing,
-        proving the finding). The engineering agent (Isis) reproduces it with this profile, fixes
+        Workflow: The security review commits a new probe under <module>/src/test-pending/java/... (failing,
+        proving the finding). The engineering agent (the fix) reproduces it with this profile, fixes
         the production code, confirms it green, then moves the file into src/test/java (an
         ordinary `git mv`) so it is compiled and run by the default build from then on -
         src/test-pending/java is a staging area, never a permanent home for a green probe.

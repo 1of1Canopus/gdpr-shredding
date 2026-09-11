@@ -12,9 +12,9 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
 /**
- * Cipher, ninth pass. Addendum 3 bound the tenant axis of a blind index to the row. The subject
- * axis is unbound: {@code subjectColumn} is never resolved, never read at write time and never
- * compared with the subject the data key is derived under.
+ * The ninth pass. Addendum 3 bound the tenant axis of a blind index to the row. The subject axis is
+ * unbound: {@code subjectColumn} is never resolved, never read at write time and never compared
+ * with the subject the data key is derived under.
  */
 @Entity
 @Table(name = "split_note")

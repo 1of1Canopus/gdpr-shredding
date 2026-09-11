@@ -21,8 +21,8 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Cipher, eighth pass (fa6f477). S-16 (INFO). {@code shredding.write-verification.max-outstanding}
- * (QUESTIONS #26) is read once at boot into a {@code static volatile int} and never checked.
+ * The eighth pass (fa6f477). S-16 (INFO). {@code shredding.write-verification.max-outstanding} is
+ * read once at boot into a {@code static volatile int} and never checked.
  *
  * <p>{@code 0} makes {@code ledger.debts.size() >= maxOutstanding} true before the first debt, so
  * every write of a {@code @Shredded} entity in the application is refused with {@code

@@ -25,13 +25,12 @@ import org.slf4j.LoggerFactory;
  * </blockquote>
  *
  * <p>A Hibernate {@code AttributeConverter} is handed nothing but the value: no entity, no session,
- * no attribute name, and no Hibernate hook fires before it (QUESTIONS #13/#16). Anything it
- * consults has to be thread-local, and five review passes showed that any design in which the
- * converter reads thread-local state and <em>therefore returns plaintext</em> fails the moment that
- * state outlives its owner. So the converter no longer returns plaintext at all (design §1): it
- * files what it decrypted into the open read region and returns a {@link Placeholders placeholder},
- * and {@code ShreddingEventListener.onPostLoad} - the one hook that knows the row - verifies and
- * installs.
+ * no attribute name, and no Hibernate hook fires before it. Anything it consults has to be
+ * thread-local, and five review passes showed that any design in which the converter reads
+ * thread-local state and <em>therefore returns plaintext</em> fails the moment that state outlives
+ * its owner. So the converter no longer returns plaintext at all (design §1): it files what it
+ * decrypted into the open read region and returns a {@link Placeholders placeholder}, and {@code
+ * ShreddingEventListener.onPostLoad} - the one hook that knows the row - verifies and installs.
  *
  * <table>
  *   <caption>Ownership</caption>
@@ -130,13 +129,13 @@ public final class ShreddingContext {
    * What {@code onPreInsert}/{@code onPreUpdate} use: the same push, preceded by dropping anything
    * still live.
    *
-   * <p>C-41 / Cipher item 14. Hibernate executes the action queue serially and a shredded converter
-   * never triggers another entity's bind, so a scope still live when a {@code Pre*} listener pushes
-   * is by construction residue from a bind whose {@code Post*} listener never ran - a converter
-   * refusal, a constraint violation, a throw out of {@code writeBlindIndexes}. Dropping it here is
-   * what makes "a write scope is consumable only by the bind it was pushed for" true on the path
-   * where residue was consumable; the entity-name check in {@link #require} and the post-hoc header
-   * check in the {@code Post*} listeners are the other two.
+   * <p>C-41 / finding item 14. Hibernate executes the action queue serially and a shredded
+   * converter never triggers another entity's bind, so a scope still live when a {@code Pre*}
+   * listener pushes is by construction residue from a bind whose {@code Post*} listener never ran -
+   * a converter refusal, a constraint violation, a throw out of {@code writeBlindIndexes}. Dropping
+   * it here is what makes "a write scope is consumable only by the bind it was pushed for" true on
+   * the path where residue was consumable; the entity-name check in {@link #require} and the
+   * post-hoc header check in the {@code Post*} listeners are the other two.
    *
    * <p>Kept apart from {@link #pushWrite} because that one is also reached from {@link #with},
    * which is public API a caller may legitimately nest. A nested {@code with} is not residue, and
@@ -206,7 +205,7 @@ public final class ShreddingContext {
   /**
    * The scope a bind of {@code entity.field} may be performed under, or a refusal.
    *
-   * <p><strong>Cipher item 13 / C-41.</strong> The entity name is compared. Ignoring it
+   * <p><strong>finding item 13 / C-41.</strong> The entity name is compared. Ignoring it
    * <em>was</em> C-41: a scope pushed for {@code A} and left behind was handed to a bind of {@code
    * B}, which then encrypted B's row under A's subject and put it inside A's erasure scope. A
    * mismatch is refused with {@code SHRED-CONTEXT-001}; there is no substitution and no best guess.
@@ -255,7 +254,7 @@ public final class ShreddingContext {
    * <p>It is a lever, not a guarantee. The guarantee is elsewhere and does not depend on unwinding
    * at all: a scope that does survive is dropped by {@link #pushBind} before the next bind, refused
    * by {@link #require}'s entity-name check if anything else reaches for it, and caught after the
-   * fact by the post-hoc header check in the {@code Post*} listeners. See QUESTIONS.md #24.
+   * fact by the post-hoc header check in the {@code Post*} listeners.
    */
   public static <T> T with(Scope scope, java.util.function.Supplier<T> body) {
     Deque<WriteEntry> stack = WRITE_SCOPES.get();
@@ -295,7 +294,7 @@ public final class ShreddingContext {
   /**
    * One decrypted value waiting for the verifier that will install it.
    *
-   * <p>S-4 (Cipher sixth pass): this used to also carry an {@code ownerToken}, stamped with the
+   * <p>S-4 (the sixth pass): this used to also carry an {@code ownerToken}, stamped with the
    * region's own token at record time and compared against the region's own token again at drain
    * time. Both reads are {@code stack.peek()} of the <em>same</em> {@link Region} object - a {@code
    * Pending} never moves from the map it was recorded into - so {@code pending.ownerToken() !=
@@ -303,9 +302,9 @@ public final class ShreddingContext {
    * could never fail at all. Removed rather than "fixed", because making it real would mean
    * distinguishing a region legitimately open for the call in progress from one left on the deque
    * by an earlier caller that never closed it - the public, unpaired {@link #openRegion()} makes
-   * that state reachable (QUESTIONS #21) - and doing that soundly needs a second piece of
-   * call-scoped state whose own unwind-safety would have to be argued from scratch, the same way
-   * {@link #popWrite(long)}'s javadoc argues it for write scopes.
+   * that state reachable - and doing that soundly needs a second piece of call-scoped state whose
+   * own unwind-safety would have to be argued from scratch, the same way {@link #popWrite(long)}'s
+   * javadoc argues it for write scopes.
    *
    * <p>That second piece of state is now the entry epoch (design addendum 2), and it is what makes
    * the distinction: the region a decode may use is the one this thread's bracketed <em>entry</em>
@@ -378,13 +377,13 @@ public final class ShreddingContext {
    * stamped with any other epoch is thereby residue. Correctness on entry, never on exit - {@link
    * #pushWrite}'s own argument.
    *
-   * <p>Compared for <strong>equality only, never for age</strong> (Cipher, addendum 2 change 1). A
-   * leftover region can carry an epoch <em>newer</em> than the thread's: an inner entry stamps
-   * {@code n+1}, an {@link Error} inside it leaves its region on the deque, the outer frame's
-   * restore puts {@code n} back and the outer call carries on. Under "older is residue" that
-   * leftover is not older, so it would authorise - and it is the region on top, so it is the one
-   * every later decode of the outer call would be filed into. Equality refuses both directions, and
-   * takes overflow off the table: an ordering test is the one shape where a single wraparound
+   * <p>Compared for <strong>equality only, never for age</strong> (the security review, addendum 2
+   * change 1). A leftover region can carry an epoch <em>newer</em> than the thread's: an inner
+   * entry stamps {@code n+1}, an {@link Error} inside it leaves its region on the deque, the outer
+   * frame's restore puts {@code n} back and the outer call carries on. Under "older is residue"
+   * that leftover is not older, so it would authorise - and it is the region on top, so it is the
+   * one every later decode of the outer call would be filed into. Equality refuses both directions,
+   * and takes overflow off the table: an ordering test is the one shape where a single wraparound
    * inverts every comparison at once.
    *
    * <p>A plain {@link ThreadLocal}, never an {@code InheritableThreadLocal} and never anything a
@@ -409,7 +408,7 @@ public final class ShreddingContext {
    *
    * @return the token that closes this region, which is also the token {@link #closeRegion(long)}
    *     and {@link #discardRegion(long)} take
-   * @apiNote S-19 (Cipher eighth pass). This module's internal SPI: called by the framework
+   * @apiNote S-19 (the eighth pass). This module's internal SPI: called by the framework
    *     integration that owns a call boundary (the repository proxy), never by application code.
    *     {@link #withReadBracket} is the one supported entry point and it hands out no epoch an
    *     application can act on; calling this method directly reopens the S-4 shape addendum 2 was
@@ -431,12 +430,12 @@ public final class ShreddingContext {
    *
    * <p>It is stamped {@link #NO_ENTRY} explicitly rather than with the epoch in force, and every
    * region access refuses a region whose epoch is not the thread's current entry epoch, so neither
-   * of the two shapes Cipher named can serve a decode: a raw call on a thread that never entered an
-   * entry (where "the initial value" would otherwise compare equal to itself and authorise), and a
-   * raw call from <em>inside</em> a proxied call - a user {@code @PostLoad} method, an
-   * {@code @EntityListeners} bean, a hand-written DAO reached from a repository default method -
-   * whose region would otherwise sit on top of the deque and take every remaining decode of that
-   * call. That second shape is S-4 itself.
+   * of the two shapes the security review named can serve a decode: a raw call on a thread that
+   * never entered an entry (where "the initial value" would otherwise compare equal to itself and
+   * authorise), and a raw call from <em>inside</em> a proxied call - a user {@code @PostLoad}
+   * method, an {@code @EntityListeners} bean, a hand-written DAO reached from a repository default
+   * method - whose region would otherwise sit on top of the deque and take every remaining decode
+   * of that call. That second shape is S-4 itself.
    *
    * <p>Kept public only because unpaired region bookkeeping is observable in tests and because
    * removing a published method is a breaking change; there is no use for it in an application.
@@ -475,8 +474,8 @@ public final class ShreddingContext {
   /**
    * Whether {@code region} is the one this thread's bracketed entry - if any - has authority over:
    * an entry is in force ({@code inForce != NO_ENTRY}) and {@code region} was stamped with exactly
-   * that epoch. {@code NO_ENTRY == NO_ENTRY} is deliberately false here (S-15, ruling on QUESTIONS
-   * S-4a, Cipher eighth pass): with no entry in force there is no live region for a raw {@link
+   * that epoch. {@code NO_ENTRY == NO_ENTRY} is deliberately false here (S-15, decision on S-4a,
+   * the eighth pass): with no entry in force there is no live region for a raw {@link
    * #openRegion()} region to be confused with, so a region carrying {@link #NO_ENTRY} is residue by
    * construction, never current - addendum 2 change 3's "never sweep a region whose epoch equals
    * the epoch in force" protected the nested case (a caller's own live region must survive its
@@ -588,19 +587,19 @@ public final class ShreddingContext {
    * {@code CipherProbeRegionEpochTest} and {@code CipherProbeReadScopeTest} fail immediately if a
    * second unwind path is ever added without the restore.
    *
-   * <p><strong>S-8 (Cipher seventh pass).</strong> Every region this pops on the way to {@code
-   * token} is an <em>intermediate</em> region - one whose own close was skipped: the {@code C-32}
-   * {@link StackOverflowError} window, or a nested {@code withReadBracket} body that returned
-   * normally without ever closing the region it opened. Discarding one that still holds a decode
-   * nothing ever drained, in silence, on the outer call's <em>normal</em> return path, is exactly
-   * the accounting {@code SHRED-READ-UNVERIFIED} exists to make loud - so when {@code
+   * <p><strong>S-8 (the seventh pass).</strong> Every region this pops on the way to {@code token}
+   * is an <em>intermediate</em> region - one whose own close was skipped: the {@code C-32} {@link
+   * StackOverflowError} window, or a nested {@code withReadBracket} body that returned normally
+   * without ever closing the region it opened. Discarding one that still holds a decode nothing
+   * ever drained, in silence, on the outer call's <em>normal</em> return path, is exactly the
+   * accounting {@code SHRED-READ-UNVERIFIED} exists to make loud - so when {@code
    * refuseUndrainedIntermediates} is set, the first such region found is logged at {@code WARN} and
    * refuses, once every region down to {@code token} has been popped and every epoch restored, so a
    * retry still starts clean. {@link #discardRegion(long)} passes {@code false}: on that path the
    * original exception already in flight is the failure worth reporting, and this must not replace
    * it or stop the unwind partway through.
    *
-   * <p><strong>S-14 (Cipher eighth pass).</strong> {@code token} is looked up on the deque
+   * <p><strong>S-14 (the eighth pass).</strong> {@code token} is looked up on the deque
    * <em>before</em> anything is popped, and nothing is popped at all when it is not there. The old
    * shape popped unconditionally until it found {@code token} or ran out of deque - so a token from
    * another frame, or one a nested entry's sweep had already taken away, emptied the whole stack,
@@ -687,10 +686,10 @@ public final class ShreddingContext {
    * Clears every region and the entry epoch on this thread, unconditionally. Package-private: the
    * idiom this replaces - {@code discardRegion(-1L)} in a bounded loop, a token on no stack - was
    * "clean this thread" only as a side effect of {@link #unwindTo} once popping unconditionally
-   * until it found its token or ran out of deque; S-14 (Cipher eighth pass) closed that shape
-   * because it also destroyed a live caller's region on the ordinary, in-application path, so it
-   * can no longer be reused here. For {@code @AfterEach} blocks in this package's own tests only -
-   * never called from production code, which never needs to discard a region it does not own.
+   * until it found its token or ran out of deque; S-14 (the eighth pass) closed that shape because
+   * it also destroyed a live caller's region on the ordinary, in-application path, so it can no
+   * longer be reused here. For {@code @AfterEach} blocks in this package's own tests only - never
+   * called from production code, which never needs to discard a region it does not own.
    */
   static void resetForTests() {
     REGIONS.remove();
@@ -729,12 +728,12 @@ public final class ShreddingContext {
    * Files a decrypted value in the region currently on top, to be installed by the verifier that
    * proves which row it belongs to.
    *
-   * @throws ShreddingException {@code SHRED-READ-UNSCOPED} if no region is open. Cipher item 1: a
+   * @throws ShreddingException {@code SHRED-READ-UNSCOPED} if no region is open. finding item 1: a
    *     placeholder returned with nothing that will ever close a region is a value crossing the
    *     boundary with no signal at all, so the decrypt is refused instead - the case of a
    *     hand-written DAO, a bare {@code EntityManager}, a {@code Stream} drained after the
    *     repository call returned, or an {@code @Async} continuation.
-   * @apiNote S-19 (Cipher eighth pass). This module's internal SPI: called by {@code
+   * @apiNote S-19 (the eighth pass). This module's internal SPI: called by {@code
    *     Shredded*Converter}, not API for applications. Subject to change without a major version.
    */
   public static void recordDecoded(FrameKey key, byte[] plaintext) {
@@ -769,23 +768,23 @@ public final class ShreddingContext {
    * Takes back one decrypted value for {@code key}, if the region currently on top holds one that
    * it itself recorded.
    *
-   * <p><strong>S-4 (Cipher sixth pass).</strong> The most recently recorded entry, not the oldest.
-   * Two decodes filed under one key inside one still-open region are always the same row's own
-   * value - the multiset exists for a row hydrated twice inside one region, never for two different
-   * rows - so which of them a caller takes back is only ever a question of which one a stale,
-   * abandoned decode could shadow. Taking the most recent means a fresher decode is never shadowed
-   * by an older one left behind by residue: an entry recorded before the current, legitimate one -
-   * the shape {@code CipherProbeRegionResidueTest} builds from the public, unpaired {@link
-   * #openRegion()} (QUESTIONS #21) - can therefore never be handed back in place of the value this
-   * call itself just decrypted. It can still be handed back <em>instead of nothing</em> when the
-   * current call never recorded one of its own. That residual - an ownerless region on the deque
-   * serving a call that opened no region of its own - is what the entry epoch closes (addendum 2):
-   * {@link #currentRegion()} hands back nothing at all unless the region on top is the one the
-   * bracketed entry now in force opened. What remains is stated in SECURITY-NOTES.md: a read
-   * opening no region of its own, on a thread where an {@link Error} skipped exactly the frame that
-   * restores the epoch, still sees a matching one. A leaked region costs a refusal, never a value.
+   * <p><strong>S-4 (the sixth pass).</strong> The most recently recorded entry, not the oldest. Two
+   * decodes filed under one key inside one still-open region are always the same row's own value -
+   * the multiset exists for a row hydrated twice inside one region, never for two different rows -
+   * so which of them a caller takes back is only ever a question of which one a stale, abandoned
+   * decode could shadow. Taking the most recent means a fresher decode is never shadowed by an
+   * older one left behind by residue: an entry recorded before the current, legitimate one - the
+   * shape {@code CipherProbeRegionResidueTest} builds from the public, unpaired {@link
+   * #openRegion()} - can therefore never be handed back in place of the value this call itself just
+   * decrypted. It can still be handed back <em>instead of nothing</em> when the current call never
+   * recorded one of its own. That residual - an ownerless region on the deque serving a call that
+   * opened no region of its own - is what the entry epoch closes (addendum 2): {@link
+   * #currentRegion()} hands back nothing at all unless the region on top is the one the bracketed
+   * entry now in force opened. What remains is stated in SECURITY-NOTES.md: a read opening no
+   * region of its own, on a thread where an {@link Error} skipped exactly the frame that restores
+   * the epoch, still sees a matching one. A leaked region costs a refusal, never a value.
    *
-   * @apiNote S-19 (Cipher eighth pass). This module's internal SPI: called by {@code
+   * @apiNote S-19 (the eighth pass). This module's internal SPI: called by {@code
    *     Shredded*Converter}, not API for applications. Subject to change without a major version.
    */
   public static Optional<byte[]> drain(FrameKey key) {
@@ -810,7 +809,7 @@ public final class ShreddingContext {
    * SHRED-SUBJECT-MISMATCH}, a header naming the right subject but another row is {@code
    * SHRED-ROW-MISMATCH}, and nothing at all is {@code SHRED-READ-UNVERIFIED}.
    *
-   * @apiNote S-19 (Cipher eighth pass). This module's internal SPI: called by {@code
+   * @apiNote S-19 (the eighth pass). This module's internal SPI: called by {@code
    *     ShreddingEventListener}, not API for applications. Subject to change without a major
    *     version.
    */

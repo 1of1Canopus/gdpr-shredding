@@ -25,7 +25,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Cipher sixth pass. {@code ShreddingEventListener.scopeFor} and {@code onPostLoad} both take the
+ * The sixth pass. {@code ShreddingEventListener.scopeFor} and {@code onPostLoad} both take the
  * tenant from {@code fields.get(0).tenant()} - the entity's <em>first</em> shredded field - and
  * apply it to every shredded field of the entity. {@code resolveSubject} cross-checks that the
  * fields agree about the subject and refuses when they do not; nothing cross-checks the tenant, at
