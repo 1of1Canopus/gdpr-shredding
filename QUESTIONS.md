@@ -1354,3 +1354,21 @@ protected, not one silently mis-checked), just earlier, at the point the finding
 `CipherProbeEleventhPassStartupRefusalsTest`, since "Pending" would be stale and misleading for a
 promoted, green probe class, and both surviving probes now assert the same shape (a startup
 refusal). No probe name from the fix list changed.
+
+## F-1 (2026-09-11, Isis) — CLOSED. Cipher's twelfth-pass fix list at `13535d8`.
+
+No deviation from what the finding asked for on the fix itself: `ShreddedModel.indexColumnOf` now
+takes the entity's primary table as a parameter and refuses `SHRED-CONFIG-001` when the
+`@BlindIndex` field's own containing table (`TableRef.parse(basic.getContainingTableExpression())`)
+disagrees with it, naming both — exactly the correction the finding prescribed, no new mechanism.
+
+**File naming, one adjustment from the literal instruction.** The fix list says `git mv
+CipherProbeTwelfthPassPendingTest into src/test/java (rename to drop "Pending")`. A class named
+`CipherProbeTwelfthPassTest` already exists in `src/test/java` (promoted by the eleventh-pass
+promotion work, carrying the E-1/E-2/E-3 probes plus a `singletable` inheritance probe written for
+this same twelfth pass), so a straight rename would have overwritten it. I merged the pending
+probe's fixture (`SecondaryIndexApp`) and its one test method
+(`probe_a_blind_index_column_on_a_secondary_table_is_refused_at_startup`) into the existing
+`CipherProbeTwelfthPassTest`, updated its class Javadoc to mention F-1, and deleted the now-empty
+`src/test-pending` file with `git rm` rather than `git mv` (there was nothing left to move to). The
+probe's name, assertions and RED/GREEN behaviour are unchanged from the pending version.

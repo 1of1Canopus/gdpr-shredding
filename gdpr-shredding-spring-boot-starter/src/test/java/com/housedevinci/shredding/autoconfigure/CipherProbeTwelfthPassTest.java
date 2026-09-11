@@ -35,7 +35,9 @@ import org.testcontainers.utility.DockerImageName;
  *       <em>quotes</em> still boots and still erases. The tenth pass's probe on the same entity
  *       returns early and passes if startup refuses, so an over-refusal would have been green.
  *   <li>The {@code @SecondaryTable} refusal exists for the {@code @Shredded} column and for both
- *       index axes, and for no third thing: the {@code @BlindIndex} column itself.
+ *       index axes, and for no third thing: the {@code @BlindIndex} column itself - F-1, closed by
+ *       {@code indexColumnOf} comparing the column's own containing table against the entity's
+ *       primary table.
  * </ul>
  */
 @Testcontainers
@@ -89,6 +91,16 @@ class CipherProbeTwelfthPassTest {
       basePackageClasses =
           com.housedevinci.shredding.autoconfigure.twelfthpass.singletable.SingleBase.class)
   static class SingleTableApp extends Tenant {}
+
+  @SpringBootConfiguration
+  @EnableAutoConfiguration
+  @EntityScan(
+      basePackageClasses =
+          com.housedevinci.shredding.autoconfigure.twelfthpass.secondaryidx.SecondaryIdxNote.class)
+  @EnableJpaRepositories(
+      basePackageClasses =
+          com.housedevinci.shredding.autoconfigure.twelfthpass.secondaryidx.SecondaryIdxNote.class)
+  static class SecondaryIndexApp extends Tenant {}
 
   /**
    * The inheritance limit and E-1's new refusal describe the same mapping from two sides: a
@@ -175,6 +187,72 @@ class CipherProbeTwelfthPassTest {
       assertThat(result.blindIndexColumnsCleared()).isEqualTo(1);
       assertThat(indexes(ctx, "keyword_note", "\"user\"", owner)).isZero();
     }
+  }
+
+  /**
+   * F-1. The {@code @BlindIndex} column's own table is never compared with the entity's primary
+   * table. {@code resolveIndexColumns} took the table from {@code primaryTable(persister)} and the
+   * column from the field's mapping, so a field mapped by {@code @Column(table = "...")} onto a
+   * {@code @SecondaryTable} used to resolve to a {@link
+   * com.housedevinci.shredding.domain.BlindIndexColumn} that named a column of one table and the
+   * name of another. Both other axes refuse this at startup, naming the mapping; this one must too.
+   */
+  @Test
+  void probe_a_blind_index_column_on_a_secondary_table_is_refused_at_startup() {
+    ConfigurableApplicationContext context = null;
+    String startup;
+    try {
+      context = builder(SecondaryIndexApp.class).run();
+      startup = "STARTED";
+    } catch (RuntimeException e) {
+      startup = "STARTUP-REFUSED " + code(e);
+    }
+    if (context == null) {
+      assertThat(startup).startsWith("STARTUP-REFUSED SHRED-CONFIG-001");
+      assertThat(startup).contains("SecondaryIdxNote").contains("secidx_note_ext");
+      return;
+    }
+    String erasure;
+    try (var ctx = context) {
+      var notes =
+          ctx.getBean(
+              com.housedevinci.shredding.autoconfigure.twelfthpass.secondaryidx
+                  .SecondaryIdxNoteRepository.class);
+      var erasures = ctx.getBean(ErasureService.class);
+      String owner = "secidx-" + System.nanoTime();
+      notes.saveAndFlush(
+          new com.housedevinci.shredding.autoconfigure.twelfthpass.secondaryidx.SecondaryIdxNote(
+              owner, "org-a", "victim@example.test"));
+      try {
+        var result =
+            erasures.erase(
+                new ErasureRequest(TenantId.of("org-a"), SubjectId.of(owner), "dpo", "art 17"));
+        erasure =
+            "COMPLETED outcome="
+                + result.outcome()
+                + " cleared="
+                + result.blindIndexColumnsCleared()
+                + " residual="
+                + indexes(ctx, "secidx_note_ext", "id", owner);
+      } catch (RuntimeException e) {
+        erasure = "ERASURE-FAILED " + code(e);
+      }
+      // What the failure cost: if the transaction rolled back, the subject's key is still there
+      // and the ciphertext still decrypts - the erasure is impossible, not half-done. This is the
+      // difference between LOW and HIGH, so it is asserted rather than assumed.
+      var still =
+          notes.findAll().stream()
+              .filter(n -> owner.equals(n.getOwnerId()))
+              .findFirst()
+              .orElse(null);
+      erasure =
+          erasure
+              + " | row still readable after the failure: "
+              + (still != null && still.getEmail() != null);
+    }
+    throw new AssertionError(
+        "a @BlindIndex column mapped onto a @SecondaryTable booted; the erasure then said: "
+            + erasure);
   }
 
   private long indexes(ConfigurableApplicationContext ctx, String table, String column, String v) {

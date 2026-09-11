@@ -8,6 +8,31 @@ are fine here for now — but before this repo is made public, move them to
 tests, README, CHANGELOG, LICENSE/NOTICE, SECURITY.md, CONTRIBUTING.md, user docs, CI, the
 probe script). See how `agent-guard` did it (2026-09-10).
 
+**F-1 (LOW) — CLOSED, built (Isis, 2026-09-11).** Cipher's twelfth pass (`13535d8`) fix list, verdict
+MERGE WITH FIXES.
+
+`ShreddedModel.resolveIndexColumns` took the table for a `BlindIndexColumn` from
+`primaryTable(persister)` and the column from the `@BlindIndex` field's own mapping, never comparing
+the two — the one axis of the four (`@Shredded` column, `subjectColumn`, `tenantColumn`,
+`@BlindIndex` column itself) with no `@SecondaryTable` refusal. `ShreddedModel.indexColumnOf` now
+takes the entity's primary table and compares it with
+`TableRef.parse(basic.getContainingTableExpression())`, refusing `SHRED-CONFIG-001` at startup when
+they differ, naming the entity, the field, the containing table and the primary table — the same
+message shape `refuseSecondaryTableSplit` and `resolveAxis` already use.
+
+*Probe.* `probe_a_blind_index_column_on_a_secondary_table_is_refused_at_startup`, promoted from
+`gdpr-shredding-spring-boot-starter/src/test-pending/java/.../CipherProbeTwelfthPassPendingTest.java`
+into the existing `.../CipherProbeTwelfthPassTest.java` (dropping "Pending" per the fix-list
+instruction; merged into the twelfth-pass probe class rather than kept as a separate file, since that
+class already exists and carries the other twelfth-pass probes). RED on `13535d8`
+(`ERASURE-FAILED SHRED-KEY-UNAVAILABLE ... row still readable after the failure: true`); green after
+the fix. `src/test-pending` has no `.java` anywhere in the repository.
+
+*Full `./mvnw clean verify`, three consecutive runs:* exit 0 each time, Docker up throughout, 0
+skipped. **331 tests** (core 109, starter 205, sample 17), 0 failures, 0 errors. Line coverage core
+85.64% (1145/1337), starter 87.57% (1635/1867), sample 63.22% (smoke gate 30%); gates held. Dollar/
+Cipher re-verifies; not self-marked closed.
+
 **E-1 (MEDIUM), E-2 (LOW), E-3 (LOW), E-4 (INFO) — CLOSED, built (Isis, 2026-09-11).** Cipher's
 eleventh pass (`704f23b`) fix list, verdict MERGE WITH FIXES.
 

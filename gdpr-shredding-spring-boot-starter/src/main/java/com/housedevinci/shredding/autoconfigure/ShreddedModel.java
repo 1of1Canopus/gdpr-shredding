@@ -458,7 +458,7 @@ public final class ShreddedModel {
                 + "\" cannot be resolved to the properties the write path reads.");
       }
       TableRef table = primaryTable(persister);
-      ColumnRef indexColumn = indexColumnOf(persister, index, where, dialect);
+      ColumnRef indexColumn = indexColumnOf(persister, index, where, dialect, table);
       var tenant = resolveAxis(persister, index, where, table, dialect, Axis.TENANT);
       var subject = resolveAxis(persister, index, where, table, dialect, Axis.SUBJECT);
       indexes.set(
@@ -480,12 +480,22 @@ public final class ShreddedModel {
    * {@code @Column(name = ...)} text never read, never compared and never quoted by hand. A
    * {@code @Column(name = "\"Email\"")} therefore settles here, at startup, instead of booting and
    * failing on whichever row the application writes first.
+   *
+   * <p>F-1 (Cipher twelfth pass): the column's own containing table is compared against the
+   * entity's primary table here, the same way {@code refuseSecondaryTableSplit} and {@code
+   * resolveAxis} already compare theirs. Without it, a {@code @BlindIndex} field mapped
+   * {@code @Column(table = "...")} onto a {@code @SecondaryTable} resolves to a {@link
+   * BlindIndexColumn} naming the entity's primary table and a column that only exists on the
+   * secondary one - the mapping boots, and every erasure of that entity then fails with
+   * SHRED-KEY-UNAVAILABLE because the erasure's UPDATE names a column the primary table does not
+   * have.
    */
   private static ColumnRef indexColumnOf(
       org.hibernate.persister.entity.EntityPersister persister,
       BlindIndexField index,
       String where,
-      org.hibernate.dialect.Dialect dialect) {
+      org.hibernate.dialect.Dialect dialect,
+      TableRef primary) {
     var attribute = persister.findAttributeMapping(index.fieldName());
     if (!(attribute instanceof org.hibernate.metamodel.mapping.BasicValuedModelPart basic)) {
       throw config(
@@ -498,6 +508,21 @@ public final class ShreddedModel {
                   : " (it is a " + attribute.getClass().getSimpleName() + ")")
               + ". The erasure nulls this column by name; a field Hibernate does not map to one"
               + " column of this entity has no name for it to null.");
+    }
+    TableRef containing = TableRef.parse(basic.getContainingTableExpression());
+    if (!containing.equals(primary)) {
+      throw config(
+          "@BlindIndex on "
+              + where
+              + " is mapped onto the table "
+              + containing
+              + ", which is not "
+              + index.entityName()
+              + "'s primary table "
+              + primary
+              + " (a @SecondaryTable or @Column(table=...) mapping). The erasure's UPDATE names"
+              + " the entity's primary table; a blind-index column on a secondary table cannot be"
+              + " cleared by that statement.");
     }
     return ColumnRefs.of(basic, where, dialect);
   }

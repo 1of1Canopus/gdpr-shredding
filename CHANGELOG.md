@@ -6,6 +6,23 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed (twelfth pass at `13535d8`, F-1 LOW: a `@BlindIndex` column on a `@SecondaryTable` booted, and every later erasure of that entity failed)
+
+**LOW.** `ShreddedModel.resolveIndexColumns` built the `BlindIndexColumn` from two independent
+sources: `primaryTable(persister)` for the table, and the `@BlindIndex` field's own mapping for the
+column. It never compared the two. The `@Shredded` column and both index axes (`subjectColumn`,
+`tenantColumn`) already refuse at startup when their mapping disagrees with the entity's primary
+table; the `@BlindIndex` column itself did not, so a field mapped `@Column(name = "email_idx", table
+= "secidx_note_ext")` onto a `@SecondaryTable` booted, wrote indexes correctly, and then every
+erasure of that entity failed with `SHRED-KEY-UNAVAILABLE` (`SQLState 42703`, undefined column) — the
+erasure's `UPDATE` names the primary table, which has no such column.
+
+- **Changed** `ShreddedModel.indexColumnOf`: takes the entity's primary table and compares it with
+  `TableRef.parse(basic.getContainingTableExpression())`, refusing `SHRED-CONFIG-001` at startup
+  when they differ, naming the entity, the field, the containing table and the primary table — the
+  same message shape `refuseSecondaryTableSplit` and `resolveAxis` already use, and for the same
+  reason. Probe: `probe_a_blind_index_column_on_a_secondary_table_is_refused_at_startup`.
+
 ### Fixed (eleventh pass at `704f23b`, E-1 MEDIUM: two entities on one table could silently share one independent read-back)
 
 **MEDIUM.** `HibernateBlindIndexResidual` keyed its residual queries on `(table, blind-index column)`
