@@ -3548,3 +3548,165 @@ here so it is not lost: move `SPEC.md`, `STATUS.md`, `QUESTIONS.md`, this review
 test classes, main-source Javadoc and docs; re-read `README.md` against the final feature set;
 `LICENSE` (FSL-1.1-ALv2) and `NOTICE` are present and correct, no action; open the singleton-container
 collapse (QUESTIONS S-25) as a post-merge issue.
+
+---
+
+## Thirteenth pass (fddfe14): MERGE
+
+Re-verification of the twelfth pass's one finding, one new attack on the surface that fix created,
+and the merge tail. No new finding at any severity. Under the no-allowance rule the fix list is
+empty, so the verdict is **MERGE**.
+
+### Numbers
+
+| item | result |
+|---|---|
+| `./mvnw clean verify`, three consecutive runs | BUILD SUCCESS, exit 0 each time (1m52, 1m53, 1m52) |
+| tests | **331** each run - core 109, starter 205, sample 17 |
+| failures / errors / skipped | 0 / 0 / 0 in all three runs; Docker up throughout |
+| test classes executed | 67 |
+| line coverage | core 85.64% (1145/1337), starter 87.57% (1635/1867), sample 63.22% (55/87); gates 80/80/30 met |
+| `src/test-pending` | one `README.md` in core, no `.java` anywhere in the repository |
+| probes diffed against `359b193` | no probe deleted, renamed, weakened or narrowed; the only probe change is the F-1 method added to `CipherProbeTwelfthPassTest`, byte-identical to the pending version's assertions |
+| supply chain | 6 action references across 2 workflows, all pinned by commit SHA; `distributionSha256Sum` present in `maven-wrapper.properties`; PostgreSQL image pinned by digest |
+
+One note on the diff, since it is the kind of thing that hides a narrowing: F-1's probe was merged
+into the existing `CipherProbeTwelfthPassTest` instead of the `git mv` the fix list asked for,
+because a class of that name already existed and the rename would have clobbered it. Isis recorded
+the deviation in QUESTIONS before doing it. I compared the promoted method against the deleted
+`CipherProbeTwelfthPassPendingTest` line by line: the fixture, the assertions and the early-return
+shape are unchanged, and the class's other three probes still run. The deviation is correct and the
+only alternative - a second class carrying one method - would have been worse.
+
+### F-1 (LOW) - confirmed closed
+
+**In code.** `ShreddedModel.indexColumnOf` now takes the entity's primary table and compares it
+with `TableRef.parse(basic.getContainingTableExpression())`, refusing `SHRED-CONFIG-001` when they
+differ and naming the entity, the field, the containing table and the primary table. It is the
+fourth of four axes to get this check; it reads the mapping, never the annotation text, and it sits
+in the same place as the three that were already there.
+
+**By probe, both directions.** I did not take the green run as proof on its own. In a detached
+worktree at `359b193` I overwrote `CipherProbeTwelfthPassTest` with the `fddfe14` version - the
+probe, not the fix - and ran it: RED, exactly as the finding predicted,
+
+```
+probe_a_blind_index_column_on_a_secondary_table_is_refused_at_startup
+a @BlindIndex column mapped onto a @SecondaryTable booted; the erasure then said:
+ERASURE-FAILED SHRED-KEY-UNAVAILABLE: shredding key store is unavailable
+(SHRED-KEY-UNAVAILABLE, SQLState 42703) | row still readable after the failure: true
+```
+
+with the class's other three probes green in that same run - so the probe fails on the bug and not
+on the fixture. On `fddfe14` the same method is green through the early-return branch, which is
+reachable only when startup refuses with `SHRED-CONFIG-001` naming `SecondaryIdxNote` and
+`secidx_note_ext`. Red on the parent, green on the head, for the stated reason. Closed.
+
+### The attack: two refusals over one mapping
+
+The fix adds a second `@SecondaryTable` refusal to an entity that could already trip the first one.
+Overlapping guards are where message quality goes wrong: whichever fires is the one the operator
+reads, and if the order is not fixed, two operators with the same mapping get two different
+explanations, or worse, the shallower one.
+
+I built `BothSecondaryNote` - one entity, `@Table(name = "bothsec_note")` plus
+`@SecondaryTable(name = "bothsec_note_ext")`, with **both** the `@Shredded` column and the
+`@BlindIndex` column mapped onto the secondary table - and started it three times.
+
+**Not a finding.** All three starts refused with byte-identical text:
+
+```
+SHRED-CONFIG-001: BothSecondaryNote.email is @Shredded and mapped onto the table
+bothsec_note_ext, which is not BothSecondaryNote's primary table bothsec_note (a
+@SecondaryTable or @Column(table=...) mapping). The update-time subject-immutability check
+reads every shredded column of an entity from its one primary table in a single query; ...
+```
+
+The order is deterministic by construction, not by luck: `ShreddedModel.resolve` calls
+`resolveTables` - which is where `refuseSecondaryTableSplit` lives - before `resolveIndexColumns`,
+in the same method body, and the `shredded` list it walks is built in scan order. It is also the
+right order. The `@Shredded` column being off the primary table is the deeper fault: it breaks the
+subject-immutability read-back and the post-hoc header check, which run on every write, where the
+blind-index column only breaks the erasure. The message names the first real cause, not the last
+check to notice. The attack fixture was removed after the run and is not committed; the numbers
+above are from the unmodified tree.
+
+### QUESTIONS addressed to me, decided
+
+Three were left open "for Cipher" and would otherwise ride into a public repo undecided.
+
+- **#22, the per-decrypt key-state check (200 statements on a 200-row page).** Accepted as is.
+  Memoising key *state* per transaction would trade the bounded cross-node erasure window for a
+  page-read count, and the window is the product. Not a regression from the read-path redesign; it
+  is control 7 doing its job. No change.
+- **#23, the `IDENTITY` rebind's second `encrypt` per column.** Accepted, both consequences. The
+  halved rotation interval triggers a rotation, not a refusal, and the intermediate ciphertext in
+  the WAL verifies against no row on any reader while staying inside the backup/WAL residual
+  `SECURITY-NOTES.md` already states. I declined to refuse `IDENTITY` when it was mine to take and
+  I decline again.
+- **#24, "no write scope survives a `StackOverflowError`" is measured, not guaranteed.** Keep the
+  strict 0/200 assertion. The honest framing is already in the answer: the security property is
+  that a surviving scope is never *consumed*, and that has three guards that do not depend on
+  unwinding. If it flakes in CI I want to see it rather than have it averaged away.
+
+**#12** (an ENISA section number nobody could verify) stays open and is not a merge blocker: it is
+an absent citation, deliberately absent, and inventing one would be the finding.
+
+### For Souhaile, in plain words
+
+Module C is finished as far as I can break it. Thirteen passes, and this one found nothing.
+
+What the module guarantees. Every personal field you mark is encrypted under a key belonging to one
+person, and an erasure destroys that key. The row stays, so your foreign keys, your audit trail and
+your accounting lines survive; the personal fields in them stop being readable, permanently and for
+everyone. Regulators call that pseudonymisation with key destruction, not deletion, and the module's
+own documents say exactly that rather than claiming more. Three further things hold. A ciphertext
+is tied to the row it was written in, so copying an encrypted value from one person's row to
+another's makes it unreadable rather than readable as the wrong person. Nothing is ever handed back
+as plaintext without first checking that the stored value names the person and the tenant of the row
+it came from - a write that cannot be read back that way fails its own transaction instead of being
+stored. The searchable fingerprint that lets an application look someone up by an encrypted value is
+erased together with the key, so an erased person cannot be found by searching for what you already
+know about them. And every table and column name the module's own statements use is taken from the
+application's mapping as the database itself reports it, never from text in an annotation - which is
+what the last four passes were mostly about.
+
+What it does not cover, and you should say so out loud to anyone who asks. Backups, replicas and the
+database's write-ahead log still hold the old rows until your retention window expires; the erasure
+record prints the date after which that is no longer true, and that date is the honest answer to
+"when is it gone". Anything that writes to those tables without going through Hibernate - a
+migration script, a bulk `UPDATE`, a report job with its own SQL - is outside every check here, by
+construction. Another library that installs itself into Hibernate first can, in principle, take the
+hooks this module needs; the module refuses to start when it can see that happening, but it can only
+see what is on the classpath. And the legal position is pseudonymisation, not erasure: it is a real
+and useful control, it is what lets you answer an Art. 17 request without dropping rows an auditor
+needs, and it is not a claim that the data is gone.
+
+### Pre-public checklist
+
+The repo is private today and this is the merge's tail, not a merge blocker. With the counts, so
+nobody has to rediscover them:
+
+1. **Move 6 internal documents** to `15-regulated-spring/internal/gdpr-shredding/`: `SPEC.md`,
+   `STATUS.md`, `QUESTIONS.md`, `docs/SECURITY-REVIEW-feat-shredding-core.md`,
+   `docs/plans/core-plan.md`, `docs/plans/read-path-design.md`. Correction to the eleventh and
+   twelfth passes' checklists, which also named `docs/RELEASING.md`: no such file exists in this
+   repo. Give the private folder its own `README.md`, per the convention.
+2. **Roles, not names, in everything that stays.** 18 main-source Java files and 36 test Java files
+   carry an agent or founder name in prose beyond the exempt `CipherProbe*` / `probe_*` identifiers,
+   which stay as they are because CI's required checks are named after them. 58 lines across 5
+   non-Java public files: `CHANGELOG.md` 34, `SECURITY-NOTES.md` 20, `docs/index.md` 2,
+   `CONTRIBUTING.md` 1, `gdpr-shredding-sample/README.md` 1. `README.md` has none.
+3. **`pom.xml`: 4 comment lines to rewrite, 1 line that is not an agent's call.** The three comments
+   naming the coordinator and the agents in the probe-profile block go to roles. The
+   `<developers><name>Souhaile (Canopus)</name>` entry is a publishing identity, not documentation:
+   it stays unless Souhaile says otherwise, and no agent should change it.
+4. **`README.md`:** re-read against the shipped feature set before publishing. Clean of names today.
+5. **Licence:** `LICENSE` is FSL-1.1-ALv2 with the Apache-2.0 future licence, `NOTICE` matches it
+   and the copyright line. Present and correct, no action.
+6. **Singleton-container follow-up (QUESTIONS S-25):** open it as a post-merge issue, not a
+   pre-public one. Today's measurement: 67 test classes, most starting their own PostgreSQL
+   container, 1m52 for a full `clean verify`. The race S-25 described is fixed; the container count
+   is not, and collapsing it touches every bootstrap.
+7. **QUESTIONS decided:** the 3 items addressed to me (#22, #23, #24) are decided above. #12 stays
+   open by design. Everything else in that file is closed or ruled.
