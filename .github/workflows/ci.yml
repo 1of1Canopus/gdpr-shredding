@@ -14,25 +14,82 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # F2 (fourteenth pass): CONTRIBUTING.md requires every commit in a pull request to carry a DCO
+  # "Signed-off-by:" trailer (git commit -s). This is the only enforcement of that requirement -
+  # nothing rejects an unsigned commit at merge time otherwise. Runs only on pull_request, where
+  # github.event.pull_request.base.sha / .head.sha give an exact commit range; a plain push to
+  # main (already reviewed, already merged) is not re-checked. Copied from
+  # B-agent-guard/.github/workflows/ci.yml (its G2/G3/G4 hardening kept verbatim: parent count,
+  # not subject text, is what exempts a merge commit, and only a trivial back-merge of the base
+  # at that - an octopus merge, an evil merge, or a two-parent commit whose second parent is not
+  # from the base all fall through to the sign-off requirement).
+  dco:
+    name: DCO sign-off
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Verify every commit in this pull request is signed off
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          missing=0
+          while IFS= read -r sha; do
+            [ -n "$sha" ] || continue
+            subject="$(git log -1 --format='%s' "$sha")"
+            # a merge commit is exempt because it has two-or-more parents (%P), never because of
+            # its subject - a subject is free text the committer chooses and cannot be trusted.
+            # Parent count alone is too broad, though: an octopus merge or a two-parent commit
+            # whose second parent is not from the base can carry authored content ("evil merge")
+            # that exists in no parent, while still being waved through as "a real merge". Exempt
+            # a merge only when it is a trivial back-merge of the base: exactly two parents, the
+            # second an ancestor of BASE_SHA, and the commit's own tree identical to the tree git
+            # itself computes for merging those two parents (git merge-tree, needs git >= 2.38;
+            # ubuntu-latest is well past it). An octopus, a two-parent commit whose second parent
+            # is not from the base, and any merge carrying an evil-merge delta all fall through to
+            # the sign-off requirement.
+            parents="$(git log -1 --format='%P' "$sha")"
+            set -- $parents
+            if [ "$#" -ge 2 ]; then
+              exempt=0
+              if [ "$#" -eq 2 ] && git merge-base --is-ancestor "$2" "$BASE_SHA" 2>/dev/null; then
+                auto=""
+                # git merge-tree --write-tree exits non-zero when the merge it computes has a
+                # conflict, even though it still writes a tree. Under set -euo pipefail that would
+                # kill this step before the sign-off check ever ran; the if guards the
+                # substitution so errexit skips it on that path instead: auto stays empty, the
+                # exempt check fails, and a conflict-resolution merge (authored content) correctly
+                # falls through to the sign-off requirement below, with a visible error.
+                if merged="$(git merge-tree --write-tree "$1" "$2" 2>/dev/null)"; then
+                  auto="$(printf '%s\n' "$merged" | head -1)"
+                fi
+                own="$(git rev-parse "$sha^{tree}")"
+                [ -n "$auto" ] && [ "$auto" = "$own" ] && exempt=1
+              fi
+              [ "$exempt" -eq 1 ] && continue
+            fi
+            if ! git log -1 --format='%B' "$sha" | grep -Eiq '^Signed-off-by: .+ <.+@.+>$'; then
+              echo "::error::commit $sha (\"$subject\") has no 'Signed-off-by:' trailer - see CONTRIBUTING.md, git commit -s"
+              missing=$((missing + 1))
+            fi
+          done < <(git rev-list "${BASE_SHA}..${HEAD_SHA}")
+          if [ "$missing" -gt 0 ]; then
+            echo "::error::$missing commit(s) missing a DCO sign-off"
+            exit 1
+          fi
+          echo "all commits in ${BASE_SHA}..${HEAD_SHA} are signed off"
+
   build-and-test:
     name: Build & test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Set up JDK 21
-        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
-        with:
-          distribution: temurin
-          java-version: "21"
-          cache: maven
-      # ubuntu-latest ships Docker: Testcontainers starts PostgreSQL and Redis for the integration tests.
-      - name: Build, test, format check, coverage gate, third-party notices
-        run: ./mvnw -B clean verify
-      - name: Upload third-party notices
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: third-party-notices
-          path: "**/target/THIRD-PARTY-NOTICES.txt"
       # F1 (fourteenth pass): a public file must never point a reader at a document that was moved
       # out of this repository (QUESTIONS.md, STATUS.md, SPEC.md, the portfolio's LICENSING.md /
       # SHARED-CONVENTIONS.md / AGENTS.md, docs/plans, the internal SECURITY-REVIEW / RELEASING
@@ -54,3 +111,18 @@ jobs:
           fi
           rm -f hits.txt
           echo "no dangling reference to a moved-private document or a machine path found"
+      - name: Set up JDK 21
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      # ubuntu-latest ships Docker: Testcontainers starts PostgreSQL and Redis for the integration tests.
+      - name: Build, test, format check, coverage gate, third-party notices
+        run: ./mvnw -B clean verify
+      - name: Upload third-party notices
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: third-party-notices
+          path: "**/target/THIRD-PARTY-NOTICES.txt"
+
