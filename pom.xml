@@ -95,6 +95,7 @@
     <central-publishing.version>0.11.0</central-publishing.version>
     <maven-gpg.version>3.2.8</maven-gpg.version>
     <build-helper-plugin.version>3.6.1</build-helper-plugin.version>
+    <exec-plugin.version>3.6.3</exec-plugin.version>
     <jacoco.minimum.line>0.80</jacoco.minimum.line>
     <!-- The sample's smoke gate (L2): proves the end-to-end test actually exercises the sample
          application, not a quality bar for a reference app the way 80% is for the library. -->
@@ -286,8 +287,26 @@
                 THIRD-PARTY-NOTICES.txt as if a third party dependency were FSL-licensed. Exclude
                 by groupId, not by licence name, so a real third-party dependency that happened to
                 declare the same licence string is still caught.
+
+                F1 (carried over verbatim from the reference product's pom, where it was
+                proved with three synthetic builds): license-maven-plugin
+                (ArtifactFilters.toGaPattern, verified in its bytecode) wraps this configured
+                pattern as "[^:]*(<pattern>)[^:]*:[^:]+" and matches the whole thing against
+                "groupId:artifactId" with Matcher.matches(). The two "[^:]*" make an
+                unanchored pattern a SUBSTRING test on the groupId, so a bare
+                "com\.housedevinci" also excluded "com.housedevinci-evil" and
+                "xcom.housedevinci" - and an excluded dependency reaches NEITHER licence gate
+                (not includedLicenses below, not THIRD-PARTY-NOTICES.txt for
+                check-third-party-licences.sh to read). The pattern below is anchored so that,
+                once wrapped, the plugin's own leading "[^:]*" can only match empty (the "^"
+                inside forces the group to start at position 0 of the whole
+                "groupId:artifactId" string) and its trailing "[^:]*" can only match empty too
+                (the lookahead demands the very next character be the ":" that separates
+                groupId from artifactId). That leaves only "com.housedevinci" itself and its
+                dotted subgroups matching - never a groupId that merely starts or ends with
+                those characters.
               -->
-              <excludedGroups>com\.housedevinci</excludedGroups>
+              <excludedGroups>^com\.housedevinci(\.[^:]*)?(?=:)</excludedGroups>
               <!--
                 Allowlist, not blocklist: a dependency whose declared licence is not one of the
                 five canonical names below fails the build. That is the only form that catches a
@@ -319,6 +338,46 @@
               </licenseMerges>
               <failOnMissing>true</failOnMissing>
               <failOnBlacklist>true</failOnBlacklist>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <!--
+          M1/M2: an all-of *denial* pass over every generated THIRD-PARTY-NOTICES.txt,
+          outside the license-maven-plugin allowlist above. The allowlist is an any-of
+          *permission* check (correct for a genuinely dual-licensed dependency); this is
+          the second, independent check that fails the build if ANY declared licence of a
+          dependency is on the deny list, catching a dependency whose two licence blocks
+          are cumulative rather than alternative. Without it, the <includedLicenses> string
+          above is on its own a licence-NAME pattern, which is the form N9 forbids as the
+          only gate. See tools/check-third-party-licences.sh for the deny list and the four
+          coordinate exceptions, each re-derived from this repository's own resolved tree.
+        -->
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>${exec-plugin.version}</version>
+        <executions>
+          <execution>
+            <id>check-third-party-licences</id>
+            <phase>verify</phase>
+            <goals><goal>exec</goal></goals>
+            <configuration>
+              <executable>${maven.multiModuleProjectDirectory}/tools/check-third-party-licences.sh</executable>
+              <workingDirectory>${maven.multiModuleProjectDirectory}</workingDirectory>
+              <!--
+                N1: scope the check to THIS module's own build directory and packaging, not
+                the whole tree. The execution is inherited by every module and Maven runs the
+                parent's lifecycle first, before any module has produced a
+                THIRD-PARTY-NOTICES.txt - a tree-wide `find` there either fails closed on a
+                clean checkout (breaking `./mvnw verify` on every fresh clone and in CI) or,
+                worse, in a working tree with stale target/ directories, silently validates a
+                PREVIOUS build's notices file. Each module now checks only its own evidence.
+              -->
+              <arguments>
+                <argument>${project.build.directory}</argument>
+                <argument>${project.packaging}</argument>
+              </arguments>
             </configuration>
           </execution>
         </executions>
