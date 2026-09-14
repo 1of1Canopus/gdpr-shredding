@@ -98,48 +98,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # F1 (fourteenth pass): a public file must never point a reader at a document that was moved
-      # out of this repository or at this machine's own filesystem; the forbidden names themselves
-      # are spelled out once, below, on the pattern-definition line. `internal/` is excluded
-      # because that is where the private working docs this repo's own tooling reads (e.g. the
-      # security review feeding cipher-probe-release-pipeline.sh, where it exists) legitimately
-      # live outside the public tree; nothing under it ships in a released artifact.
-      #
-      # G2 (fifteenth pass): two holes in the guard as it stood at c1b4157. (1) `git grep -I`
-      # never matches a binary file, and whether a file is binary is decided by `.gitattributes`,
-      # which the same commit that adds the dangling reference can also edit - one `path binary`
-      # line hid a match without changing the file's content. Fixed with `--text`, which forces
-      # git to treat every path as text regardless of `.gitattributes`. (2) the exemption used to
-      # cover this whole workflow file, not just the one line that has to spell the names out;
-      # narrowed to that line alone, marked below, so every other line in this file (including
-      # this comment block) is caught by the same rule a public source file is. A match is also
-      # run, after packaging, against the contents of the built sources/javadoc jars in the
-      # release-dryrun job below, since `git grep` only ever sees the working tree, not what
-      # `maven-source-plugin`/`maven-javadoc-plugin` actually ship inside a jar.
-      #
-      # H-2/H-3 (sixteenth pass): the content-marker exemption (a `grep -v` on a fixed string) let
-      # any line claim it, not just the pattern-definition line, so a forbidden reference carrying
-      # that same marker string slipped through unchanged (same shape as the .gitattributes binary
-      # bypass, one layer up). Deleted the exemption entirely and instead wrote the pattern so it
-      # cannot match its own definition line below: one character bracketed in each alternative
-      # that used to be a literal substring of itself, turning the definition line into text the
-      # pattern does not match, with no exemption needed at all. H-2: the machine-path half only
-      # knew this reviewer's own laptop account path; a hosted Linux runner builds under a
-      # different absolute prefix the old pattern never caught. Widened to cover Linux home
-      # directories, the Linux superuser home, and Windows drive-letter user paths too.
-      - name: Refuse a reference to a moved-private document or a machine-local path
-        run: |
-          set -euo pipefail
-          pattern='QUESTIONS\.md|STATUS\.md|SPEC\.md|LICENSING\.md|SHARED-CONVENTIONS\.md|AGENTS\.md|docs[/]plans|SECURITY[-]REVIEW|RELEASIN[G]|[/]Users[/]|[/]home[/][a-z]|[/]root[/]|[A-Z]:\\Users'
-          if git grep -n --text -E "$pattern" -- ':!internal/**' \
-              > hits.txt; then
-            echo "::error::found a reference to a moved-private document or a machine-local path:"
-            cat hits.txt
-            rm -f hits.txt
-            exit 1
-          fi
-          rm -f hits.txt
-          echo "no dangling reference to a moved-private document or a machine path found"
       - name: Set up JDK 21
         uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
         with:
@@ -147,13 +105,43 @@ jobs:
           java-version: "21"
           cache: maven
       # ubuntu-latest ships Docker: Testcontainers starts PostgreSQL and Redis for the integration tests.
-      - name: Build, test, format check, coverage gate, third-party notices
+      - name: Build, test, format check, coverage gate, licence gates, third-party notices
         run: ./mvnw -B clean verify
+      # The licence gate has two halves, both inside the build above: an any-of PERMISSION
+      # allowlist (license-maven-plugin <includedLicenses>) and an all-of DENIAL pass
+      # (tools/check-third-party-licences.sh, from exec-maven-plugin, per module). The denial
+      # pass carries a short list of coordinates a human accepted as genuinely dual-licensed.
+      # This step is the third question, the only one that cannot be answered per module: is
+      # every one of those carve-outs still needed by this tree? A carve-out whose dependency
+      # is gone is a pre-approval sitting there waiting for a future dependency to reuse the
+      # coordinate. Runs after the full build, when every module's notices file exists.
+      - name: Refuse a licence carve-out this tree no longer needs
+        run: tools/check-third-party-licences.sh --check-unused
       - name: Upload third-party notices
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: third-party-notices
           path: "**/target/THIRD-PARTY-NOTICES.txt"
+
+  # The reference guard is its own job, not a step inside "Build & test", because the release
+  # hygiene checklist requires it as a required status check in its own right - a check that
+  # only exists as one step of another job cannot be named in a ruleset, and a failure in it
+  # reads as a build failure. The pattern it enforces lives in exactly one place,
+  # tools/check-private-references.sh; this job runs its tree half (no JDK, no build needed).
+  # The jar half runs in release-dryrun below, where the jars exist. The script's own
+  # --self-test (plants one mutation per class and asserts red on each) runs here too, so the
+  # guard's guard is exercised on every push, not only when someone remembers.
+  reference-guard:
+    name: Reference guard
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Self-test the guard (one planted mutation per class, each must go red)
+        run: tools/check-private-references.sh --self-test
+      - name: Refuse a reference to a moved-private document or a machine-local path
+        run: tools/check-private-references.sh --tree
 
   # F3 (fourteenth pass): the release profile (`pom.xml`'s `release` profile) was never exercised
   # by CI - it runs only `clean verify` and `-Psecurity-scan` - so its javadoc break shipped
@@ -185,10 +173,16 @@ jobs:
           mkdir -m 700 "$GNUPGHOME"
           echo "GNUPGHOME=${GNUPGHOME}" >> "$GITHUB_ENV"
           gpg --batch --passphrase '' --quick-generate-key ci-dryrun@example.invalid default default 0
-      - name: Build sources jar, javadoc jar and sign every artifact
+      # No -DskipTests. The jar assertions below (one signature per jar, the sources-jar
+      # listing, the reference guard inside every jar) are only worth anything against the jar
+      # a release actually produces, and `clean deploy -Prelease` runs the tests. With
+      # -DskipTests this job never saw a target/ that the tests had written into, which is
+      # exactly how build output (a javadoc plugin tracking file carrying an absolute build
+      # path) reached a sources jar unnoticed. The price is one Testcontainers run per push.
+      - name: Build sources jar, javadoc jar and sign every artifact (tests run, as a release does)
         env:
           MAVEN_GPG_PASSPHRASE: ""
-        run: ./mvnw -B -DskipTests -Prelease verify
+        run: ./mvnw -B -Prelease verify
       - name: Verify one detached signature per published jar (core, starter; the sample is never published)
         run: |
           set -euo pipefail
@@ -206,40 +200,45 @@ jobs:
             exit 1
           fi
           echo "every published jar (core, starter) has a detached signature"
-      # G2 (fifteenth pass), second half: the build-and-test guard above greps the working tree,
-      # not what actually ships - maven-source-plugin and maven-javadoc-plugin copy file contents
-      # into the sources/javadoc jars verbatim, so a match this guard would have caught in the
-      # tree is what a reader of the published jar sees too. Unzips every jar this job just built
-      # for the published modules (core, starter; the sample is never published) and re-runs the
-      # same pattern against the extracted contents.
-      #
-      # H-2/H-3: same pattern as the build-and-test step above - no exemption, self-non-matching,
-      # machine-path alternatives widened as noted there. H-4 (sixteenth pass, INFO): this step
-      # used to grep only the sources and javadoc jars; the main jar is published too and was
-      # never checked. Loop widened to every jar in each module's target/ so every published jar
-      # (main included) is covered.
-      - name: Refuse a moved-private document reference or a machine-local path inside a published jar
+      # An allowlist on the sources jar listing, not a denylist of known-bad names: the defect
+      # class here is "something in target/ got swept in", and the set of things that could be
+      # swept in is open-ended, so the only assertion that holds is the one that names what may
+      # be there. Sources (.java), the module's own resources, the embedded licence texts and
+      # the jar's own metadata - anything else fails.
+      - name: Confirm each sources jar holds sources, resources and the licence texts only
         run: |
           set -euo pipefail
-          pattern='QUESTIONS\.md|STATUS\.md|SPEC\.md|LICENSING\.md|SHARED-CONVENTIONS\.md|AGENTS\.md|docs[/]plans|SECURITY[-]REVIEW|RELEASIN[G]|[/]Users[/]|[/]home[/][a-z]|[/]root[/]|[A-Z]:\\Users'
-          extract_dir="${RUNNER_TEMP}/jar-contents"
-          mkdir -p "$extract_dir"
-          found=0
-          for dir in gdpr-shredding-core gdpr-shredding-spring-boot-starter; do
-            for jar in "$dir"/target/*.jar; do
-              [ -f "$jar" ] || continue
-              dest="$extract_dir/$(basename "$jar" .jar)"
-              mkdir -p "$dest"
-              unzip -q -o "$jar" -d "$dest"
-              if grep -rlnE "$pattern" "$dest" > hits.txt; then
-                echo "::error::${jar} contains a reference to a moved-private document or a machine-local path:"
-                cat hits.txt
-                found=1
-              fi
-              rm -f hits.txt
-            done
+          status=0
+          for jar in gdpr-shredding-core/target/*-sources.jar gdpr-shredding-spring-boot-starter/target/*-sources.jar; do
+            [ -f "$jar" ] || { echo "::error::no sources jar built for ${jar%%/*}"; status=1; continue; }
+            echo "--- $jar"
+            unzip -Z1 "$jar"
+            while IFS= read -r entry; do
+              case "$entry" in
+                */)                        continue ;;   # directory entry
+                META-INF/MANIFEST.MF)      continue ;;
+                META-INF/LICENSE|META-INF/NOTICE) continue ;;
+                META-INF/maven/*)          continue ;;
+                *.java)                    continue ;;
+                *.properties|*.yml|*.yaml|*.json|*.sql|*.factories|*.imports) continue ;;
+                # The starter's one .txt resource, named exactly. Not a bare "*.txt": that
+                # would re-admit THIRD-PARTY-NOTICES.txt, which is the generated build output
+                # this assertion exists to keep out of a sources jar.
+                com/housedevinci/shredding/autoconfigure/postgresql-*-reserved-keywords.txt) continue ;;
+                *)
+                  echo "::error::$jar ships an entry that is neither source, module resource nor licence text: $entry"
+                  status=1
+                  ;;
+              esac
+            done < <(unzip -Z1 "$jar")
           done
-          if [ "$found" -ne 0 ]; then
-            exit 1
-          fi
-          echo "no dangling reference found inside any published sources/javadoc jar"
+          exit "$status"
+      # The tree half of this guard runs in the reference-guard job; this is the jar half.
+      # maven-source-plugin and maven-javadoc-plugin copy file contents into the jars verbatim,
+      # so a reference the tree scan would have caught is what a reader of the published jar
+      # sees too - and `git grep` only ever sees the working tree, never what a plugin put in
+      # an archive. The loop covers EVERY jar in each published module's target/, the main jar
+      # included, not only sources and javadoc. Same single pattern definition as the tree
+      # scan, in tools/check-private-references.sh: there is no second copy to drift.
+      - name: Refuse a moved-private document reference or a machine-local path inside a published jar
+        run: tools/check-private-references.sh --jars gdpr-shredding-core gdpr-shredding-spring-boot-starter
