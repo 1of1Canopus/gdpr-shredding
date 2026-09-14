@@ -1056,6 +1056,37 @@ esac'
 }
 
 # ---------------------------------------------------------------------------
+# The v0.1.0 tag run of 2026-09-15 refused itself because the clash filter matched any
+# deployment whose name merely contained the version, and agent-guard 0.1.0 is PUBLISHED
+# under the same Portal account. The filter must match this project's own deployment name
+# and nothing else. Weak if a sibling project's published deployment of the same version
+# makes the step refuse.
+# ---------------------------------------------------------------------------
+probe_replay_check_refuses_on_a_sibling_projects_deployment() {
+  local stub_body rc
+  stub_body='
+case "$*" in
+  *repo1.maven.org*) printf "404" ;;
+  *api/v1/publisher/published*) echo "{\"published\":false}" ;;
+  *api/v1/publisher/deployments*page=0*) echo "{\"deployments\":[{\"deploymentName\":\"agent-guard 9.9.9-cipher-probe\",\"deploymentState\":\"PUBLISHED\"},{\"deploymentName\":\"gdpr-shredding 9.9.9-cipher-probe-rc1 (cafe)\",\"deploymentState\":\"PUBLISHED\"}]}" ;;
+  *api/v1/publisher/deployments*) echo "{\"deployments\":[]}" ;;
+  *) exit 1 ;;
+esac'
+  rc="$(_replay_verdict "$stub_body")"
+  [ "$rc" -ne 0 ]   # weak: a sibling project (or a different version with this prefix) made it refuse
+}
+
+# The sample smoke check must accept 404 from the open read endpoint, which is what a
+# fresh database answers for the probe customer. Weak if only 200/401 are accepted.
+probe_sample_smoke_rejects_a_404_from_the_open_endpoint() {
+  local body
+  body="$(step_body "$WF" 'Start PostgreSQL, build, run, time to first response')"
+  [ -n "$body" ] || return 0
+  grep -q '"\$code" = "404"' <<<"$body" && return 1
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Two deployments of the same version are indistinguishable on the Portal unless the name
 # says which commit each was built from.
 # ---------------------------------------------------------------------------
@@ -1349,6 +1380,8 @@ probe probe_release_does_not_refuse_a_replay                 "a re-run can uploa
 probe probe_replay_check_runs_after_the_upload               "the replay check lands after the upload"            probe_replay_check_runs_after_the_upload
 probe probe_replay_check_first_page_only                     "RP-4 a clash on page 1 of deployments is missed"    probe_replay_check_reads_only_the_first_page
 probe probe_deployment_name_omits_the_released_commit        "two deployments of a version look identical"        probe_deployment_name_does_not_name_the_released_commit
+probe probe_replay_check_refuses_on_a_sibling_project     "v0.1.0 run: agent-guard 0.1.0 made the replay check refuse" probe_replay_check_refuses_on_a_sibling_projects_deployment
+probe probe_sample_smoke_rejects_a_404                       "v0.1.0 run: open endpoint answers 404, smoke check waits"  probe_sample_smoke_rejects_a_404_from_the_open_endpoint
 probe probe_bundle_comparison_reads_the_build_directory      "the comparison reads target/, not the bundle"       probe_bundle_comparison_reads_the_build_directory_not_the_bundle
 probe probe_bundle_comparison_misses_an_absent_jar           "a jar missing from the bundle is not noticed"       probe_bundle_comparison_misses_a_jar_absent_from_the_bundle
 probe probe_reproducibility_check_never_records_poms         "RP-5 verify-reproducible.sh never collects *.pom"   probe_reproducibility_check_never_records_poms

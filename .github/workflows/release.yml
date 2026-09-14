@@ -405,7 +405,8 @@ jobs:
           done
           clash="$(printf '%s' "$all_deployments" | jq -r --arg v "$VERSION" '
             .[]
-            | select((.deploymentName // "") | contains($v))
+            | select((.deploymentName // "") as $n
+                | ($n == "gdpr-shredding " + $v) or ($n | startswith("gdpr-shredding " + $v + " ")))
             | select((.deploymentState // "") | IN("PENDING","VALIDATING","VALIDATED","PUBLISHING","PUBLISHED"))
             | "\(.deploymentName) [\(.deploymentState)]"' 2>/dev/null || true)"
           if [ -n "$clash" ]; then
@@ -628,16 +629,17 @@ jobs:
           java -jar target/gdpr-shredding-sample-*.jar > /tmp/sample.log 2>&1 &
           app=$!
 
-          # "Running" = the customer read endpoint answers. 200 (no such customer yet, an
-          # empty list) and 401 (Spring Security refusing an unauthenticated caller) are both
-          # correct answers: either means the application is up and serving.
+          # "Running" = the customer read endpoint answers. 200, 404 (the read endpoint is
+          # open and the probe customer does not exist, which is what the v0.1.0 tag run
+          # actually got) and 401 (Spring Security refusing an unauthenticated caller) are
+          # all correct answers: each means the application is up and serving.
           ready=""
           for _ in $(seq 1 120); do
             if ! kill -0 "$app" 2>/dev/null; then
               echo "::error::the sample exited before it answered"; tail -50 /tmp/sample.log; exit 1
             fi
             code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/customers/acme/smoke-probe || true)
-            if [ "$code" = "401" ] || [ "$code" = "200" ]; then ready=1; break; fi
+            if [ "$code" = "401" ] || [ "$code" = "200" ] || [ "$code" = "404" ]; then ready=1; break; fi
             sleep 1
           done
           end=$(date +%s)
