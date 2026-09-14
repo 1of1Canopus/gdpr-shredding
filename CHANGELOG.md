@@ -15,6 +15,45 @@ All notable changes to this project. The format follows
   `CONTRIBUTING.md` with the DCO sign-off and inbound-licensing terms, matching the rest of
   the product line.
 
+### Fixed (fourteenth pass at `c1b4157`, three LOW: three loose ends the pre-public docs cleanup left)
+
+**LOW (F-1).** Ten lines across six public files still pointed at documents the previous change
+moved out of this repository (the open-questions log, mostly by number - `#4`, `#9`, `#16`, `#19`
+- and, once, the portfolio's licensing rationale). A reader of the public repo or the starter's
+sources jar could never follow any of those pointers. Each is rewritten with the decision itself
+stated in place: `ShreddedModel`'s CIPHER-06 note, `ShreddingEventListener`'s C-27 and
+`refuseIfSubjectMoved`/`onPostLoad` notes, `ShreddingReadBracketCustomizer`'s
+`BeanPostProcessor`-over-`RepositoryFactoryCustomizer` rationale (and its now-corrected dead
+`{@link ShreddingContext#popReadBracket()}`, a method that no longer exists - retargeted to
+`enterRegion()`/`closeRegion(long)`, the pair that replaced it), `SECURITY-NOTES.md`'s C-27
+paragraph, and three `CHANGELOG.md` entries below, including the FSL licensing entry's pointer to
+the portfolio-level licensing rationale document. `ci.yml`'s `build-and-test` job gained a `git
+grep` step that fails the build on a reference to any of these moved documents, or to this machine's own
+filesystem, outside `internal/` - the same shape of guard as agent-guard's, written here since
+agent-guard did not yet have one to copy.
+
+**LOW (F-2).** `CONTRIBUTING.md` stated "`ci.yml` checks that every commit in the pull request
+carries one [`Signed-off-by`]" while `ci.yml` had no such job - the DCO trailer CONTRIBUTING calls
+"the whole inbound-licensing agreement" was documented as machine-enforced and was not. Added the
+`dco` job, copied from `B-agent-guard/.github/workflows/ci.yml` verbatim (the PR commit-range
+check, the trivial-back-merge exemption by parent count and tree equality, not by commit subject).
+Adding "DCO sign-off" to the branch protection ruleset's required checks is deferred: this repo is
+private and has no ruleset yet; the status log records that the ruleset, and this required check,
+are created at go-public time.
+
+**LOW (F-3, self-inflicted at `48454b2`, missed by the thirteenth pass).** The release profile did
+not build: `./mvnw -B -DskipTests -Prelease -Dgpg.skip=true package` failed on five javadoc errors
+- four `unknown tag: apiNote` in `ShreddingContext` (the javadoc plugin's `doclint=all,-missing`
+config has no `<tags>` entry registering the JDK-internal `@apiNote` block tag) and one `reference
+not found` in `ShreddingReadBracketCustomizer`, the dead link above. The four `@apiNote` blocks are
+rewritten as plain `<p><strong>API note</strong>...` description paragraphs (no plugin
+configuration change; the tag was never declared to the doclet and the content reads the same way
+either form). Nothing else in the release profile changed - CI already runs `clean verify` and
+`-Psecurity-scan`; it now also runs `./mvnw -B -DskipTests -Prelease -Dgpg.skip=true package` as a
+`release-dryrun` job on every push and pull request, so a break in the sources jar, the javadoc
+jar, or the release profile's own plugin wiring fails CI instead of shipping unnoticed to the next
+real release attempt.
+
 ### Fixed (twelfth pass at `13535d8`, F-1 LOW: a `@BlindIndex` column on a `@SecondaryTable` booted, and every later erasure of that entity failed)
 
 **LOW.** `ShreddedModel.resolveIndexColumns` built the `BlindIndexColumn` from two independent

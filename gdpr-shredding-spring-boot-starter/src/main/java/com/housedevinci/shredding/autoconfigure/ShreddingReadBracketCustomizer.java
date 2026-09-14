@@ -45,14 +45,15 @@ import org.springframework.util.ClassUtils;
  * identity ("you are inside a repository call"), not a proof that a verifier would run: a
  * repository {@code @Query} projection, a Spring Data interface projection, and a repository bound
  * to a second, uninstrumented {@code EntityManagerFactory} all decrypted with the bracket open and
- * nothing ever draining the decode. {@link ShreddingContext#popReadBracket()} now owes a debt
- * rather than granting a permission - see its javadoc - and this class is what makes that debt
- * actually get checked before the repository method's result reaches its caller (below). The second
- * half of C-20 - a bracket cannot vouch for a session it does not know is instrumented - is closed
- * by {@link #afterSingletonsInstantiated()}: with more than one {@code EntityManagerFactory} bean
- * in the context, there is no reliable, version-independent way for this processor to tell which
- * factory an arbitrary repository bean is bound to (C-20), so every repository is refused at
- * startup rather than bracketed on the chance it belongs to the wrong one.
+ * nothing ever draining the decode. {@link ShreddingContext#enterRegion()} now owes a debt - the
+ * token {@link ShreddingContext#closeRegion(long)} must drain - rather than granting a permission -
+ * see its javadoc - and this class is what makes that debt actually get checked before the
+ * repository method's result reaches its caller (below). The second half of C-20 - a bracket cannot
+ * vouch for a session it does not know is instrumented - is closed by {@link
+ * #afterSingletonsInstantiated()}: with more than one {@code EntityManagerFactory} bean in the
+ * context, there is no reliable, version-independent way for this processor to tell which factory
+ * an arbitrary repository bean is bound to (C-20), so every repository is refused at startup rather
+ * than bracketed on the chance it belongs to the wrong one.
  */
 public final class ShreddingReadBracketCustomizer
     implements BeanPostProcessor, Ordered, SmartInitializingSingleton {

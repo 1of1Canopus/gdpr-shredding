@@ -406,13 +406,14 @@ public final class ShreddingContext {
    * nested repository call must not destroy the outer call's still-live region - its pending
    * decodes would vanish and the outer close would refuse, on every nested call in the application.
    *
+   * <p><strong>API note</strong> (S-19, the eighth pass): this module's internal SPI, called by the
+   * framework integration that owns a call boundary (the repository proxy), never by application
+   * code. {@link #withReadBracket} is the one supported entry point and it hands out no epoch an
+   * application can act on; calling this method directly reopens the S-4 shape addendum 2 was built
+   * to close. Subject to change without a major version.
+   *
    * @return the token that closes this region, which is also the token {@link #closeRegion(long)}
    *     and {@link #discardRegion(long)} take
-   * @apiNote S-19 (the eighth pass). This module's internal SPI: called by the framework
-   *     integration that owns a call boundary (the repository proxy), never by application code.
-   *     {@link #withReadBracket} is the one supported entry point and it hands out no epoch an
-   *     application can act on; calling this method directly reopens the S-4 shape addendum 2 was
-   *     built to close. Subject to change without a major version.
    */
   public static long enterRegion() {
     Deque<Region> stack = REGIONS.get();
@@ -728,13 +729,15 @@ public final class ShreddingContext {
    * Files a decrypted value in the region currently on top, to be installed by the verifier that
    * proves which row it belongs to.
    *
+   * <p><strong>API note</strong> (S-19, the eighth pass): this module's internal SPI, called by
+   * {@code Shredded*Converter}, not API for applications. Subject to change without a major
+   * version.
+   *
    * @throws ShreddingException {@code SHRED-READ-UNSCOPED} if no region is open. finding item 1: a
    *     placeholder returned with nothing that will ever close a region is a value crossing the
    *     boundary with no signal at all, so the decrypt is refused instead - the case of a
    *     hand-written DAO, a bare {@code EntityManager}, a {@code Stream} drained after the
    *     repository call returned, or an {@code @Async} continuation.
-   * @apiNote S-19 (the eighth pass). This module's internal SPI: called by {@code
-   *     Shredded*Converter}, not API for applications. Subject to change without a major version.
    */
   public static void recordDecoded(FrameKey key, byte[] plaintext) {
     Region region = currentRegion();
@@ -784,8 +787,9 @@ public final class ShreddingContext {
    * region of its own, on a thread where an {@link Error} skipped exactly the frame that restores
    * the epoch, still sees a matching one. A leaked region costs a refusal, never a value.
    *
-   * @apiNote S-19 (the eighth pass). This module's internal SPI: called by {@code
-   *     Shredded*Converter}, not API for applications. Subject to change without a major version.
+   * <p><strong>API note</strong> (S-19, the eighth pass): this module's internal SPI, called by
+   * {@code Shredded*Converter}, not API for applications. Subject to change without a major
+   * version.
    */
   public static Optional<byte[]> drain(FrameKey key) {
     Region region = currentRegion();
@@ -809,9 +813,9 @@ public final class ShreddingContext {
    * SHRED-SUBJECT-MISMATCH}, a header naming the right subject but another row is {@code
    * SHRED-ROW-MISMATCH}, and nothing at all is {@code SHRED-READ-UNVERIFIED}.
    *
-   * @apiNote S-19 (the eighth pass). This module's internal SPI: called by {@code
-   *     ShreddingEventListener}, not API for applications. Subject to change without a major
-   *     version.
+   * <p><strong>API note</strong> (S-19, the eighth pass): this module's internal SPI, called by
+   * {@code ShreddingEventListener}, not API for applications. Subject to change without a major
+   * version.
    */
   public static List<FrameKey> pendingKeysFor(String entity, String field) {
     Region region = currentRegion();
