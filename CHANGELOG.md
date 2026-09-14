@@ -6,7 +6,46 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added
+- A Maven Central release pipeline: `.github/workflows/release.yml` publishes
+  `gdpr-shredding-core`, `gdpr-shredding-spring-boot-starter` and the parent POM from a signed
+  tag `v*` whose commit is an ancestor of `main`, from a clean checkout with an empty local
+  repository, stopping at "validated" so a human presses Publish on the Central Portal. The
+  sample is never published. A `preflight` job, with no environment and no access to any
+  secret, refuses the release unless the `release` environment really requires a reviewer and
+  `main` really requires the four CI checks, and refuses on any answer it cannot read; the job
+  that holds the signing key depends on it. A replay of a version already on Maven Central, or
+  already sitting on the Portal, is refused before anything is signed, and the deployment name
+  carries the released commit sha so two deployments of one version are distinguishable. After
+  the upload, the jars inside the uploaded bundle are compared entry by entry, in both
+  directions, against the checksums a two-build reproducibility check recorded.
+- `tools/check-third-party-licences.sh`: an all-of licence *denial* pass over every generated
+  `THIRD-PARTY-NOTICES.txt`, run per module from the build. The existing `includedLicenses`
+  allowlist is an any-of permission check on licence names; on its own it passes a dependency
+  whose two declared licences are cumulative rather than alternative, and misses prose
+  spellings that contain no SPDX id. Exceptions are coordinates a human accepted, never licence
+  patterns, and `--check-unused` fails the build on a carve-out this tree no longer needs.
+- `tools/check-private-references.sh`: the guard that refuses a reference to a moved-private
+  document or a machine-local path, now in one place with a `--self-test` that plants one
+  mutation per class and asserts the guard goes red on each. It runs as its own CI check over
+  the tree and over every published jar.
+- `tools/cipher-probe-release-pipeline.sh`: the security-review probe suite, run by CI on every
+  push and pull request as its own check.
+- `scripts/verify-reproducible.sh` and `scripts/git-commit-timestamp.sh`: two clean builds of
+  the same commit produce byte-identical jars, and the release stamps every archive entry with
+  the released commit's date.
+
 ### Changed
+- The release dry run in CI now runs the tests instead of skipping them: its assertions about
+  jar contents are only meaningful against the jar a real release produces.
+- `license-maven-plugin`'s `excludedGroups` pattern is anchored. Unanchored, the plugin wraps
+  it into a substring test on the group id, so a group id merely containing `com.housedevinci`
+  was excluded from both licence gates.
+- `maven-gpg-plugin` no longer receives an explicit `gpgArguments` block: the plugin supplies
+  the loopback pinentry flag itself when a passphrase is set, and the comment on the block
+  credited the flag to the absent tty rather than to the plugin.
+- The DCO check's grandfather exemption is removed. It could no longer match any commit once
+  the pull request it covered merged.
 - Internal working documents (the spec, the status log, the open-questions log, the security
   review write-up, design plans) moved out of this repository to a private location; they named an
   internal review process that has no reason to be public. `SECURITY-NOTES.md` and this
@@ -14,6 +53,76 @@ All notable changes to this project. The format follows
   Added `SECURITY.md` (vulnerability reporting, 90-day disclosure) and expanded
   `CONTRIBUTING.md` with the DCO sign-off and inbound-licensing terms, matching the rest of
   the product line.
+
+### Fixed (security review confirmation at `0711fde`: RP-6 MEDIUM, the RP-5 fix disabled the control it extended)
+
+**MEDIUM (RP-6).** The bundle carries three published coordinates (parent, core, starter), but
+`verify-reproducible.sh`'s `collect()` recorded poms for core and starter only - the parent pom
+was an unrecorded bundle entry on every release. In `release.yml`'s comparison step, the lookup
+`grep -F " $name" "$sha_file" | awk '{print $1}' | head -1` exited 1 on that entry (no match),
+`pipefail` promoted the exit code to the assignment's status, and `set -e` killed the step there
+- silently, with no `::error::` line - before the `NO RECORD` branch could ever run. Since
+`find | sort` puts `gdpr-shredding-parent/` before `gdpr-shredding-spring-boot-starter/`, every
+release ended red at its last step with the starter's jars and pom never compared and no
+diagnostic explaining why. Fixed in two parts, both needed: `collect()` now also records the
+reactor root `pom.xml` as `gdpr-shredding-parent-<version>.pom` (read at its own path, the same
+reasoning as RP-5: `mvn package` writes no pom into `target/`); and the lookup is now
+`awk -v n=" $name" 'index($0, n) { print $1; exit }' "$sha_file"`, which cannot kill the step -
+an unrecorded entry now reaches and reports `NO RECORD`, and the loop continues to every entry
+after it.
+
+### Fixed (security review of PR #2 at `9c01585`: RP-1/RP-2/RP-3 LOW, RP-4/RP-5 INFO, R-3 ruling)
+
+**LOW (RP-1).** `tools/check-private-references.sh`'s `scan_tree` and `scan_dir` folded any
+`git grep`/`grep` exit code other than "hit" into "clean" (`|| true`), so a `git grep` failure
+(not a git repository, a bad pathspec, any other error) was reported as a clean tree. Both now
+capture the real exit code and refuse - naming the status - on anything other than 0 (hit) or 1
+(clean). `--self-test` gained a case pointing the guard at a non-git directory holding a planted
+reference and asserting it refuses rather than reports clean.
+
+**LOW (RP-2).** `scan_jars` ignored a failed `unzip`: a jar that could not be extracted produced
+an empty directory, which scanned clean, so a truncated or corrupt jar - exactly the artifact
+nobody should wave through - passed the guard. `unzip` failure now marks the guard's overall
+status failed and names the unreadable jar. `--self-test` gained a case with a non-zip `.jar`
+carrying a planted reference, asserting refusal.
+
+**LOW (RP-3).** The sources-jar content assertion in `ci.yml` allowlisted extensions, not
+paths, so a build-output path riding in on an allowlisted extension -
+`target/classes/META-INF/spring-configuration-metadata.json`, generated on every build - swept
+straight through, defeating the defence-in-depth this assertion exists to provide the day the
+pom's `addOutputDirectoryAsResourceDir=false` switch is lost. The check is now path-based first:
+every entry must sit under `META-INF/` or the module's own source package root (`com/`), which
+refuses `classes/**`, `surefire-reports/**` and any other build-output directory regardless of
+extension, while the starter's one real `.txt` resource is still admitted by its exact path.
+
+**INFO (RP-4).** The replay-refusal step's third check read only page 0 of the Portal
+deployment list (`?page=0&size=100`), so a `VALIDATED`-but-not-yet-published deployment for the
+released version sitting behind a hundred newer ones was invisible to it - the one case the two
+checks in front of it (Maven Central, the Portal's published-check) do not cover on their own.
+The step now pages until a short page is returned, accumulating every deployment before the
+clash check, and refuses (never guesses) if a page answers in an unfamiliar shape or paging does
+not terminate within 1000 pages.
+
+**INFO (RP-5).** The post-upload reproducibility comparison covered jars only; the poms in the
+uploaded bundle were never compared, though Central consumes the pom bytes too and the window
+the comparison exists to close (between the proved build and the upload) applies to them
+identically. `scripts/verify-reproducible.sh`'s `collect()` now also copies each module's `.pom`
+and the comparison enforces it exactly as a jar (not exempted like the javadoc jar); the bundle
+comparison step in `release.yml` now walks `*.pom` alongside `*.jar`.
+
+**Ruling (R-3).** The dead `internal/**` path exemption is removed from
+`tools/check-private-references.sh`. It protected nothing (this repository has no `internal/`
+directory and by design never will - private documents live outside the repository), was wrong
+for the model (a top-level `internal/` is world-readable in a public repository, so exempting it
+would exempt the one directory meant not to exist here), and had no `--self-test` case covering
+it. Only the historical comment explaining the removal remains.
+
+Each of the six is covered by a probe or a `--self-test` case, red against `9c01585` and green
+after: `tools/cipher-probe-release-pipeline.sh` gained
+`probe_replay_check_first_page_only` (RP-4), `probe_reproducibility_check_never_records_poms`
+and `probe_bundle_comparison_never_reads_poms` (RP-5), `probe_sources_jar_allowlist_is_extension_only`
+(RP-3) and `probe_guard_exempts_internal_directory` (R-3); `tools/check-private-references.sh
+--self-test` gained the RP-1 and RP-2 cases described above.
 
 ### Fixed (fourteenth pass at `c1b4157`, three LOW: three loose ends the pre-public docs cleanup left)
 
