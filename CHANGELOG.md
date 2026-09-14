@@ -54,7 +54,7 @@ All notable changes to this project. The format follows
   `CONTRIBUTING.md` with the DCO sign-off and inbound-licensing terms, matching the rest of
   the product line.
 
-### Fixed (Cipher's confirmation at `0711fde`, RP-6 MEDIUM: the RP-5 fix disabled the control it extended)
+### Fixed (security review confirmation at `0711fde`: RP-6 MEDIUM, the RP-5 fix disabled the control it extended)
 
 **MEDIUM (RP-6).** The bundle carries three published coordinates (parent, core, starter), but
 `verify-reproducible.sh`'s `collect()` recorded poms for core and starter only - the parent pom
@@ -71,7 +71,7 @@ reasoning as RP-5: `mvn package` writes no pom into `target/`); and the lookup i
 an unrecorded entry now reaches and reports `NO RECORD`, and the loop continues to every entry
 after it.
 
-### Fixed (Cipher's PR #2 review at `9c01585`: RP-1/RP-2/RP-3 LOW, RP-4/RP-5 INFO, R-3 ruling)
+### Fixed (security review of PR #2 at `9c01585`: RP-1/RP-2/RP-3 LOW, RP-4/RP-5 INFO, R-3 ruling)
 
 **LOW (RP-1).** `tools/check-private-references.sh`'s `scan_tree` and `scan_dir` folded any
 `git grep`/`grep` exit code other than "hit" into "clean" (`|| true`), so a `git grep` failure
