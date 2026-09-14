@@ -23,6 +23,15 @@ jobs:
   # not subject text, is what exempts a merge commit, and only a trivial back-merge of the base
   # at that - an octopus merge, an evil merge, or a two-parent commit whose second parent is not
   # from the base all fall through to the sign-off requirement).
+  #
+  # GRANDFATHER_SHA (B's own precedent, same reasoning): this requirement is adopted mid-flight,
+  # on this still-open PR, which already carries commits pushed before CONTRIBUTING.md asked for
+  # a sign-off. Those commits cannot gain a trailer without rewriting already-pushed history,
+  # which this portfolio's git rules forbid (no force-push, ever). c1b4157 is the last commit
+  # made before this job was added; a commit is exempt only if it IS c1b4157 or an ANCESTOR of
+  # it. Self-limiting: once this PR merges, c1b4157 becomes part of main's history and every
+  # commit on every future branch is a DESCENDANT of it, never an ancestor, so the exemption can
+  # never match a new commit again, here or on any later PR.
   dco:
     name: DCO sign-off
     if: github.event_name == 'pull_request'
@@ -37,11 +46,16 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GRANDFATHER_SHA: c1b415747088b77a923d14f0a62052bdb673e7a9
         run: |
           set -euo pipefail
           missing=0
           while IFS= read -r sha; do
             [ -n "$sha" ] || continue
+            if git cat-file -e "$GRANDFATHER_SHA" 2>/dev/null \
+                && git merge-base --is-ancestor "$sha" "$GRANDFATHER_SHA"; then
+              continue
+            fi
             subject="$(git log -1 --format='%s' "$sha")"
             # a merge commit is exempt because it has two-or-more parents (%P), never because of
             # its subject - a subject is free text the committer chooses and cannot be trusted.
