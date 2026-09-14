@@ -105,19 +105,30 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # F1 (fourteenth pass): a public file must never point a reader at a document that was moved
-      # out of this repository (QUESTIONS.md, STATUS.md, SPEC.md, the portfolio's LICENSING.md /
-      # SHARED-CONVENTIONS.md / AGENTS.md, docs/plans, the internal SECURITY-REVIEW / RELEASING
-      # write-ups) or at this machine's own filesystem. `internal/` is excluded because that is
-      # where the private working docs this repo's own tooling reads (e.g. the security review
-      # feeding cipher-probe-release-pipeline.sh, where it exists) legitimately live outside the
-      # public tree; nothing under it ships in a released artifact.
+      # out of this repository or at this machine's own filesystem; the forbidden names themselves
+      # are spelled out once, below, on the pattern-definition line. `internal/` is excluded
+      # because that is where the private working docs this repo's own tooling reads (e.g. the
+      # security review feeding cipher-probe-release-pipeline.sh, where it exists) legitimately
+      # live outside the public tree; nothing under it ships in a released artifact.
+      #
+      # G2 (fifteenth pass): two holes in the guard as it stood at c1b4157. (1) `git grep -I`
+      # never matches a binary file, and whether a file is binary is decided by `.gitattributes`,
+      # which the same commit that adds the dangling reference can also edit - one `path binary`
+      # line hid a match without changing the file's content. Fixed with `--text`, which forces
+      # git to treat every path as text regardless of `.gitattributes`. (2) the exemption used to
+      # cover this whole workflow file, not just the one line that has to spell the names out;
+      # narrowed to that line alone, marked below, so every other line in this file (including
+      # this comment block) is caught by the same rule a public source file is. A match is also
+      # run, after packaging, against the contents of the built sources/javadoc jars in the
+      # release-dryrun job below, since `git grep` only ever sees the working tree, not what
+      # `maven-source-plugin`/`maven-javadoc-plugin` actually ship inside a jar.
       - name: Refuse a reference to a moved-private document or a machine-local path
         run: |
           set -euo pipefail
-          pattern='QUESTIONS\.md|STATUS\.md|SPEC\.md|LICENSING\.md|SHARED-CONVENTIONS\.md|AGENTS\.md|docs/plans|SECURITY-REVIEW|RELEASING|/Users/'
-          # This workflow file's own definition of the pattern is exempt - it has to spell out
-          # the names it forbids elsewhere.
-          if git grep -InE "$pattern" -- ':!internal/**' ':!.github/workflows/ci.yml' > hits.txt; then
+          pattern='QUESTIONS\.md|STATUS\.md|SPEC\.md|LICENSING\.md|SHARED-CONVENTIONS\.md|AGENTS\.md|docs/plans|SECURITY-REVIEW|RELEASING|/Users/'  # pattern-definition-line, exempt from the guard it defines
+          if git grep -n --text -E "$pattern" -- ':!internal/**' \
+              | grep -v 'pattern-definition-line, exempt from the guard it defines' \
+              > hits.txt; then
             echo "::error::found a reference to a moved-private document or a machine-local path:"
             cat hits.txt
             rm -f hits.txt
@@ -191,3 +202,34 @@ jobs:
             exit 1
           fi
           echo "every published jar (core, starter) has a detached signature"
+      # G2 (fifteenth pass), second half: the build-and-test guard above greps the working tree,
+      # not what actually ships - maven-source-plugin and maven-javadoc-plugin copy file contents
+      # into the sources/javadoc jars verbatim, so a match this guard would have caught in the
+      # tree is what a reader of the published jar sees too. Unzips every sources/javadoc jar this
+      # job just built for the published modules (core, starter; the sample is never published)
+      # and re-runs the same pattern against the extracted contents.
+      - name: Refuse a moved-private document reference or a machine-local path inside a published jar
+        run: |
+          set -euo pipefail
+          pattern='QUESTIONS\.md|STATUS\.md|SPEC\.md|LICENSING\.md|SHARED-CONVENTIONS\.md|AGENTS\.md|docs/plans|SECURITY-REVIEW|RELEASING|/Users/'  # pattern-definition-line, exempt from the guard it defines
+          extract_dir="${RUNNER_TEMP}/jar-contents"
+          mkdir -p "$extract_dir"
+          found=0
+          for dir in gdpr-shredding-core gdpr-shredding-spring-boot-starter; do
+            for jar in "$dir"/target/*-sources.jar "$dir"/target/*-javadoc.jar; do
+              [ -f "$jar" ] || continue
+              dest="$extract_dir/$(basename "$jar" .jar)"
+              mkdir -p "$dest"
+              unzip -q -o "$jar" -d "$dest"
+              if grep -rlnE "$pattern" "$dest" > hits.txt; then
+                echo "::error::${jar} contains a reference to a moved-private document or a machine-local path:"
+                cat hits.txt
+                found=1
+              fi
+              rm -f hits.txt
+            done
+          done
+          if [ "$found" -ne 0 ]; then
+            exit 1
+          fi
+          echo "no dangling reference found inside any published sources/javadoc jar"

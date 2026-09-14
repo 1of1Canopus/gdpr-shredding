@@ -339,6 +339,28 @@
                 <goals><goal>jar-no-fork</goal></goals>
               </execution>
             </executions>
+            <configuration>
+              <!--
+                G-2 (fifteenth pass), root cause the guard's own probe found: license-maven-plugin's
+                `add-third-party` execution below writes THIRD-PARTY-NOTICES.txt straight into
+                `${project.build.directory}` (this module's own target/, not a dedicated
+                subdirectory) so the file lands where the "Upload third-party notices" CI step
+                expects it, and registers that directory as a project resource so the notices file
+                also ships inside the built jar for a human reading it to find. That registration
+                has no include filter, so this plugin's default resource-bundling (excludeResources
+                defaults to false) also swept in whatever else happened to already be sitting in
+                target/ at package time - in particular maven-javadoc-plugin's own
+                `*-stale-data.txt` incremental-build tracking file, which spells out this machine's
+                absolute build path. Excluding both by name keeps the sources jar to what it is
+                meant to hold (this module's own sources, LICENSE, NOTICE) without touching the
+                license-maven-plugin wiring or the CI artifact path, both deliberate from an
+                earlier pass.
+              -->
+              <excludes>
+                <exclude>THIRD-PARTY-NOTICES.txt</exclude>
+                <exclude>*-stale-data.txt</exclude>
+              </excludes>
+            </configuration>
           </plugin>
           <plugin>
             <groupId>org.apache.maven.plugins</groupId>
