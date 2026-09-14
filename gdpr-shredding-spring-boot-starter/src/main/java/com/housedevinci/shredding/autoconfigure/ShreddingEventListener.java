@@ -552,12 +552,12 @@ public final class ShreddingEventListener
    * verification runs before any install, the evicted instance is holding placeholders, not
    * plaintext, so even a caller that kept a reference to it has nothing.
    *
-   * <p><strong>Deviation from the security review's C-27 fix text (QUESTIONS.md): the transaction
-   * is not also marked rollback-only.</strong> the security review's own probes for this finding
-   * catch the refusal inside the transactional callback and return a plain value; marking
-   * rollback-only makes every one of them fail on {@code UnexpectedRollbackException} from the
-   * commit, outside their own try/catch. One cannot both swallow the exception and avoid the
-   * commit-time one that marking rollback-only exists to cause.
+   * <p><strong>Deviation from the security review's C-27 fix text: the transaction is not also
+   * marked rollback-only.</strong> the security review's own probes for this finding catch the
+   * refusal inside the transactional callback and return a plain value; marking rollback-only makes
+   * every one of them fail on {@code UnexpectedRollbackException} from the commit, outside their
+   * own try/catch. One cannot both swallow the exception and avoid the commit-time one that marking
+   * rollback-only exists to cause.
    */
   private ShreddingException refuseLoad(PostLoadEvent event, ShreddingException cause) {
     var session = (org.hibernate.event.spi.EventSource) event.getSession();
@@ -841,10 +841,12 @@ public final class ShreddingEventListener
 
   /**
    * A fresh {@code SELECT} of one row's own shredded columns, by id, decoded only for the header -
-   * no key material is touched. Shared by {@link #refuseIfSubjectMoved} (the write path, QUESTIONS
-   * #4 decision (c)) and {@link #onPostLoad} (the read path, C-26): both need to know what a row's
-   * shredded columns currently, actually hold, independent of whatever a converter running on a
-   * different row of the same query happened to record.
+   * no key material is touched. Shared by {@link #refuseIfSubjectMoved} (the write path: re-reading
+   * the stored blob to resolve the row's current subject, chosen over a shadow subject column
+   * because it needs no schema change and stays correct for a detached merge) and {@link
+   * #onPostLoad} (the read path, C-26): both need to know what a row's shredded columns currently,
+   * actually hold, independent of whatever a converter running on a different row of the same query
+   * happened to record.
    *
    * @return one entry per {@code fields}, in the same order, {@code null} for a column with no
    *     stored value; or {@code null} for the whole array if the row no longer exists

@@ -1377,12 +1377,12 @@ public final class ShreddedModel {
    * {@code lombok.ToString} and {@code lombok.EqualsAndHashCode} via {@code
    * Class.getAnnotations()}. All four are {@code @Retention(SOURCE)} - Lombok deletes them from the
    * class file it writes - so that loop could never match; it read as a control and was not one,
-   * and both {@code SECURITY-NOTES.md} and {@code QUESTIONS.md} #9 wrongly reported it as applied.
-   * There is no annotation-based way to see a {@code SOURCE}-retention type at runtime: Lombok's
-   * one {@code CLASS}-retained marker, {@code lombok.Generated}, is put on the generated
-   * <em>methods</em> it emits, not on the type, so detecting it here would mean walking every
-   * declared method looking for an annotation this class never asks Lombok's classpath for - a
-   * different and heavier check than the rest of this method makes, and still only a heuristic (a
+   * and both {@code SECURITY-NOTES.md} and the module's own internal decision log wrongly reported
+   * it as applied. There is no annotation-based way to see a {@code SOURCE}-retention type at
+   * runtime: Lombok's one {@code CLASS}-retained marker, {@code lombok.Generated}, is put on the
+   * generated <em>methods</em> it emits, not on the type, so detecting it here would mean walking
+   * every declared method looking for an annotation this class never asks Lombok's classpath for -
+   * a different and heavier check than the rest of this method makes, and still only a heuristic (a
    * hand-written method can carry the same annotation). The honest fix is to drop the claim instead
    * of leaving code that cannot do what it says: the record check stays, ships with no test at all,
    * and the sample's {@code ShreddedFieldsDoNotLeakTest} ArchUnit rule is the reference users copy

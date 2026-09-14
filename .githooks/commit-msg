@@ -1,5 +1,8 @@
 #!/bin/sh
-# commit-msg hook: enforces the portfolio commit convention (see SHARED-CONVENTIONS.md).
+# commit-msg hook: enforces the portfolio commit convention - Conventional Commits 1.0,
+# "<type>(<scope>): <subject>" with type one of
+# feat/fix/refactor/perf/test/docs/build/ci/chore/revert/merge, a lowercase imperative subject with
+# no trailing period. Security work is fix (code) or docs (review), never security:.
 msg_file="$1"
 subject=$(sed -n '1p' "$msg_file")
 case "$subject" in

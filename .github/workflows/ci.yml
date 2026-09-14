@@ -33,3 +33,24 @@ jobs:
         with:
           name: third-party-notices
           path: "**/target/THIRD-PARTY-NOTICES.txt"
+      # F1 (fourteenth pass): a public file must never point a reader at a document that was moved
+      # out of this repository (QUESTIONS.md, STATUS.md, SPEC.md, the portfolio's LICENSING.md /
+      # SHARED-CONVENTIONS.md / AGENTS.md, docs/plans, the internal SECURITY-REVIEW / RELEASING
+      # write-ups) or at this machine's own filesystem. `internal/` is excluded because that is
+      # where the private working docs this repo's own tooling reads (e.g. the security review
+      # feeding cipher-probe-release-pipeline.sh, where it exists) legitimately live outside the
+      # public tree; nothing under it ships in a released artifact.
+      - name: Refuse a reference to a moved-private document or a machine-local path
+        run: |
+          set -euo pipefail
+          pattern='QUESTIONS\.md|STATUS\.md|SPEC\.md|LICENSING\.md|SHARED-CONVENTIONS\.md|AGENTS\.md|docs/plans|SECURITY-REVIEW|RELEASING|/Users/'
+          # This workflow file's own definition of the pattern is exempt - it has to spell out
+          # the names it forbids elsewhere.
+          if git grep -InE "$pattern" -- ':!internal/**' ':!.github/workflows/ci.yml' > hits.txt; then
+            echo "::error::found a reference to a moved-private document or a machine-local path:"
+            cat hits.txt
+            rm -f hits.txt
+            exit 1
+          fi
+          rm -f hits.txt
+          echo "no dangling reference to a moved-private document or a machine path found"

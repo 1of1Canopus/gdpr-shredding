@@ -31,9 +31,10 @@ import org.springframework.util.ClassUtils;
  * the documented Spring Data extension point for exactly this, but registering it as a plain
  * {@code @Bean} does not reliably reach every {@code @EnableJpaRepositories}-declared repository
  * factory in this Spring Boot generation - verified by a failing probe here before this class was
- * written this way, not assumed (see {@code QUESTIONS.md} #16). A {@code BeanPostProcessor}
- * wrapping every {@link Repository} bean in a decorating {@link Proxy} is the same idea one layer
- * further out, using a Spring SPI every bean in the context goes through unconditionally.
+ * written this way, not assumed: a plain {@code @Bean RepositoryFactoryCustomizer} was tried first
+ * and left at least one repository unwrapped in that probe. A {@code BeanPostProcessor} wrapping
+ * every {@link Repository} bean in a decorating {@link Proxy} is the same idea one layer further
+ * out, using a Spring SPI every bean in the context goes through unconditionally.
  *
  * <p>A read that reaches a shredded converter through neither a repository call nor an explicit
  * {@code ShreddingContext.withRead(...)}, most notably a bare JPQL projection run straight off an

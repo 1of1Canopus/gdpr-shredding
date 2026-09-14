@@ -350,8 +350,12 @@ left holding placeholders, and a first-level-cache retry that dodges the evictio
 rather than the value. The eviction (C-27) stays as the second line: `refuseLoad` evicts the
 instance before the exception leaves the method, so a second read of the same id in the same
 transaction is a real load through this same check. The security review's C-27 fix text also asked for the
-transaction to be marked rollback-only; that half was tried and reverted, with the evidence in
-`QUESTIONS.md` #19.
+transaction to be marked rollback-only; that half was tried and reverted: the security review's own
+C-27 probes catch the refusal inside the transactional callback and assert on a plain return value,
+and marking the transaction rollback-only would make every one of them fail on
+`UnexpectedRollbackException` at commit instead, outside the try/catch that catches the refusal -
+one cannot both swallow the exception and cause the commit-time one that rollback-only exists to
+raise.
 
 **Mappings that loaded-state mutation cannot survive are refused at startup**, read off the runtime
 persister rather than the annotations — `@SelectBeforeUpdate` does not exist as an annotation in

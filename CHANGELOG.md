@@ -7,8 +7,8 @@ All notable changes to this project. The format follows
 ## [Unreleased]
 
 ### Changed
-- Internal working documents (`SPEC.md`, `STATUS.md`, `QUESTIONS.md`, the security review
-  write-up, design plans) moved out of this repository to a private location; they named an
+- Internal working documents (the spec, the status log, the open-questions log, the security
+  review write-up, design plans) moved out of this repository to a private location; they named an
   internal review process that has no reason to be public. `SECURITY-NOTES.md` and this
   changelog stay, with that narration scrubbed and every finding id and technical detail kept.
   Added `SECURITY.md` (vulnerability reporting, 90-day disclosure) and expanded
@@ -185,7 +185,7 @@ context bootstraps first, since dialect resolution needs a live connection.
   slow it is to accept connections.
 - **Added** an explicit `.withStartupTimeout(java.time.Duration.ofMinutes(2))` on every
   `@Container static final PostgreSQLContainer`, rather than relying on Testcontainers' default.
-- **Deferred** (not a design stop, recorded in `QUESTIONS.md`): collapsing the per-test containers
+- **Deferred** (not a design stop): collapsing the per-test containers
   onto one reused singleton, which does not fit the two-hour follow-up window without restructuring
   every probe's own `SpringApplicationBuilder`/`@DynamicPropertySource` bootstrap for schema
   isolation.
@@ -597,8 +597,10 @@ nothing wrote through one.
 
 the security review's `## Sixth pass (75af7ea)` review found one HIGH design stop (S-1, closed above by the build) and
 five corrections, S-2 to S-6, closed here. Four are fully closed; S-4 is closed for the data-loss half
-(a stale decode is never served) with one narrower residual left open, recorded under QUESTIONS.md
-S-4.
+(a stale decode is never served) with one narrower residual left open: an ownerless region left
+behind by an undisciplined direct `openRegion()` call is, on the stack, indistinguishable from one
+legitimately open for the call in progress, so the missing-refusal half costs a refusal that should
+have fired rather than a leak.
 
 - **S-2 (MEDIUM).** A second `@Shredded` field's declared tenant was silently ignored: `scopeFor` and
   `onPostLoad` took the tenant from the entity's *first* shredded field and applied it to every field,
@@ -836,7 +838,10 @@ The security review's fourth pass (`0ba0f6f`), 2026-09-09. Two HIGH, one MEDIUM,
 - **Licensing:** the free core switches from Apache-2.0 to the Functional Source License, Version
   1.1, ALv2 Future License (FSL-1.1-ALv2) - free to use, not as a base for a competing product,
   converts to Apache-2.0 two years after each version's release. Decision by the maintainer,
-  2026-09-08; see `LICENSING.md` (portfolio-level) for the reasoning. `LICENSE` and `NOTICE`
+  2026-09-08: the fair-source core plus paid Pro model (the Sentry / GitButler pattern) is what lets
+  the core stay genuinely free to use and redistribute while the module still funds its own upkeep -
+  FSL is not OSI open source, so every public text says "fair source" or "source available", never
+  "open source". `LICENSE` and `NOTICE`
   added at the repo root, `pom.xml` `<licenses>` updated, and `LICENSE`/`NOTICE` are now embedded
   in `gdpr-shredding-core` and `gdpr-shredding-spring-boot-starter`'s jars under `META-INF/`
   (same fix as agent-guard's M7). The reactor's own modules are excluded from the third-party
@@ -883,8 +888,7 @@ The security review's third pass (`8095d2c`), 2026-09-09. Four HIGH, three MEDIU
   an in-place mutation is compared against - with no copy, the mutation is invisible to Hibernate and
   silently never persisted. The message, `ShreddedModel`'s javadoc, `README.md`, `docs/index.md` and
   `SECURITY-NOTES.md` now say so; this is a documentation fix, not a behaviour change (making the
-  mutation persist would mean deep-copying the array again, reopening CIPHER-16). See QUESTIONS.md
-  C-21.
+  mutation persist would mean deep-copying the array again, reopening CIPHER-16).
 - **C-23 (MEDIUM)** - `SHRED-READ-UNSCOPED`'s message named only "a scalar, `Tuple` or
   constructor-expression projection", which is not what a `Stream<T>`-returning repository method or
   a hand-written DAO's `EntityManager` use actually are; both are refused correctly, just misnamed.
