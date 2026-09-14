@@ -6,7 +6,46 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added
+- A Maven Central release pipeline: `.github/workflows/release.yml` publishes
+  `gdpr-shredding-core`, `gdpr-shredding-spring-boot-starter` and the parent POM from a signed
+  tag `v*` whose commit is an ancestor of `main`, from a clean checkout with an empty local
+  repository, stopping at "validated" so a human presses Publish on the Central Portal. The
+  sample is never published. A `preflight` job, with no environment and no access to any
+  secret, refuses the release unless the `release` environment really requires a reviewer and
+  `main` really requires the four CI checks, and refuses on any answer it cannot read; the job
+  that holds the signing key depends on it. A replay of a version already on Maven Central, or
+  already sitting on the Portal, is refused before anything is signed, and the deployment name
+  carries the released commit sha so two deployments of one version are distinguishable. After
+  the upload, the jars inside the uploaded bundle are compared entry by entry, in both
+  directions, against the checksums a two-build reproducibility check recorded.
+- `tools/check-third-party-licences.sh`: an all-of licence *denial* pass over every generated
+  `THIRD-PARTY-NOTICES.txt`, run per module from the build. The existing `includedLicenses`
+  allowlist is an any-of permission check on licence names; on its own it passes a dependency
+  whose two declared licences are cumulative rather than alternative, and misses prose
+  spellings that contain no SPDX id. Exceptions are coordinates a human accepted, never licence
+  patterns, and `--check-unused` fails the build on a carve-out this tree no longer needs.
+- `tools/check-private-references.sh`: the guard that refuses a reference to a moved-private
+  document or a machine-local path, now in one place with a `--self-test` that plants one
+  mutation per class and asserts the guard goes red on each. It runs as its own CI check over
+  the tree and over every published jar.
+- `tools/cipher-probe-release-pipeline.sh`: the security-review probe suite, run by CI on every
+  push and pull request as its own check.
+- `scripts/verify-reproducible.sh` and `scripts/git-commit-timestamp.sh`: two clean builds of
+  the same commit produce byte-identical jars, and the release stamps every archive entry with
+  the released commit's date.
+
 ### Changed
+- The release dry run in CI now runs the tests instead of skipping them: its assertions about
+  jar contents are only meaningful against the jar a real release produces.
+- `license-maven-plugin`'s `excludedGroups` pattern is anchored. Unanchored, the plugin wraps
+  it into a substring test on the group id, so a group id merely containing `com.housedevinci`
+  was excluded from both licence gates.
+- `maven-gpg-plugin` no longer receives an explicit `gpgArguments` block: the plugin supplies
+  the loopback pinentry flag itself when a passphrase is set, and the comment on the block
+  credited the flag to the absent tty rather than to the plugin.
+- The DCO check's grandfather exemption is removed. It could no longer match any commit once
+  the pull request it covered merged.
 - Internal working documents (the spec, the status log, the open-questions log, the security
   review write-up, design plans) moved out of this repository to a private location; they named an
   internal review process that has no reason to be public. `SECURITY-NOTES.md` and this
