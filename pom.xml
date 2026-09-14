@@ -96,6 +96,7 @@
     <maven-gpg.version>3.2.8</maven-gpg.version>
     <build-helper-plugin.version>3.6.1</build-helper-plugin.version>
     <exec-plugin.version>3.6.3</exec-plugin.version>
+    <deployment.name>gdpr-shredding ${project.version}</deployment.name>
     <jacoco.minimum.line>0.80</jacoco.minimum.line>
     <!-- The sample's smoke gate (L2): proves the end-to-end test actually exercises the sample
          application, not a quality bar for a reference app the way 80% is for the library. -->
@@ -447,12 +448,16 @@
                 The key never touches the repository. CI imports it from the GPG_PRIVATE_KEY
                 secret into a throwaway keyring and puts GPG_PASSPHRASE in the
                 MAVEN_GPG_PASSPHRASE environment variable, which is the name this plugin
-                reads by default. loopback pinentry is required because there is no tty.
+                reads by default.
+
+                N11/I1: no gpgArguments block here. maven-gpg-plugin 3.2.8 already passes the
+                loopback pinentry mode flag itself whenever a passphrase is supplied. The
+                explicit block that used to sit here only duplicated the flag, and the comment
+                on it credited the flag to the absence of a tty in this job - the wrong actor:
+                there is indeed no interactive terminal here, but the plugin is what supplies
+                the flag for that reason, not this pom. Verified in this repository by signing
+                a full -Prelease build with a throwaway key after removing the block.
               -->
-              <gpgArguments>
-                <arg>--pinentry-mode</arg>
-                <arg>loopback</arg>
-              </gpgArguments>
             </configuration>
           </plugin>
           <plugin>
@@ -467,7 +472,13 @@
               <!-- the maintainer presses Publish on the portal. Never flip this to true. -->
               <autoPublish>false</autoPublish>
               <waitUntil>validated</waitUntil>
-              <deploymentName>gdpr-shredding ${project.version}</deploymentName>
+              <!--
+                The name the human at the Publish button reads. The release workflow overrides
+                the property with the released commit's sha appended, so two deployments of the
+                same version (a re-run, a second tag) are not indistinguishable on the Portal.
+                The default here keeps a hand-run `deploy -Prelease` working.
+              -->
+              <deploymentName>${deployment.name}</deploymentName>
               <!-- The sample is a demo application, not a library. It is never published. -->
               <excludeArtifacts>
                 <excludeArtifact>gdpr-shredding-sample</excludeArtifact>
