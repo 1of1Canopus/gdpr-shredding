@@ -142,11 +142,18 @@ jobs:
 
   # F3 (fourteenth pass): the release profile (`pom.xml`'s `release` profile) was never exercised
   # by CI - it runs only `clean verify` and `-Psecurity-scan` - so its javadoc break shipped
-  # unnoticed for six passes. Runs the documented dry run on every push and pull request, no GPG
-  # key needed (`-Dgpg.skip=true`), so a break in the sources jar, the javadoc jar, or the plugin
-  # wiring itself fails CI instead of only a real release attempt.
+  # unnoticed for six passes. Runs the documented dry run on every push and pull request.
+  #
+  # G-1 (fifteenth pass): the step used to run `package` with `-Dgpg.skip=true`, so
+  # `maven-gpg-plugin` (bound to `verify`) never ran and no `.asc` was ever produced, even
+  # though the step's own name claimed a detached signature was built. There is no Maven
+  # Central secret to sign with here (that only exists on a real release, via `GPG_PRIVATE_KEY`
+  # / `GPG_PASSPHRASE`), so this job generates its own throwaway key, signs with it, and throws
+  # it away with the runner - it proves the signing wiring itself works (phase binding,
+  # pinentry mode, `MAVEN_GPG_PASSPHRASE`, one signature per published jar), not that the real
+  # key is not compromised.
   release-dryrun:
-    name: Release dry run
+    name: Release dry run (build, sign with a throwaway key, verify one signature per jar)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -156,5 +163,31 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: maven
-      - name: Build sources jar, javadoc jar and a detached signature, no key required
-        run: ./mvnw -B -DskipTests -Prelease -Dgpg.skip=true package
+      - name: Generate an ephemeral GPG key for this run only
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="${RUNNER_TEMP}/gnupg-dryrun"
+          mkdir -m 700 "$GNUPGHOME"
+          echo "GNUPGHOME=${GNUPGHOME}" >> "$GITHUB_ENV"
+          gpg --batch --passphrase '' --quick-generate-key ci-dryrun@example.invalid default default 0
+      - name: Build sources jar, javadoc jar and sign every artifact
+        env:
+          MAVEN_GPG_PASSPHRASE: ""
+        run: ./mvnw -B -DskipTests -Prelease verify
+      - name: Verify one detached signature per published jar (core, starter; the sample is never published)
+        run: |
+          set -euo pipefail
+          missing=0
+          for dir in gdpr-shredding-core gdpr-shredding-spring-boot-starter; do
+            for jar in "$dir"/target/*.jar; do
+              if [ ! -f "${jar}.asc" ]; then
+                echo "::error::no detached signature for ${jar}"
+                missing=$((missing + 1))
+              fi
+            done
+          done
+          if [ "$missing" -gt 0 ]; then
+            echo "::error::${missing} published jar(s) have no .asc signature"
+            exit 1
+          fi
+          echo "every published jar (core, starter) has a detached signature"
