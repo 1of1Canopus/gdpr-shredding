@@ -27,10 +27,16 @@
 #   gdpr-shredding-spring-boot-starter-<v>-sources.jar
 #   gdpr-shredding-core-<v>.pom
 #   gdpr-shredding-spring-boot-starter-<v>.pom
+#   gdpr-shredding-parent-<v>.pom
 #
 # Poms are checked for the same reason the jars are: Central consumes the pom bytes too,
 # and the window between this proved build and the upload applies to them identically
 # (RP-5). Signatures are correctly left out - they are not reproducible.
+#
+# The parent pom (RP-6) is recorded too: the bundle carries exactly three published
+# coordinates - parent, core, starter - and a record covering only two of them leaves the
+# third an unrecorded bundle entry on every release, which is what broke the comparison
+# step (see release.yml's own fix, same finding).
 #
 # Reported but NOT enforced: the javadoc jars. javadoc embeds the JDK build string and,
 # in some JDK versions, generation-time detail that -notimestamp does not remove. Maven
@@ -88,6 +94,19 @@ collect() { # collect <dir>
       cp "$module/pom.xml" "$dest/${name%.jar}.pom"
     fi
   done
+  # The reactor root, gdpr-shredding-parent (packaging pom, no jar of its own to borrow a
+  # name from): the bundle listing assertion elsewhere in the pipeline already refuses a
+  # release whose bundle lacks com/housedevinci/gdpr-shredding-parent/, so this record must
+  # exist for every release the comparison step ever sees (RP-6). Version read from the
+  # root pom.xml itself, the same <artifactId>/<version> pair pattern every module's own
+  # <parent> block already carries.
+  local parent_version
+  parent_version="$(awk '
+    /<artifactId>gdpr-shredding-parent<\/artifactId>/ { getline; print; exit }
+  ' pom.xml | sed -E 's/.*<version>(.*)<\/version>.*/\1/')"
+  if [ -n "$parent_version" ] && [ -e pom.xml ]; then
+    cp pom.xml "$dest/gdpr-shredding-parent-${parent_version}.pom"
+  fi
 }
 
 echo "  build 1 (fast baseline, tests skipped) ..."

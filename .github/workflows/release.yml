@@ -512,7 +512,16 @@ jobs:
           while IFS= read -r jar; do
             name="$(basename "$jar")"
             echo "$name" >> "$seen"
-            expected="$(grep -F " $name" "$sha_file" | awk '{print $1}' | head -1)"
+            # RP-6: an entry with no recorded checksum (the un-recorded parent pom, before
+            # the collect() fix) must report NO RECORD and let the loop continue to the
+            # next entry, never kill the step here. `grep -F ... | awk ...` under
+            # set -euo pipefail did exactly that: grep's exit 1 (no match) was promoted by
+            # pipefail to the assignment's status, and set -e killed the step at this line,
+            # silently, before the NO RECORD branch below could ever run - which is also
+            # why every entry sorted after the missing one (alphabetically, the starter's
+            # jars and pom) was never compared either. awk alone, exiting 0 whether or not
+            # it finds a match, cannot kill the step.
+            expected="$(awk -v n=" $name" 'index($0, n) { print $1; exit }' "$sha_file")"
             actual="$(shasum -a 256 "$jar" | cut -d' ' -f1)"
             entry="${jar#$work/}"
             if [ -z "$expected" ]; then

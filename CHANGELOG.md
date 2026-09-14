@@ -54,6 +54,23 @@ All notable changes to this project. The format follows
   `CONTRIBUTING.md` with the DCO sign-off and inbound-licensing terms, matching the rest of
   the product line.
 
+### Fixed (Cipher's confirmation at `0711fde`, RP-6 MEDIUM: the RP-5 fix disabled the control it extended)
+
+**MEDIUM (RP-6).** The bundle carries three published coordinates (parent, core, starter), but
+`verify-reproducible.sh`'s `collect()` recorded poms for core and starter only - the parent pom
+was an unrecorded bundle entry on every release. In `release.yml`'s comparison step, the lookup
+`grep -F " $name" "$sha_file" | awk '{print $1}' | head -1` exited 1 on that entry (no match),
+`pipefail` promoted the exit code to the assignment's status, and `set -e` killed the step there
+- silently, with no `::error::` line - before the `NO RECORD` branch could ever run. Since
+`find | sort` puts `gdpr-shredding-parent/` before `gdpr-shredding-spring-boot-starter/`, every
+release ended red at its last step with the starter's jars and pom never compared and no
+diagnostic explaining why. Fixed in two parts, both needed: `collect()` now also records the
+reactor root `pom.xml` as `gdpr-shredding-parent-<version>.pom` (read at its own path, the same
+reasoning as RP-5: `mvn package` writes no pom into `target/`); and the lookup is now
+`awk -v n=" $name" 'index($0, n) { print $1; exit }' "$sha_file"`, which cannot kill the step -
+an unrecorded entry now reaches and reports `NO RECORD`, and the loop continues to every entry
+after it.
+
 ### Fixed (Cipher's PR #2 review at `9c01585`: RP-1/RP-2/RP-3 LOW, RP-4/RP-5 INFO, R-3 ruling)
 
 **LOW (RP-1).** `tools/check-private-references.sh`'s `scan_tree` and `scan_dir` folded any

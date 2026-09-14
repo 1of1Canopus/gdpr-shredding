@@ -1112,6 +1112,76 @@ probe_bundle_comparison_never_reads_poms() {
   return 1
 }
 
+# Runs the real bundle-comparison step body for real, against a synthetic bundle and
+# checksum file, so the probe tests the workflow's own current logic rather than a static
+# grep of it (RP-6: the static probe above reads FIXED whether or not the lookup mechanism
+# actually reaches the entries after the first unrecorded one). `${{ runner.temp }}` is a
+# GitHub Actions context expression that resolves, at runtime, to the same path the
+# `RUNNER_TEMP` environment variable already names - substituting the text and exporting
+# that variable reproduces the real runner's environment closely enough to run this step
+# body directly.
+_bundle_comparison_run() { # _bundle_comparison_run <project dir with target/central-publishing/central-bundle.zip and reproducible-sha256.txt> <output file>
+  local body project_dir="$1" out="$2" rc
+  body="$(step_body "$WF" 'Confirm the uploaded bundle matches the reproducibility check')"
+  [ -n "$body" ] || { echo 0 > "$out.rc"; return; }
+  body="$(printf '%s' "$body" | sed 's/\${{ runner\.temp }}/$RUNNER_TEMP/g')"
+  mkdir -p "$project_dir/.runner-temp"
+  cp "$project_dir/reproducible-sha256.txt" "$project_dir/.runner-temp/reproducible-sha256.txt"
+  : > "$project_dir/.runner-temp/summary.md"
+  (
+    cd "$project_dir" &&
+    RUNNER_TEMP="$project_dir/.runner-temp" \
+    GITHUB_STEP_SUMMARY="$project_dir/.runner-temp/summary.md" \
+    bash -c "$body"
+  ) >"$out" 2>&1
+  echo $? > "$out.rc"
+  # The NO RECORD/matches/MISMATCH verdicts land in the step summary table, not on
+  # stdout/stderr - append it so a probe reading only "$out" sees them too.
+  cat "$project_dir/.runner-temp/summary.md" >> "$out" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# RP-6 - an entry with no recorded checksum (the parent pom, before the collect() half of
+# this fix) killed the step at the lookup (`grep -F ... | awk ...` under
+# `set -euo pipefail`: grep's exit 1 was promoted by pipefail, `set -e` killed the
+# assignment) with no `::error::` line at all, and `find | sort` puts
+# `gdpr-shredding-parent/` before `gdpr-shredding-spring-boot-starter/`, so the starter's
+# jars and pom were never reached. Reproduces the shape exactly: a bundle with an unrecorded
+# parent pom (sorts first) and a starter jar that DOES have a record, deliberately wrong, so
+# a MISMATCH row for it is only possible if the loop survived the unrecorded entry before
+# it. Weak if the run dies with no NO RECORD line, or reaches no verdict for the entry after
+# it; fixed if both are present.
+# ---------------------------------------------------------------------------
+probe_bundle_comparison_dies_on_an_unrecorded_entry() {
+  command -v zip >/dev/null 2>&1 || { echo "        (skipped: zip not installed)" >&2; return 0; }
+  local work layout out rc_file rc weak=1
+  work="$(mktemp -d)"
+  layout="$work/bundle-src"
+  mkdir -p "$layout/com/housedevinci/gdpr-shredding-parent/0.1.0" \
+           "$layout/com/housedevinci/gdpr-shredding-spring-boot-starter/0.1.0" \
+           "$work/target/central-publishing"
+  echo "parent pom bytes, no record" \
+    > "$layout/com/housedevinci/gdpr-shredding-parent/0.1.0/gdpr-shredding-parent-0.1.0.pom"
+  echo "starter jar bytes" \
+    > "$layout/com/housedevinci/gdpr-shredding-spring-boot-starter/0.1.0/gdpr-shredding-spring-boot-starter-0.1.0.jar"
+  ( cd "$layout" && zip -q -r "$work/target/central-publishing/central-bundle.zip" . )
+  # A record for the starter jar only - deliberately the wrong checksum - and none for the
+  # parent pom, the exact asymmetry collect() produced before this fix.
+  printf '%s  gdpr-shredding-spring-boot-starter-0.1.0.jar\n' \
+    'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef' \
+    > "$work/reproducible-sha256.txt"
+
+  out="$work/step-output.txt"
+  _bundle_comparison_run "$work" "$out"
+  rc="$(cat "$out.rc" 2>/dev/null || echo 0)"
+
+  if grep -q 'NO RECORD' "$out" 2>/dev/null && grep -q 'MISMATCH' "$out" 2>/dev/null; then
+    weak=0   # both the missing-record entry and the entry after it were reported: fixed
+  fi
+  rm -rf "$work"
+  [ "$weak" -eq 1 ]
+}
+
 # ---------------------------------------------------------------------------
 # The reference guard: one definition, its own job, the self-test run by CI, the jar loop
 # covering the main jar.
@@ -1283,6 +1353,7 @@ probe probe_bundle_comparison_reads_the_build_directory      "the comparison rea
 probe probe_bundle_comparison_misses_an_absent_jar           "a jar missing from the bundle is not noticed"       probe_bundle_comparison_misses_a_jar_absent_from_the_bundle
 probe probe_reproducibility_check_never_records_poms         "RP-5 verify-reproducible.sh never collects *.pom"   probe_reproducibility_check_never_records_poms
 probe probe_bundle_comparison_never_reads_poms                "RP-5 the bundle comparison never reads *.pom"       probe_bundle_comparison_never_reads_poms
+probe probe_bundle_comparison_dies_on_an_unrecorded_entry     "RP-6 an unrecorded entry silently kills the step"   probe_bundle_comparison_dies_on_an_unrecorded_entry
 probe probe_reference_guard_pattern_defined_twice            "the guard pattern has more than one definition"     probe_reference_guard_pattern_is_defined_more_than_once
 probe probe_reference_guard_is_not_its_own_job               "the guard is not a check of its own"                probe_reference_guard_is_not_its_own_job
 probe probe_jar_guard_skips_the_main_jar                     "the jar scan skips the published main jar"          probe_jar_guard_skips_the_main_jar
