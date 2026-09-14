@@ -379,14 +379,32 @@ jobs:
           done
           echo "replay check: the Portal reports nothing published for ${VERSION}"
 
-          # 3. A deployment already sitting on the Portal for this version.
-          list="$(curl -sS --max-time 30 -H "Authorization: Bearer ${auth}" \
-            'https://central.sonatype.com/api/v1/publisher/deployments?page=0&size=100')" \
-            || fail "the Portal deployment list did not answer"
-          printf '%s' "$list" | jq -e 'has("deployments") and (.deployments | type == "array")' >/dev/null 2>&1 \
-            || fail "the Portal deployment list is not in the shape this step knows how to read; refusing rather than skipping the replay check"
-          clash="$(printf '%s' "$list" | jq -r --arg v "$VERSION" '
-            .deployments[]
+          # 3. A deployment already sitting on the Portal for this version. Paged: a
+          # VALIDATED-but-not-yet-published deployment sitting behind a hundred newer ones
+          # must not be missed by only reading page 0 (RP-4) - that is the one case checks
+          # 1 and 2 above do not cover on their own, since neither Central nor the
+          # published-check sees a deployment before Publish is pressed. Page until a short
+          # page (fewer than the page size) is returned; refuse, never guess, if the shape
+          # is unfamiliar or paging does not terminate in a sane number of pages.
+          page=0
+          all_deployments="[]"
+          while :; do
+            list="$(curl -sS --max-time 30 -H "Authorization: Bearer ${auth}" \
+              "https://central.sonatype.com/api/v1/publisher/deployments?page=${page}&size=100")" \
+              || fail "the Portal deployment list did not answer (page ${page})"
+            printf '%s' "$list" | jq -e 'has("deployments") and (.deployments | type == "array")' >/dev/null 2>&1 \
+              || fail "the Portal deployment list is not in the shape this step knows how to read; refusing rather than skipping the replay check"
+            page_count="$(printf '%s' "$list" | jq -r '.deployments | length')"
+            all_deployments="$(jq -c -n \
+              --argjson a "$all_deployments" \
+              --argjson b "$(printf '%s' "$list" | jq -c '.deployments')" \
+              '$a + $b')"
+            [ "$page_count" -lt 100 ] && break
+            page=$((page + 1))
+            [ "$page" -le 1000 ] || fail "the Portal deployment list did not end after 1000 pages; refusing rather than guessing"
+          done
+          clash="$(printf '%s' "$all_deployments" | jq -r --arg v "$VERSION" '
+            .[]
             | select((.deploymentName // "") | contains($v))
             | select((.deploymentState // "") | IN("PENDING","VALIDATING","VALIDATED","PUBLISHING","PUBLISHED"))
             | "\(.deploymentName) [\(.deploymentState)]"' 2>/dev/null || true)"
@@ -394,7 +412,7 @@ jobs:
             echo "$clash"
             fail "a Portal deployment for ${VERSION} already exists in a live state: drop it first, or release a new version"
           fi
-          echo "replay check: no live Portal deployment names ${VERSION}"
+          echo "replay check: no live Portal deployment names ${VERSION} across $((page + 1)) page(s)"
 
       # One Maven invocation runs the whole release lifecycle in order:
       #   test -> spotless -> jacoco gate -> licence allowlist + THIRD-PARTY-NOTICES.txt
@@ -461,11 +479,13 @@ jobs:
       # is DROPPED on the Portal, never published. A red run leaves a bundle that no human
       # should ever release, and this step is what tells them so.
       #
-      # Every jar recorded by the reproducibility check must be present in the bundle, and
-      # every jar in the bundle must have been recorded: a missing artifact and an extra one
-      # are both failures. Javadoc jars are reported and not enforced (javadoc embeds JDK
-      # build detail that -notimestamp does not remove; Central requires the jar, nobody diffs
-      # one).
+      # Every jar AND pom recorded by the reproducibility check must be present in the
+      # bundle, and every jar or pom in the bundle must have been recorded: a missing
+      # artifact and an extra one are both failures. Poms are compared too, not only jars
+      # (RP-5): Central consumes the pom bytes, and the window this check exists to close
+      # applies to them identically. Javadoc jars are reported and not enforced (javadoc
+      # embeds JDK build detail that -notimestamp does not remove; Central requires the
+      # jar, nobody diffs one).
       - name: Confirm the uploaded bundle matches the reproducibility check
         if: success()
         run: |
@@ -514,7 +534,7 @@ jobs:
                   ;;
               esac
             fi
-          done < <(find "$work" -name '*.jar' -type f | sort)
+          done < <(find "$work" \( -name '*.jar' -o -name '*.pom' \) -type f | sort)
 
           # The other direction: a jar the reproducibility check proved must not be missing
           # from what was uploaded.

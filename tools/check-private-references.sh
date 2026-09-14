@@ -28,43 +28,57 @@
 #     superuser home and a Windows drive-letter user path, not just one of them.
 #   * The jar side loops over EVERY jar in a module's target/, the main jar included, not
 #     only the sources and javadoc jars: the main jar is published too.
+#   * Fail closed on an unverifiable scan: `git grep`, `grep` and `unzip` each have their own
+#     exit code that does not mean "no hits", and an error there must refuse, not pass.
 #
 set -uo pipefail
 # The scan is always rooted at this repository, EXCEPT when the self-test points it at a
 # scratch repository it just built. That override exists so the self-test can exercise this
 # script end to end (its real scan function, its real exit code) instead of re-implementing
-# the scan next to it and proving only that a regex is a regex.
+# the scan next to it and proving only that a regex is a regex. With the RP-1 fix below, a
+# `CHECK_PRIVATE_REFERENCES_ROOT` that is not itself a git work tree makes `--tree` refuse
+# rather than report clean, so this override can only ever redirect the scan to another real
+# git work tree - which is what makes it acceptable to leave in production code.
 cd "${CHECK_PRIVATE_REFERENCES_ROOT:-$(dirname "$0")/..}"
 
-# The one definition. Self-non-matching, no exemption anywhere.
+# The one definition. Self-non-matching, no exemption anywhere. There is no path exemption
+# (the former `internal/**` carve-out protected nothing: this repository has no `internal/`
+# directory and by design never will, and the exemption had no self-test case covering it -
+# see R-3 in the security review).
 pattern='QUESTIONS\.md|STATUS\.md|SPEC\.md|LICENSING\.md|SHARED-CONVENTIONS\.md|AGENTS\.md|docs[/]plans|SECURITY[-]REVIEW|RELEASIN[G]|[/]Users[/]|[/]home[/][a-z]|[/]root[/]|[A-Z]:\\Users'
 
-# ':!internal/**' is the one path this guard does not read, carried over unchanged from the
-# inline version: that directory is where a private working document legitimately lives when
-# a repository keeps one, and nothing under it ships in a released artifact. It is a path
-# this repository does not currently contain.
 scan_tree() {
-  local hits
-  hits="$(git grep -n --text -E "$pattern" -- ':!internal/**' || true)"
-  if [ -n "$hits" ]; then
-    echo "::error::found a reference to a moved-private document or a machine-local path:"
-    printf '%s\n' "$hits"
-    return 1
-  fi
-  echo "check-private-references: tree clean"
-  return 0
+  local hits rc
+  hits="$(git grep -n --text -E "$pattern")"
+  rc=$?
+  case "$rc" in
+    0)
+      echo "::error::found a reference to a moved-private document or a machine-local path:"
+      printf '%s\n' "$hits"
+      return 1
+      ;;
+    1)
+      echo "check-private-references: tree clean"
+      return 0
+      ;;
+    *)
+      echo "::error::check-private-references: git grep exited $rc, refusing to call the tree clean (not a git repository, bad pathspec, or some other error)" >&2
+      return 1
+      ;;
+  esac
 }
 
 # Recursive scan of an already-extracted directory (a jar's contents, or a scratch tree in
 # the self-test). Plain grep, not git grep: there is no index here.
 scan_dir() {
-  local dir="$1" hits
-  hits="$(grep -rnE "$pattern" "$dir" 2>/dev/null || true)"
-  if [ -n "$hits" ]; then
-    printf '%s\n' "$hits"
-    return 1
-  fi
-  return 0
+  local dir="$1" hits rc
+  hits="$(grep -rnE "$pattern" "$dir" 2>/dev/null)"
+  rc=$?
+  case "$rc" in
+    0) printf '%s\n' "$hits"; return 1 ;;
+    1) return 0 ;;
+    *) echo "::error::check-private-references: grep exited $rc scanning $dir, refusing to call it clean" >&2; return 1 ;;
+  esac
 }
 
 scan_jars() {
@@ -78,7 +92,11 @@ scan_jars() {
       found_any=1
       dest="$extract_dir/$(basename "$jar" .jar)"
       mkdir -p "$dest"
-      unzip -q -o "$jar" -d "$dest"
+      if ! unzip -q -o "$jar" -d "$dest" 2>/dev/null; then
+        echo "::error::check-private-references: cannot read $jar (unzip failed, refusing to call it clean)"
+        status=1
+        continue
+      fi
       if ! scan_dir "$dest" > "$extract_dir/hits.txt"; then
         echo "::error::$jar contains a reference to a moved-private document or a machine-local path:"
         cat "$extract_dir/hits.txt"
@@ -154,7 +172,7 @@ run_self_test() {
   # have) must MISS it - otherwise the case above would pass for some unrelated reason and
   # the property "a .gitattributes line cannot hide a reference" would be untested.
   if ( cd "$work/gitattributes-binary-hides-a-hit" \
-        && git grep -n -I -E "$pattern" -- ':!internal/**' >/dev/null 2>&1 ); then
+        && git grep -n -I -E "$pattern" >/dev/null 2>&1 ); then
     echo "self-test FAIL  negative control: git grep -I still matched, the case proves nothing"
     failures=$((failures + 1))
   else
@@ -179,6 +197,35 @@ run_self_test() {
     echo "self-test OK    the pattern is defined exactly once"
   else
     echo "self-test FAIL  the pattern is defined $defs times, expected 1"
+    failures=$((failures + 1))
+  fi
+
+  # RP-1: `git grep` failing outright (not a git repository) must refuse, not report clean.
+  # A directory that is not a git work tree, holding a planted reference, must still go red.
+  local nongit rc_nongit
+  nongit="$work/non-git-directory-holding-a-reference"
+  mkdir -p "$nongit"
+  printf 'see %s and %s\n' "$q" "$u" > "$nongit/leak.md"
+  rc_nongit=0
+  CHECK_PRIVATE_REFERENCES_ROOT="$nongit" bash "$guard" --tree >/dev/null 2>&1 || rc_nongit=$?
+  if [ "$rc_nongit" -eq 1 ]; then
+    echo "self-test OK    non-git directory refused (git grep error not read as tree clean)"
+  else
+    echo "self-test FAIL  non-git directory: expected refusal (exit 1), guard exited $rc_nongit"
+    failures=$((failures + 1))
+  fi
+
+  # RP-2: a jar `unzip` cannot read must refuse, not report every built jar clean.
+  local jar_module rc_jar
+  jar_module="$work/corrupt-jar-module"
+  mkdir -p "$jar_module/target"
+  printf 'not a zip file, but mentions %s\n' "$q" > "$jar_module/target/broken.jar"
+  rc_jar=0
+  bash "$guard" --jars "$jar_module" >/dev/null 2>&1 || rc_jar=$?
+  if [ "$rc_jar" -eq 1 ]; then
+    echo "self-test OK    corrupt jar refused (failed unzip not read as clean)"
+  else
+    echo "self-test FAIL  corrupt jar: expected refusal (exit 1), guard exited $rc_jar"
     failures=$((failures + 1))
   fi
 

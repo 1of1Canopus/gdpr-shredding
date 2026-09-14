@@ -243,12 +243,27 @@ jobs:
                 META-INF/MANIFEST.MF)      continue ;;
                 META-INF/LICENSE|META-INF/NOTICE) continue ;;
                 META-INF/maven/*)          continue ;;
+                # The starter's one .txt resource, named exactly and by full path. Not a bare
+                # "*.txt": that would re-admit THIRD-PARTY-NOTICES.txt, which is the generated
+                # build output this assertion exists to keep out of a sources jar.
+                com/housedevinci/shredding/autoconfigure/postgresql-*-reserved-keywords.txt) continue ;;
+              esac
+              # Path check first: the entry must live under META-INF/ or under the module's
+              # own source package root (com/), whatever its extension. This is what refuses
+              # target/classes/**, target/surefire-reports/** or any other build-output
+              # directory a re-registered resource root could sweep in - an extension
+              # allowlist alone does not catch those (RP-3).
+              case "$entry" in
+                META-INF/*|com/*) : ;;
+                *)
+                  echo "::error::$jar ships an entry outside META-INF/ and the module's source root (com/): $entry"
+                  status=1
+                  continue
+                  ;;
+              esac
+              case "$entry" in
                 *.java)                    continue ;;
                 *.properties|*.yml|*.yaml|*.json|*.sql|*.factories|*.imports) continue ;;
-                # The starter's one .txt resource, named exactly. Not a bare "*.txt": that
-                # would re-admit THIRD-PARTY-NOTICES.txt, which is the generated build output
-                # this assertion exists to keep out of a sources jar.
-                com/housedevinci/shredding/autoconfigure/postgresql-*-reserved-keywords.txt) continue ;;
                 *)
                   echo "::error::$jar ships an entry that is neither source, module resource nor licence text: $entry"
                   status=1

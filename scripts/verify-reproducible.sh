@@ -25,6 +25,12 @@
 #   gdpr-shredding-core-<v>-sources.jar
 #   gdpr-shredding-spring-boot-starter-<v>.jar
 #   gdpr-shredding-spring-boot-starter-<v>-sources.jar
+#   gdpr-shredding-core-<v>.pom
+#   gdpr-shredding-spring-boot-starter-<v>.pom
+#
+# Poms are checked for the same reason the jars are: Central consumes the pom bytes too,
+# and the window between this proved build and the upload applies to them identically
+# (RP-5). Signatures are correctly left out - they are not reproducible.
 #
 # Reported but NOT enforced: the javadoc jars. javadoc embeds the JDK build string and,
 # in some JDK versions, generation-time detail that -notimestamp does not remove. Maven
@@ -58,9 +64,29 @@ echo "  scratch:   $WORK"
 collect() { # collect <dir>
   local dest="$1"
   mkdir -p "$dest"
-  for jar in gdpr-shredding-core/target/*.jar gdpr-shredding-spring-boot-starter/target/*.jar; do
-    [ -e "$jar" ] || continue
-    cp "$jar" "$dest/"
+  local module jar name
+  for module in gdpr-shredding-core gdpr-shredding-spring-boot-starter; do
+    for jar in "$module"/target/*.jar; do
+      [ -e "$jar" ] || continue
+      cp "$jar" "$dest/"
+    done
+    # `mvn package` never writes a pom into target/ - the pom Central receives is a bundle
+    # entry central-publishing-maven-plugin assembles only at `deploy`, from this module's
+    # own pom.xml verbatim (RP-5). Name it to match the bundle's convention
+    # (artifactId-version.pom, same as the main jar's basename) by borrowing the main jar's
+    # name, never the sources/javadoc jar's.
+    name=""
+    for jar in "$module"/target/*.jar; do
+      [ -e "$jar" ] || continue
+      case "$jar" in
+        *-sources.jar|*-javadoc.jar) continue ;;
+      esac
+      name="$(basename "$jar")"
+      break
+    done
+    if [ -n "$name" ] && [ -e "$module/pom.xml" ]; then
+      cp "$module/pom.xml" "$dest/${name%.jar}.pom"
+    fi
   done
 }
 
@@ -77,7 +103,8 @@ mkdir -p "$(dirname "$SHA_FILE")"
 sha_file="$SHA_FILE"
 : > "$sha_file"
 printf '\n%-56s %-8s %s\n' "artifact" "verdict" "sha256 (build 1)"
-for f in "$WORK/one"/*.jar; do
+for f in "$WORK/one"/*.jar "$WORK/one"/*.pom; do
+  [ -e "$f" ] || continue
   name="$(basename "$f")"
   other="$WORK/two/$name"
   if [ ! -e "$other" ]; then

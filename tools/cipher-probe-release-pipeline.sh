@@ -1015,6 +1015,46 @@ probe_replay_check_runs_after_the_upload() {
   return 0
 }
 
+# Runs the real replay-check step body against a stubbed `curl`, so the probe tests the
+# workflow's own current logic rather than a frozen copy of it. Central and the Portal's
+# published-check both answer clean (part 1 and 2 of the step must pass so the probe
+# exercises part 3, the deployment list).
+_replay_verdict() { # _replay_verdict <curl stub body>; echoes the step's exit code
+  local body stub rc
+  body="$(step_body "$WF" 'Refuse a replay of a version that already exists')"
+  [ -n "$body" ] || { echo 0; return; }      # step vanished: cannot prove the fix
+  stub="$(mktemp -d)"
+  printf '#!/usr/bin/env bash\n%s\n' "$1" > "$stub/curl"
+  chmod +x "$stub/curl"
+  ( PATH="$stub:$PATH" CENTRAL_USERNAME=probe CENTRAL_TOKEN=probe VERSION=9.9.9-cipher-probe \
+      bash -c "$body" ) >/dev/null 2>&1
+  rc=$?
+  rm -rf "$stub"
+  echo "$rc"
+}
+
+# ---------------------------------------------------------------------------
+# RP-4 - the replay check only ever asked for page 0 of the Portal deployment list. A
+# VALIDATED-but-not-yet-published deployment for this version sitting behind a hundred
+# newer ones on page 1 was invisible to it. Page 0 here answers with 100 unrelated
+# deployments (a full page - the signal to keep paging); page 1 carries the clash. Weak if
+# the step stops after page 0 and reports no clash; fixed if it pages on and refuses.
+# ---------------------------------------------------------------------------
+probe_replay_check_reads_only_the_first_page() {
+  local stub_body rc
+  stub_body='
+case "$*" in
+  *repo1.maven.org*) printf "404" ;;
+  *api/v1/publisher/published*) echo "{\"published\":false}" ;;
+  *api/v1/publisher/deployments*page=0*) jq -cn "{deployments: [range(100) | {deploymentName: (\"other-\" + (. | tostring)), deploymentState: \"PUBLISHED\"}]}" ;;
+  *api/v1/publisher/deployments*page=1*) echo "{\"deployments\":[{\"deploymentName\":\"gdpr-shredding 9.9.9-cipher-probe (deadbeef)\",\"deploymentState\":\"VALIDATED\"}]}" ;;
+  *api/v1/publisher/deployments*) echo "{\"deployments\":[]}" ;;
+  *) exit 1 ;;
+esac'
+  rc="$(_replay_verdict "$stub_body")"
+  [ "$rc" -eq 0 ]   # weak: the run 1 page over exhausted the clash and still passed
+}
+
 # ---------------------------------------------------------------------------
 # Two deployments of the same version are indistinguishable on the Portal unless the name
 # says which commit each was built from.
@@ -1053,6 +1093,26 @@ probe_bundle_comparison_misses_a_jar_absent_from_the_bundle() {
 }
 
 # ---------------------------------------------------------------------------
+# RP-5 - poms in the bundle were never compared, only jars. Central consumes the pom
+# bytes, and the window this whole comparison exists to close (proved build vs. what was
+# uploaded) applies to them identically. Two places have to record and compare *.pom:
+# scripts/verify-reproducible.sh's collect()/comparison, and the bundle-comparison step's
+# find, which must walk *.pom alongside *.jar.
+# ---------------------------------------------------------------------------
+probe_reproducibility_check_never_records_poms() {
+  grep -q '\*\.pom' scripts/verify-reproducible.sh || return 0
+  return 1
+}
+
+probe_bundle_comparison_never_reads_poms() {
+  local body
+  body="$(step_body "$WF" 'Confirm the uploaded bundle matches the reproducibility check')"
+  [ -n "$body" ] || return 0
+  grep -qE "find \"\\\$work\" .*'\\*\\.pom'" <<<"$body" || return 0
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # The reference guard: one definition, its own job, the self-test run by CI, the jar loop
 # covering the main jar.
 # ---------------------------------------------------------------------------
@@ -1081,6 +1141,20 @@ probe_reference_guard_is_not_its_own_job() {
 
 probe_jar_guard_skips_the_main_jar() {
   grep -q 'for jar in "\$module"/target/\*\.jar' tools/check-private-references.sh || return 0
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# R-3 - the dead internal/** exemption protected nothing (this repository has no
+# internal/ directory and by design never will), was wrong for the model (a top-level
+# internal/ is world-readable in a public repository), and had no self-test case. Weak
+# while the pathspec is still there.
+# ---------------------------------------------------------------------------
+probe_guard_still_exempts_internal_directory() {
+  # Looks for the actual pathspec, not any mention of the word: a historical comment
+  # explaining why the carve-out was removed is the right residue and must not re-trip
+  # this probe (same rule as the DCO grandfather-exemption comment elsewhere).
+  grep -q -- ":!internal/\*\*" tools/check-private-references.sh && return 0
   return 1
 }
 
@@ -1118,6 +1192,35 @@ probe_sources_jar_contents_are_never_asserted() {
   job="$(awk 'f && /^  [a-z][a-z-]*:$/ {exit} /^  release-dryrun:$/ {f=1} f' "$CI")"
   grep -q 'unzip -Z1' <<<"$job" || return 0
   return 1
+}
+
+# ---------------------------------------------------------------------------
+# RP-3 - the sources-jar assertion allowlists extensions, not paths, so a build-output path
+# riding in on an allowlisted extension (target/classes/META-INF/spring-configuration-
+# metadata.json is exactly this shape, generated on every build) sweeps straight through.
+# Extracts the real step body from ci.yml and runs it, for real, against a synthetic
+# sources jar that is otherwise clean and carries exactly that one entry.
+# ---------------------------------------------------------------------------
+probe_sources_jar_assertion_is_extension_only_not_path_based() {
+  command -v zip >/dev/null 2>&1 || { echo "        (skipped: zip not installed)" >&2; return 0; }
+  local body work rc
+  body="$(step_body "$CI" 'Confirm each sources jar holds sources, resources and the licence texts only')"
+  [ -n "$body" ] || return 0
+  work="$(mktemp -d)"
+  mkdir -p "$work/gdpr-shredding-core/target" "$work/gdpr-shredding-spring-boot-starter/target" \
+           "$work/src/com/housedevinci/shredding" "$work/src/META-INF" "$work/src/classes/META-INF"
+  : > "$work/src/com/housedevinci/shredding/Foo.java"
+  : > "$work/src/META-INF/LICENSE"
+  : > "$work/src/META-INF/NOTICE"
+  : > "$work/src/classes/META-INF/spring-configuration-metadata.json"
+  ( cd "$work/src" && zip -q -r "$work/gdpr-shredding-core/target/gdpr-shredding-core-0.1.0-sources.jar" . ) >/dev/null 2>&1
+  cp "$work/gdpr-shredding-core/target/gdpr-shredding-core-0.1.0-sources.jar" \
+     "$work/gdpr-shredding-spring-boot-starter/target/gdpr-shredding-spring-boot-starter-0.1.0-sources.jar"
+  ( cd "$work" && bash -c "$body" ) >/dev/null 2>&1
+  rc=$?
+  rm -rf "$work"
+  # Weak: the step passed (exit 0) despite the build-output path. Fixed: it refused (non-zero).
+  [ "$rc" -eq 0 ]
 }
 
 
@@ -1174,16 +1277,21 @@ probe probe_preflight_accepts_main_without_the_checks        "main without the f
 probe probe_preflight_refuses_when_both_gates_are_real       "preflight refuses even a correctly gated repo"      probe_preflight_refuses_even_when_both_gates_are_real
 probe probe_release_does_not_refuse_a_replay                 "a re-run can upload a second bundle"                probe_release_does_not_refuse_a_replay
 probe probe_replay_check_runs_after_the_upload               "the replay check lands after the upload"            probe_replay_check_runs_after_the_upload
+probe probe_replay_check_first_page_only                     "RP-4 a clash on page 1 of deployments is missed"    probe_replay_check_reads_only_the_first_page
 probe probe_deployment_name_omits_the_released_commit        "two deployments of a version look identical"        probe_deployment_name_does_not_name_the_released_commit
 probe probe_bundle_comparison_reads_the_build_directory      "the comparison reads target/, not the bundle"       probe_bundle_comparison_reads_the_build_directory_not_the_bundle
 probe probe_bundle_comparison_misses_an_absent_jar           "a jar missing from the bundle is not noticed"       probe_bundle_comparison_misses_a_jar_absent_from_the_bundle
+probe probe_reproducibility_check_never_records_poms         "RP-5 verify-reproducible.sh never collects *.pom"   probe_reproducibility_check_never_records_poms
+probe probe_bundle_comparison_never_reads_poms                "RP-5 the bundle comparison never reads *.pom"       probe_bundle_comparison_never_reads_poms
 probe probe_reference_guard_pattern_defined_twice            "the guard pattern has more than one definition"     probe_reference_guard_pattern_is_defined_more_than_once
 probe probe_reference_guard_is_not_its_own_job               "the guard is not a check of its own"                probe_reference_guard_is_not_its_own_job
 probe probe_jar_guard_skips_the_main_jar                     "the jar scan skips the published main jar"          probe_jar_guard_skips_the_main_jar
+probe probe_guard_exempts_internal_directory                 "R-3 the dead internal/** exemption is still there"  probe_guard_still_exempts_internal_directory
 probe probe_denial_pass_is_not_wired_into_the_build          "the licence denial pass is not run by the build"    probe_denial_pass_is_not_wired_into_the_build
 probe probe_licence_carve_out_can_outlive_its_dependency     "a dead licence carve-out can sit in the file"       probe_licence_carve_out_can_outlive_its_dependency
 probe probe_release_dryrun_skips_the_tests                   "the dry run asserts on jars a release never makes"  probe_release_dryrun_skips_the_tests
 probe probe_sources_jar_contents_are_never_asserted          "nothing asserts what a sources jar contains"        probe_sources_jar_contents_are_never_asserted
+probe probe_sources_jar_allowlist_is_extension_only          "RP-3 the sources-jar check is extension-only"       probe_sources_jar_assertion_is_extension_only_not_path_based
 
 echo
 echo "still weak: $pass    fixed: $flipped"

@@ -54,6 +54,59 @@ All notable changes to this project. The format follows
   `CONTRIBUTING.md` with the DCO sign-off and inbound-licensing terms, matching the rest of
   the product line.
 
+### Fixed (Cipher's PR #2 review at `9c01585`: RP-1/RP-2/RP-3 LOW, RP-4/RP-5 INFO, R-3 ruling)
+
+**LOW (RP-1).** `tools/check-private-references.sh`'s `scan_tree` and `scan_dir` folded any
+`git grep`/`grep` exit code other than "hit" into "clean" (`|| true`), so a `git grep` failure
+(not a git repository, a bad pathspec, any other error) was reported as a clean tree. Both now
+capture the real exit code and refuse - naming the status - on anything other than 0 (hit) or 1
+(clean). `--self-test` gained a case pointing the guard at a non-git directory holding a planted
+reference and asserting it refuses rather than reports clean.
+
+**LOW (RP-2).** `scan_jars` ignored a failed `unzip`: a jar that could not be extracted produced
+an empty directory, which scanned clean, so a truncated or corrupt jar - exactly the artifact
+nobody should wave through - passed the guard. `unzip` failure now marks the guard's overall
+status failed and names the unreadable jar. `--self-test` gained a case with a non-zip `.jar`
+carrying a planted reference, asserting refusal.
+
+**LOW (RP-3).** The sources-jar content assertion in `ci.yml` allowlisted extensions, not
+paths, so a build-output path riding in on an allowlisted extension -
+`target/classes/META-INF/spring-configuration-metadata.json`, generated on every build - swept
+straight through, defeating the defence-in-depth this assertion exists to provide the day the
+pom's `addOutputDirectoryAsResourceDir=false` switch is lost. The check is now path-based first:
+every entry must sit under `META-INF/` or the module's own source package root (`com/`), which
+refuses `classes/**`, `surefire-reports/**` and any other build-output directory regardless of
+extension, while the starter's one real `.txt` resource is still admitted by its exact path.
+
+**INFO (RP-4).** The replay-refusal step's third check read only page 0 of the Portal
+deployment list (`?page=0&size=100`), so a `VALIDATED`-but-not-yet-published deployment for the
+released version sitting behind a hundred newer ones was invisible to it - the one case the two
+checks in front of it (Maven Central, the Portal's published-check) do not cover on their own.
+The step now pages until a short page is returned, accumulating every deployment before the
+clash check, and refuses (never guesses) if a page answers in an unfamiliar shape or paging does
+not terminate within 1000 pages.
+
+**INFO (RP-5).** The post-upload reproducibility comparison covered jars only; the poms in the
+uploaded bundle were never compared, though Central consumes the pom bytes too and the window
+the comparison exists to close (between the proved build and the upload) applies to them
+identically. `scripts/verify-reproducible.sh`'s `collect()` now also copies each module's `.pom`
+and the comparison enforces it exactly as a jar (not exempted like the javadoc jar); the bundle
+comparison step in `release.yml` now walks `*.pom` alongside `*.jar`.
+
+**Ruling (R-3).** The dead `internal/**` path exemption is removed from
+`tools/check-private-references.sh`. It protected nothing (this repository has no `internal/`
+directory and by design never will - private documents live outside the repository), was wrong
+for the model (a top-level `internal/` is world-readable in a public repository, so exempting it
+would exempt the one directory meant not to exist here), and had no `--self-test` case covering
+it. Only the historical comment explaining the removal remains.
+
+Each of the six is covered by a probe or a `--self-test` case, red against `9c01585` and green
+after: `tools/cipher-probe-release-pipeline.sh` gained
+`probe_replay_check_first_page_only` (RP-4), `probe_reproducibility_check_never_records_poms`
+and `probe_bundle_comparison_never_reads_poms` (RP-5), `probe_sources_jar_allowlist_is_extension_only`
+(RP-3) and `probe_guard_exempts_internal_directory` (R-3); `tools/check-private-references.sh
+--self-test` gained the RP-1 and RP-2 cases described above.
+
 ### Fixed (fourteenth pass at `c1b4157`, three LOW: three loose ends the pre-public docs cleanup left)
 
 **LOW (F-1).** Ten lines across six public files still pointed at documents the previous change
