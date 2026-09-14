@@ -122,12 +122,22 @@ jobs:
       # run, after packaging, against the contents of the built sources/javadoc jars in the
       # release-dryrun job below, since `git grep` only ever sees the working tree, not what
       # `maven-source-plugin`/`maven-javadoc-plugin` actually ship inside a jar.
+      #
+      # H-2/H-3 (sixteenth pass): the content-marker exemption (a `grep -v` on a fixed string) let
+      # any line claim it, not just the pattern-definition line, so a forbidden reference carrying
+      # that same marker string slipped through unchanged (same shape as the .gitattributes binary
+      # bypass, one layer up). Deleted the exemption entirely and instead wrote the pattern so it
+      # cannot match its own definition line below: one character bracketed in each alternative
+      # that used to be a literal substring of itself, turning the definition line into text the
+      # pattern does not match, with no exemption needed at all. H-2: the machine-path half only
+      # knew this reviewer's own laptop account path; a hosted Linux runner builds under a
+      # different absolute prefix the old pattern never caught. Widened to cover Linux home
+      # directories, the Linux superuser home, and Windows drive-letter user paths too.
       - name: Refuse a reference to a moved-private document or a machine-local path
         run: |
           set -euo pipefail
-          pattern='QUESTIONS\.md|STATUS\.md|SPEC\.md|LICENSING\.md|SHARED-CONVENTIONS\.md|AGENTS\.md|docs/plans|SECURITY-REVIEW|RELEASING|/Users/'  # pattern-definition-line, exempt from the guard it defines
+          pattern='QUESTIONS\.md|STATUS\.md|SPEC\.md|LICENSING\.md|SHARED-CONVENTIONS\.md|AGENTS\.md|docs[/]plans|SECURITY[-]REVIEW|RELEASIN[G]|[/]Users[/]|[/]home[/][a-z]|[/]root[/]|[A-Z]:\\Users'
           if git grep -n --text -E "$pattern" -- ':!internal/**' \
-              | grep -v 'pattern-definition-line, exempt from the guard it defines' \
               > hits.txt; then
             echo "::error::found a reference to a moved-private document or a machine-local path:"
             cat hits.txt
@@ -205,18 +215,24 @@ jobs:
       # G2 (fifteenth pass), second half: the build-and-test guard above greps the working tree,
       # not what actually ships - maven-source-plugin and maven-javadoc-plugin copy file contents
       # into the sources/javadoc jars verbatim, so a match this guard would have caught in the
-      # tree is what a reader of the published jar sees too. Unzips every sources/javadoc jar this
-      # job just built for the published modules (core, starter; the sample is never published)
-      # and re-runs the same pattern against the extracted contents.
+      # tree is what a reader of the published jar sees too. Unzips every jar this job just built
+      # for the published modules (core, starter; the sample is never published) and re-runs the
+      # same pattern against the extracted contents.
+      #
+      # H-2/H-3: same pattern as the build-and-test step above - no exemption, self-non-matching,
+      # machine-path alternatives widened as noted there. H-4 (sixteenth pass, INFO): this step
+      # used to grep only the sources and javadoc jars; the main jar is published too and was
+      # never checked. Loop widened to every jar in each module's target/ so every published jar
+      # (main included) is covered.
       - name: Refuse a moved-private document reference or a machine-local path inside a published jar
         run: |
           set -euo pipefail
-          pattern='QUESTIONS\.md|STATUS\.md|SPEC\.md|LICENSING\.md|SHARED-CONVENTIONS\.md|AGENTS\.md|docs/plans|SECURITY-REVIEW|RELEASING|/Users/'  # pattern-definition-line, exempt from the guard it defines
+          pattern='QUESTIONS\.md|STATUS\.md|SPEC\.md|LICENSING\.md|SHARED-CONVENTIONS\.md|AGENTS\.md|docs[/]plans|SECURITY[-]REVIEW|RELEASIN[G]|[/]Users[/]|[/]home[/][a-z]|[/]root[/]|[A-Z]:\\Users'
           extract_dir="${RUNNER_TEMP}/jar-contents"
           mkdir -p "$extract_dir"
           found=0
           for dir in gdpr-shredding-core gdpr-shredding-spring-boot-starter; do
-            for jar in "$dir"/target/*-sources.jar "$dir"/target/*-javadoc.jar; do
+            for jar in "$dir"/target/*.jar; do
               [ -f "$jar" ] || continue
               dest="$extract_dir/$(basename "$jar" .jar)"
               mkdir -p "$dest"
