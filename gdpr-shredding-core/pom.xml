@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.housedevinci</groupId>
+    <artifactId>gdpr-shredding-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>gdpr-shredding-core</artifactId>
+  <name>GDPR Shredding :: Core</name>
+  <description>Framework-free domain and application layer: envelope encryption, per-subject data keys, erasure with a hash-chained erasure log. Zero crypto dependencies (control 18): AES-256-GCM, HMAC-SHA-256 and HKDF come from the JDK.</description>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.assertj</groupId>
+      <artifactId>assertj-core</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.tngtech.archunit</groupId>
+      <artifactId>archunit-junit5</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-postgresql</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.zaxxer</groupId>
+      <artifactId>HikariCP</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-simple</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <!--
+    L2: the JaCoCo prepare-agent/report/check executions used to live only here, so the starter
+    and the sample produced no jacoco.csv and were subject to no minimum at all - leaving the
+    converters, ShreddingEventListener, SubjectExpression, ShreddedModel, ShreddingStartupCheck and
+    the actuator sanitiser (controls 5 and 11 to 14) unmeasured. They now live once, in the parent
+    POM's <build><plugins>, and every module inherits them; see gdpr-shredding-sample/pom.xml for
+    why the sample's gate is a smoke gate rather than the same 80% minimum.
+  -->
+
+  <build>
+    <!--
+      Same fix as agent-guard's M7:
+      the project's own LICENSE and NOTICE, copied into META-INF/ of the published jar.
+      FSL-1.1-ALv2's Redistribution clause requires a copy of (or a link to) the Terms and
+      Conditions to accompany redistributed copies; NOTICE travels with it by the same
+      convention Apache-2.0 SS4(d) used. This is a separate concern from the deferred
+      THIRD-PARTY-NOTICES.txt embedding.
+    -->
+    <resources>
+      <resource>
+        <directory>src/main/resources</directory>
+      </resource>
+      <resource>
+        <directory>${maven.multiModuleProjectDirectory}</directory>
+        <targetPath>META-INF</targetPath>
+        <includes>
+          <include>LICENSE</include>
+          <include>NOTICE</include>
+        </includes>
+      </resource>
+    </resources>
+  </build>
+</project>

@@ -1,0 +1,490 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>4.1.1</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>com.housedevinci</groupId>
+  <artifactId>gdpr-shredding-parent</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+  <packaging>pom</packaging>
+  <name>GDPR Shredding</name>
+  <description>GDPR erasure by per-subject key destruction for JPA: encrypt each data subject's personal fields with that subject's own key, erase by destroying the key</description>
+  <!-- inherit.append.path=false: children keep the repository URL, not <url>/<artifactId>. -->
+  <url child.project.url.inherit.append.path="false">https://github.com/1of1Canopus/gdpr-shredding</url>
+  <inceptionYear>2026</inceptionYear>
+
+  <organization>
+    <name>HouseDevinci</name>
+    <url>https://housedevinci.com</url>
+  </organization>
+
+  <licenses>
+    <license>
+      <name>Functional Source License, Version 1.1, ALv2 Future License</name>
+      <url>https://fsl.software/FSL-1.1-ALv2.template.md</url>
+      <distribution>repo</distribution>
+      <comments>Converts to Apache-2.0 two years after each version's release</comments>
+    </license>
+  </licenses>
+
+  <developers>
+    <developer>
+      <id>canopus</id>
+      <name>Souhaile (Canopus)</name>
+      <!-- Role address, not a personal mailbox. -->
+      <email>oss@housedevinci.com</email>
+      <organization>HouseDevinci</organization>
+      <organizationUrl>https://housedevinci.com</organizationUrl>
+      <roles>
+        <role>maintainer</role>
+      </roles>
+      <timezone>Europe/Paris</timezone>
+    </developer>
+  </developers>
+
+  <scm child.scm.connection.inherit.append.path="false"
+       child.scm.developerConnection.inherit.append.path="false"
+       child.scm.url.inherit.append.path="false">
+    <connection>scm:git:https://github.com/1of1Canopus/gdpr-shredding.git</connection>
+    <developerConnection>scm:git:ssh://git@github.com/1of1Canopus/gdpr-shredding.git</developerConnection>
+    <url>https://github.com/1of1Canopus/gdpr-shredding</url>
+    <tag>HEAD</tag>
+  </scm>
+
+  <issueManagement>
+    <system>GitHub Issues</system>
+    <url>https://github.com/1of1Canopus/gdpr-shredding/issues</url>
+  </issueManagement>
+
+  <modules>
+    <module>gdpr-shredding-core</module>
+    <module>gdpr-shredding-spring-boot-starter</module>
+    <module>gdpr-shredding-sample</module>
+  </modules>
+
+  <properties>
+    <java.version>21</java.version>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!--
+      Reproducible builds. Every archive entry is stamped with this instant instead of "now".
+      The default below is the commit date of the commit that introduced the release pipeline;
+      the release workflow overrides it with the date of the commit being released:
+          -Dproject.build.outputTimestamp=$(scripts/git-commit-timestamp.sh)
+      scripts/verify-reproducible.sh proves two builds of the same tree are byte-identical.
+      https://maven.apache.org/guides/mini/guide-reproducible-builds.html
+    -->
+    <project.build.outputTimestamp>2026-09-08T00:00:00Z</project.build.outputTimestamp>
+    <spring-boot.version>4.1.1</spring-boot.version>
+    <archunit.version>1.5.0</archunit.version>
+    <errorprone.version>2.50.0</errorprone.version>
+    <spotless.version>3.10.2</spotless.version>
+    <google-java-format.version>1.36.1</google-java-format.version>
+    <jacoco.version>0.8.15</jacoco.version>
+    <enforcer.version>3.6.3</enforcer.version>
+    <license-plugin.version>2.7.1</license-plugin.version>
+    <dependency-check.version>13.0.0</dependency-check.version>
+    <central-publishing.version>0.11.0</central-publishing.version>
+    <maven-gpg.version>3.2.8</maven-gpg.version>
+    <build-helper-plugin.version>3.6.1</build-helper-plugin.version>
+    <jacoco.minimum.line>0.80</jacoco.minimum.line>
+    <!-- The sample's smoke gate (L2): proves the end-to-end test actually exercises the sample
+         application, not a quality bar for a reference app the way 80% is for the library. -->
+    <jacoco.minimum.sample>0.30</jacoco.minimum.sample>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>com.housedevinci</groupId>
+        <artifactId>gdpr-shredding-core</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.housedevinci</groupId>
+        <artifactId>gdpr-shredding-spring-boot-starter</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.tngtech.archunit</groupId>
+        <artifactId>archunit-junit5</artifactId>
+        <version>${archunit.version}</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-compiler-plugin</artifactId>
+          <configuration>
+            <release>21</release>
+            <showWarnings>true</showWarnings>
+            <compilerArgs>
+              <arg>-XDcompilePolicy=simple</arg>
+              <arg>-XDaddTypeAnnotationsToSymbol=true</arg>
+              <arg>--should-stop=ifError=FLOW</arg>
+              <arg>-Xplugin:ErrorProne -Xep:MissingSummary:OFF -Xep:InvalidBlockTag:OFF</arg>
+              <arg>-parameters</arg>
+            </compilerArgs>
+            <annotationProcessorPaths>
+              <path>
+                <groupId>com.google.errorprone</groupId>
+                <artifactId>error_prone_core</artifactId>
+                <version>${errorprone.version}</version>
+              </path>
+              <path>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-configuration-processor</artifactId>
+                <version>${spring-boot.version}</version>
+              </path>
+            </annotationProcessorPaths>
+          </configuration>
+        </plugin>
+        <plugin>
+          <groupId>com.diffplug.spotless</groupId>
+          <artifactId>spotless-maven-plugin</artifactId>
+          <version>${spotless.version}</version>
+          <configuration>
+            <java>
+              <googleJavaFormat>
+                <version>${google-java-format.version}</version>
+              </googleJavaFormat>
+              <removeUnusedImports/>
+            </java>
+          </configuration>
+          <executions>
+            <execution>
+              <goals><goal>check</goal></goals>
+              <phase>verify</phase>
+            </execution>
+          </executions>
+        </plugin>
+        <plugin>
+          <groupId>org.jacoco</groupId>
+          <artifactId>jacoco-maven-plugin</artifactId>
+          <version>${jacoco.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>org.codehaus.mojo</groupId>
+          <artifactId>license-maven-plugin</artifactId>
+          <version>${license-plugin.version}</version>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-enforcer-plugin</artifactId>
+        <version>${enforcer.version}</version>
+        <executions>
+          <execution>
+            <id>enforce</id>
+            <goals><goal>enforce</goal></goals>
+            <configuration>
+              <rules>
+                <requireJavaVersion><version>[21,)</version></requireJavaVersion>
+                <requireMavenVersion><version>[3.8,)</version></requireMavenVersion>
+                <banDuplicatePomDependencyVersions/>
+                <dependencyConvergence/>
+              </rules>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>com.diffplug.spotless</groupId>
+        <artifactId>spotless-maven-plugin</artifactId>
+      </plugin>
+      <!--
+        L2: declared here, in <build><plugins> (not merely <pluginManagement>), so every module
+        inherits and actually runs it - core, the starter and the sample all now produce a
+        jacoco.csv and are all held to the 80% line minimum by default. gdpr-shredding-sample/pom.xml
+        overrides the "check" execution's minimum down to a smoke gate: a reference application
+        exercised end-to-end by one test class is not held to the same bar as the library that
+        implements the security controls, but it must not silently report no coverage at all either.
+      -->
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>prepare</id>
+            <goals><goal>prepare-agent</goal></goals>
+          </execution>
+          <execution>
+            <id>report</id>
+            <phase>verify</phase>
+            <goals><goal>report</goal></goals>
+          </execution>
+          <execution>
+            <id>check</id>
+            <phase>verify</phase>
+            <goals><goal>check</goal></goals>
+            <configuration>
+              <rules>
+                <rule>
+                  <element>BUNDLE</element>
+                  <limits>
+                    <limit>
+                      <counter>LINE</counter>
+                      <value>COVEREDRATIO</value>
+                      <minimum>${jacoco.minimum.line}</minimum>
+                    </limit>
+                  </limits>
+                </rule>
+              </rules>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>license-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>third-party-notices</id>
+            <goals><goal>add-third-party</goal></goals>
+            <phase>package</phase>
+            <configuration>
+              <thirdPartyFilename>THIRD-PARTY-NOTICES.txt</thirdPartyFilename>
+              <outputDirectory>${project.build.directory}</outputDirectory>
+              <!--
+                H-1 (sixteenth pass): addOutputDirectoryAsResourceDir defaults to true, which
+                registers outputDirectory (target/) as a project resource with an implicit
+                "**/*.txt" include - live at package phase, when the release profile's
+                maven-source-plugin jar-no-fork execution (bound to the same phase) reads
+                project.getResources(). Whatever *.txt files happen to sit under target/ at
+                that instant ship inside the sources jar: THIRD-PARTY-NOTICES.txt every time,
+                but also target/classes/**/*.txt (postgresql-16-reserved-keywords.txt, a build
+                output, not a source) and, whenever tests ran before package,
+                target/surefire-reports/*.txt (every CipherProbe* class name in the suite). A
+                denylist in the release profile's maven-source-plugin config can only ever name
+                yesterday's file and never covers this. Set to false: this goal already writes
+                THIRD-PARTY-NOTICES.txt to outputDirectory as a plain file for the "Upload
+                third-party notices" CI step to read; it does not also need to, and must not,
+                register target/ as an implicit project resource. Module B's precedent.
+              -->
+              <addOutputDirectoryAsResourceDir>false</addOutputDirectoryAsResourceDir>
+              <!-- Runtime scope only: compile + runtime. test/provided/system are not shipped. -->
+              <excludedScopes>test,provided,system</excludedScopes>
+              <!--
+                Our own reactor modules (gdpr-shredding-core etc.) are not third parties: since
+                the core switched to FSL-1.1-ALv2 they no longer match includedLicenses below and
+                would otherwise fail this build, or worse be silently written into
+                THIRD-PARTY-NOTICES.txt as if a third party dependency were FSL-licensed. Exclude
+                by groupId, not by licence name, so a real third-party dependency that happened to
+                declare the same licence string is still caught.
+              -->
+              <excludedGroups>com\.housedevinci</excludedGroups>
+              <!--
+                Allowlist, not blocklist: a dependency whose declared licence is not one of the
+                five canonical names below fails the build. That is the only form that catches a
+                copyleft licence we have not thought of yet. The pipe-separated variants are
+                folded onto the canonical name by licenseMerges below.
+
+                Allowed, and why:
+                  Apache-2.0    permissive, patent grant - this project itself is FSL-1.1-ALv2,
+                                not Apache-2.0 (see LICENSE and NOTICE); this is what a
+                                *dependency* may declare.
+                  MIT / MIT-0   permissive.
+                  BSD           2-clause and 3-clause; permissive.
+                  EPL-2.0       Jakarta APIs and Logback. Weak copyleft, file-level, and it does
+                                not reach our code because we only link against them.
+                  Public Domain org.json and HdrHistogram's CC0 half. No obligations at all.
+                Everything else, GPL/LGPL/AGPL/MPL/CDDL/SSPL included, fails.
+              -->
+              <force>true</force>
+              <includedLicenses>Apache-2.0|MIT|BSD|EPL-2.0|Public Domain</includedLicenses>
+              <licenseMerges>
+                <licenseMerge>Apache-2.0|Apache 2.0|Apache License 2.0|Apache License Version 2.0|Apache License, Version 2.0|The Apache License, Version 2.0|The Apache Software License, Version 2.0|Apache Software License - Version 2.0|Apache License V2.0</licenseMerge>
+                <licenseMerge>MIT|MIT License|MIT-0|The MIT License|The MIT License (MIT)</licenseMerge>
+                <!-- The Eclipse Distribution License is BSD-3-Clause verbatim, under another
+                     name (https://www.eclipse.org/org/documents/edl-v10.php). It arrives here
+                     through the Jakarta Persistence API, which this module needs. -->
+                <licenseMerge>BSD|BSD-2-Clause|BSD-3-Clause|The BSD License|BSD licence|BSD License 3|New BSD License|Revised BSD|EDL 1.0|Eclipse Distribution License - v 1.0|Eclipse Distribution License v. 1.0</licenseMerge>
+                <licenseMerge>EPL-2.0|EPL 2.0|Eclipse Public License - v 2.0|Eclipse Public License v2.0|Eclipse Public License v. 2.0|Eclipse Public License, Version 2.0</licenseMerge>
+                <licenseMerge>Public Domain|Public Domain, per Creative Commons CC0|CC0-1.0|CC0</licenseMerge>
+              </licenseMerges>
+              <failOnMissing>true</failOnMissing>
+              <failOnBlacklist>true</failOnBlacklist>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+
+  <profiles>
+    <profile>
+      <!--
+        Maven Central release. Off by default, so `./mvnw verify` is exactly what it always was.
+
+          ./mvnw -B clean verify -Prelease -Dgpg.skip=true     dry run, no key needed
+          ./mvnw -B clean deploy -Prelease                     upload to the Central Portal
+
+        What it adds: a sources jar, a javadoc jar, a detached GPG signature for every
+        artifact, and the Central Portal upload. autoPublish is false: the bundle is
+        uploaded and validated, then waits for a human to press Publish at
+        https://central.sonatype.com/publishing/deployments . Nothing this pipeline does
+        can put an artifact on Maven Central on its own.
+
+        Plugin: org.sonatype.central:central-publishing-maven-plugin, the plugin Sonatype
+        documents for the Central Portal (https://central.sonatype.org/publish/publish-portal-maven/ ,
+        read 2026-09-08). Version pinned to the latest release on Maven Central on that date.
+      -->
+      <id>release</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-source-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>attach-sources</id>
+                <goals><goal>jar-no-fork</goal></goals>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-javadoc-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>attach-javadocs</id>
+                <goals><goal>jar</goal></goals>
+              </execution>
+            </executions>
+            <configuration>
+              <notimestamp>true</notimestamp>
+              <doclint>all,-missing</doclint>
+              <quiet>true</quiet>
+            </configuration>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-gpg-plugin</artifactId>
+            <version>${maven-gpg.version}</version>
+            <executions>
+              <execution>
+                <id>sign-artifacts</id>
+                <phase>verify</phase>
+                <goals><goal>sign</goal></goals>
+              </execution>
+            </executions>
+            <configuration>
+              <!--
+                The key never touches the repository. CI imports it from the GPG_PRIVATE_KEY
+                secret into a throwaway keyring and puts GPG_PASSPHRASE in the
+                MAVEN_GPG_PASSPHRASE environment variable, which is the name this plugin
+                reads by default. loopback pinentry is required because there is no tty.
+              -->
+              <gpgArguments>
+                <arg>--pinentry-mode</arg>
+                <arg>loopback</arg>
+              </gpgArguments>
+            </configuration>
+          </plugin>
+          <plugin>
+            <groupId>org.sonatype.central</groupId>
+            <artifactId>central-publishing-maven-plugin</artifactId>
+            <version>${central-publishing.version}</version>
+            <!-- extensions=true: this replaces maven-deploy-plugin on the deploy phase. -->
+            <extensions>true</extensions>
+            <configuration>
+              <!-- settings.xml <server><id>central</id>, username/password = Central user token. -->
+              <publishingServerId>central</publishingServerId>
+              <!-- the maintainer presses Publish on the portal. Never flip this to true. -->
+              <autoPublish>false</autoPublish>
+              <waitUntil>validated</waitUntil>
+              <deploymentName>gdpr-shredding ${project.version}</deploymentName>
+              <!-- The sample is a demo application, not a library. It is never published. -->
+              <excludeArtifacts>
+                <excludeArtifact>gdpr-shredding-sample</excludeArtifact>
+              </excludeArtifacts>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
+    <profile>
+      <!-- OWASP Dependency-Check: opt-in (slow, pulls NVD). mvn -Psecurity-scan verify -->
+      <id>security-scan</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.owasp</groupId>
+            <artifactId>dependency-check-maven</artifactId>
+            <version>${dependency-check.version}</version>
+            <configuration>
+              <failBuildOnCVSS>7</failBuildOnCVSS>
+              <nvdApiKey>${nvd.api.key}</nvdApiKey>
+              <skipTestScope>true</skipTestScope>
+            </configuration>
+            <executions>
+              <execution><goals><goal>check</goal></goals></execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
+    <profile>
+      <!--
+        the maintainers' standing convention (fourth pass, 2026-09-09): a hand-off probe from the
+        security review lives in the repo, in src/test-pending/java of the module it belongs to - never in
+        the session scratchpad, which is invisible to git and to the next person who opens this
+        repo. The default build (`./mvnw verify`, no profile) never compiles or runs anything under
+        test-pending: it does not exist as a test source root at all unless this profile is active,
+        so a probe committed there red cannot fail CI or count toward the coverage gate before it
+        has a fix.
+
+          ./mvnw -Pprobes-pending test      compiles and runs whatever is under test-pending too
+
+        Workflow: The security review commits a new probe under <module>/src/test-pending/java/... (failing,
+        proving the finding). The engineering agent (the fix) reproduces it with this profile, fixes
+        the production code, confirms it green, then moves the file into src/test/java (an
+        ordinary `git mv`) so it is compiled and run by the default build from then on -
+        src/test-pending/java is a staging area, never a permanent home for a green probe.
+
+        build-helper-maven-plugin's add-test-source is the standard, minimal way to add a source
+        root conditionally: it does not fail if the directory does not exist (nothing to add), and
+        it adds nothing to the default build's source roots when this profile is not active.
+      -->
+      <id>probes-pending</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>build-helper-maven-plugin</artifactId>
+            <version>${build-helper-plugin.version}</version>
+            <executions>
+              <execution>
+                <id>add-pending-probes</id>
+                <phase>generate-test-sources</phase>
+                <goals><goal>add-test-source</goal></goals>
+                <configuration>
+                  <sources>
+                    <source>src/test-pending/java</source>
+                  </sources>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+</project>

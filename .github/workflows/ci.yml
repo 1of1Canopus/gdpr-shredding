@@ -14,11 +14,138 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # F2 (fourteenth pass): CONTRIBUTING.md requires every commit in a pull request to carry a DCO
+  # "Signed-off-by:" trailer (git commit -s). This is the only enforcement of that requirement -
+  # nothing rejects an unsigned commit at merge time otherwise. Runs only on pull_request, where
+  # github.event.pull_request.base.sha / .head.sha give an exact commit range; a plain push to
+  # main (already reviewed, already merged) is not re-checked. Copied from
+  # B-agent-guard/.github/workflows/ci.yml (its G2/G3/G4 hardening kept verbatim: parent count,
+  # not subject text, is what exempts a merge commit, and only a trivial back-merge of the base
+  # at that - an octopus merge, an evil merge, or a two-parent commit whose second parent is not
+  # from the base all fall through to the sign-off requirement).
+  #
+  # GRANDFATHER_SHA (B's own precedent, same reasoning): this requirement is adopted mid-flight,
+  # on this still-open PR, which already carries commits pushed before CONTRIBUTING.md asked for
+  # a sign-off. Those commits cannot gain a trailer without rewriting already-pushed history,
+  # which this portfolio's git rules forbid (no force-push, ever). c1b4157 is the last commit
+  # made before this job was added; a commit is exempt only if it IS c1b4157 or an ANCESTOR of
+  # it. Self-limiting: once this PR merges, c1b4157 becomes part of main's history and every
+  # commit on every future branch is a DESCENDANT of it, never an ancestor, so the exemption can
+  # never match a new commit again, here or on any later PR.
+  dco:
+    name: DCO sign-off
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Verify every commit in this pull request is signed off
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GRANDFATHER_SHA: c1b415747088b77a923d14f0a62052bdb673e7a9
+        run: |
+          set -euo pipefail
+          missing=0
+          while IFS= read -r sha; do
+            [ -n "$sha" ] || continue
+            if git cat-file -e "$GRANDFATHER_SHA" 2>/dev/null \
+                && git merge-base --is-ancestor "$sha" "$GRANDFATHER_SHA"; then
+              continue
+            fi
+            subject="$(git log -1 --format='%s' "$sha")"
+            # a merge commit is exempt because it has two-or-more parents (%P), never because of
+            # its subject - a subject is free text the committer chooses and cannot be trusted.
+            # Parent count alone is too broad, though: an octopus merge or a two-parent commit
+            # whose second parent is not from the base can carry authored content ("evil merge")
+            # that exists in no parent, while still being waved through as "a real merge". Exempt
+            # a merge only when it is a trivial back-merge of the base: exactly two parents, the
+            # second an ancestor of BASE_SHA, and the commit's own tree identical to the tree git
+            # itself computes for merging those two parents (git merge-tree, needs git >= 2.38;
+            # ubuntu-latest is well past it). An octopus, a two-parent commit whose second parent
+            # is not from the base, and any merge carrying an evil-merge delta all fall through to
+            # the sign-off requirement.
+            parents="$(git log -1 --format='%P' "$sha")"
+            set -- $parents
+            if [ "$#" -ge 2 ]; then
+              exempt=0
+              if [ "$#" -eq 2 ] && git merge-base --is-ancestor "$2" "$BASE_SHA" 2>/dev/null; then
+                auto=""
+                # git merge-tree --write-tree exits non-zero when the merge it computes has a
+                # conflict, even though it still writes a tree. Under set -euo pipefail that would
+                # kill this step before the sign-off check ever ran; the if guards the
+                # substitution so errexit skips it on that path instead: auto stays empty, the
+                # exempt check fails, and a conflict-resolution merge (authored content) correctly
+                # falls through to the sign-off requirement below, with a visible error.
+                if merged="$(git merge-tree --write-tree "$1" "$2" 2>/dev/null)"; then
+                  auto="$(printf '%s\n' "$merged" | head -1)"
+                fi
+                own="$(git rev-parse "$sha^{tree}")"
+                [ -n "$auto" ] && [ "$auto" = "$own" ] && exempt=1
+              fi
+              [ "$exempt" -eq 1 ] && continue
+            fi
+            if ! git log -1 --format='%B' "$sha" | grep -Eiq '^Signed-off-by: .+ <.+@.+>$'; then
+              echo "::error::commit $sha (\"$subject\") has no 'Signed-off-by:' trailer - see CONTRIBUTING.md, git commit -s"
+              missing=$((missing + 1))
+            fi
+          done < <(git rev-list "${BASE_SHA}..${HEAD_SHA}")
+          if [ "$missing" -gt 0 ]; then
+            echo "::error::$missing commit(s) missing a DCO sign-off"
+            exit 1
+          fi
+          echo "all commits in ${BASE_SHA}..${HEAD_SHA} are signed off"
+
   build-and-test:
     name: Build & test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # F1 (fourteenth pass): a public file must never point a reader at a document that was moved
+      # out of this repository or at this machine's own filesystem; the forbidden names themselves
+      # are spelled out once, below, on the pattern-definition line. `internal/` is excluded
+      # because that is where the private working docs this repo's own tooling reads (e.g. the
+      # security review feeding cipher-probe-release-pipeline.sh, where it exists) legitimately
+      # live outside the public tree; nothing under it ships in a released artifact.
+      #
+      # G2 (fifteenth pass): two holes in the guard as it stood at c1b4157. (1) `git grep -I`
+      # never matches a binary file, and whether a file is binary is decided by `.gitattributes`,
+      # which the same commit that adds the dangling reference can also edit - one `path binary`
+      # line hid a match without changing the file's content. Fixed with `--text`, which forces
+      # git to treat every path as text regardless of `.gitattributes`. (2) the exemption used to
+      # cover this whole workflow file, not just the one line that has to spell the names out;
+      # narrowed to that line alone, marked below, so every other line in this file (including
+      # this comment block) is caught by the same rule a public source file is. A match is also
+      # run, after packaging, against the contents of the built sources/javadoc jars in the
+      # release-dryrun job below, since `git grep` only ever sees the working tree, not what
+      # `maven-source-plugin`/`maven-javadoc-plugin` actually ship inside a jar.
+      #
+      # H-2/H-3 (sixteenth pass): the content-marker exemption (a `grep -v` on a fixed string) let
+      # any line claim it, not just the pattern-definition line, so a forbidden reference carrying
+      # that same marker string slipped through unchanged (same shape as the .gitattributes binary
+      # bypass, one layer up). Deleted the exemption entirely and instead wrote the pattern so it
+      # cannot match its own definition line below: one character bracketed in each alternative
+      # that used to be a literal substring of itself, turning the definition line into text the
+      # pattern does not match, with no exemption needed at all. H-2: the machine-path half only
+      # knew this reviewer's own laptop account path; a hosted Linux runner builds under a
+      # different absolute prefix the old pattern never caught. Widened to cover Linux home
+      # directories, the Linux superuser home, and Windows drive-letter user paths too.
+      - name: Refuse a reference to a moved-private document or a machine-local path
+        run: |
+          set -euo pipefail
+          pattern='QUESTIONS\.md|STATUS\.md|SPEC\.md|LICENSING\.md|SHARED-CONVENTIONS\.md|AGENTS\.md|docs[/]plans|SECURITY[-]REVIEW|RELEASIN[G]|[/]Users[/]|[/]home[/][a-z]|[/]root[/]|[A-Z]:\\Users'
+          if git grep -n --text -E "$pattern" -- ':!internal/**' \
+              > hits.txt; then
+            echo "::error::found a reference to a moved-private document or a machine-local path:"
+            cat hits.txt
+            rm -f hits.txt
+            exit 1
+          fi
+          rm -f hits.txt
+          echo "no dangling reference to a moved-private document or a machine path found"
       - name: Set up JDK 21
         uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
         with:
@@ -33,3 +160,92 @@ jobs:
         with:
           name: third-party-notices
           path: "**/target/THIRD-PARTY-NOTICES.txt"
+
+  # F3 (fourteenth pass): the release profile (`pom.xml`'s `release` profile) was never exercised
+  # by CI - it runs only `clean verify` and `-Psecurity-scan` - so its javadoc break shipped
+  # unnoticed for six passes. Runs the documented dry run on every push and pull request.
+  #
+  # G-1 (fifteenth pass): the step used to run `package` with `-Dgpg.skip=true`, so
+  # `maven-gpg-plugin` (bound to `verify`) never ran and no `.asc` was ever produced, even
+  # though the step's own name claimed a detached signature was built. There is no Maven
+  # Central secret to sign with here (that only exists on a real release, via `GPG_PRIVATE_KEY`
+  # / `GPG_PASSPHRASE`), so this job generates its own throwaway key, signs with it, and throws
+  # it away with the runner - it proves the signing wiring itself works (phase binding,
+  # pinentry mode, `MAVEN_GPG_PASSPHRASE`, one signature per published jar), not that the real
+  # key is not compromised.
+  release-dryrun:
+    name: Release dry run (build, sign with a throwaway key, verify one signature per jar)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up JDK 21
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: Generate an ephemeral GPG key for this run only
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="${RUNNER_TEMP}/gnupg-dryrun"
+          mkdir -m 700 "$GNUPGHOME"
+          echo "GNUPGHOME=${GNUPGHOME}" >> "$GITHUB_ENV"
+          gpg --batch --passphrase '' --quick-generate-key ci-dryrun@example.invalid default default 0
+      - name: Build sources jar, javadoc jar and sign every artifact
+        env:
+          MAVEN_GPG_PASSPHRASE: ""
+        run: ./mvnw -B -DskipTests -Prelease verify
+      - name: Verify one detached signature per published jar (core, starter; the sample is never published)
+        run: |
+          set -euo pipefail
+          missing=0
+          for dir in gdpr-shredding-core gdpr-shredding-spring-boot-starter; do
+            for jar in "$dir"/target/*.jar; do
+              if [ ! -f "${jar}.asc" ]; then
+                echo "::error::no detached signature for ${jar}"
+                missing=$((missing + 1))
+              fi
+            done
+          done
+          if [ "$missing" -gt 0 ]; then
+            echo "::error::${missing} published jar(s) have no .asc signature"
+            exit 1
+          fi
+          echo "every published jar (core, starter) has a detached signature"
+      # G2 (fifteenth pass), second half: the build-and-test guard above greps the working tree,
+      # not what actually ships - maven-source-plugin and maven-javadoc-plugin copy file contents
+      # into the sources/javadoc jars verbatim, so a match this guard would have caught in the
+      # tree is what a reader of the published jar sees too. Unzips every jar this job just built
+      # for the published modules (core, starter; the sample is never published) and re-runs the
+      # same pattern against the extracted contents.
+      #
+      # H-2/H-3: same pattern as the build-and-test step above - no exemption, self-non-matching,
+      # machine-path alternatives widened as noted there. H-4 (sixteenth pass, INFO): this step
+      # used to grep only the sources and javadoc jars; the main jar is published too and was
+      # never checked. Loop widened to every jar in each module's target/ so every published jar
+      # (main included) is covered.
+      - name: Refuse a moved-private document reference or a machine-local path inside a published jar
+        run: |
+          set -euo pipefail
+          pattern='QUESTIONS\.md|STATUS\.md|SPEC\.md|LICENSING\.md|SHARED-CONVENTIONS\.md|AGENTS\.md|docs[/]plans|SECURITY[-]REVIEW|RELEASIN[G]|[/]Users[/]|[/]home[/][a-z]|[/]root[/]|[A-Z]:\\Users'
+          extract_dir="${RUNNER_TEMP}/jar-contents"
+          mkdir -p "$extract_dir"
+          found=0
+          for dir in gdpr-shredding-core gdpr-shredding-spring-boot-starter; do
+            for jar in "$dir"/target/*.jar; do
+              [ -f "$jar" ] || continue
+              dest="$extract_dir/$(basename "$jar" .jar)"
+              mkdir -p "$dest"
+              unzip -q -o "$jar" -d "$dest"
+              if grep -rlnE "$pattern" "$dest" > hits.txt; then
+                echo "::error::${jar} contains a reference to a moved-private document or a machine-local path:"
+                cat hits.txt
+                found=1
+              fi
+              rm -f hits.txt
+            done
+          done
+          if [ "$found" -ne 0 ]; then
+            exit 1
+          fi
+          echo "no dangling reference found inside any published sources/javadoc jar"

@@ -1,0 +1,115 @@
+# PostgreSQL's fully reserved key words: catcode 'R' ("reserved") and catcode 'T' ("reserved,
+# can be function or type name") from pg_get_keywords(), PostgreSQL 16.14 - the version this
+# module's tests pin (postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777,
+# PG_VERSION=16.14). Both classes cannot appear as a bare ColId, which is exactly the grammar
+# position an unqualified WHERE/SET column reference occupies; catcode 'C' ("can be used as
+# column name, but reserved elsewhere") and 'U' ("unreserved") are deliberately excluded, since a
+# column named e.g. "value" or "name" works perfectly unquoted and refusing it would be a false
+# refusal on a mapping that has never been wrong.
+#
+# Generated with, against the pinned image:
+#   select word from pg_get_keywords() where catcode in ('R','T') order by word;
+# 101 words. SHA-256 of this file's word lines (comment lines and blank lines excluded, one word
+# per line, sorted, LF-terminated): 3a9027604ec759856e3f9fdbaadaccc4588c00b213328ab5ca0018231448e0d6
+# - checked at class-init by PostgreSqlReservedKeywords, which refuses to load a tampered list.
+all
+analyse
+analyze
+and
+any
+array
+as
+asc
+asymmetric
+authorization
+binary
+both
+case
+cast
+check
+collate
+collation
+column
+concurrently
+constraint
+create
+cross
+current_catalog
+current_date
+current_role
+current_schema
+current_time
+current_timestamp
+current_user
+default
+deferrable
+desc
+distinct
+do
+else
+end
+except
+false
+fetch
+for
+foreign
+freeze
+from
+full
+grant
+group
+having
+ilike
+in
+initially
+inner
+intersect
+into
+is
+isnull
+join
+lateral
+leading
+left
+like
+limit
+localtime
+localtimestamp
+natural
+not
+notnull
+null
+offset
+on
+only
+or
+order
+outer
+overlaps
+placing
+primary
+references
+returning
+right
+select
+session_user
+similar
+some
+symmetric
+system_user
+table
+tablesample
+then
+to
+trailing
+true
+union
+unique
+user
+using
+variadic
+verbose
+when
+where
+window
+with
