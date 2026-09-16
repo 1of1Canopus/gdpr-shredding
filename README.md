@@ -26,6 +26,26 @@ HMAC-SHA-256 and a hand-written HKDF checked against the RFC 5869 vectors, all f
 </dependency>
 ```
 
+## Try it in two minutes
+
+```bash
+docker compose -f gdpr-shredding-sample/docker-compose.yml up -d
+
+export SHREDDING_MASTER_KEY=$(head -c 32 /dev/urandom | base64)
+export SHREDDING_ERASURE_LOG_SECRET=$(head -c 32 /dev/urandom | base64)
+export SHREDDING_BLIND_INDEX_SECRET=$(head -c 32 /dev/urandom | base64)
+
+cd gdpr-shredding-sample && ../mvnw spring-boot:run
+```
+
+```bash
+curl -s localhost:8080/customers -H 'content-type: application/json' -d '{
+  "tenantId":"acme","customerId":"cust-42",
+  "email":"alice@example.com","phone":"+33100000000" }'
+```
+
+Full walkthrough, including the erasure call and the row going unreadable: [`gdpr-shredding-sample/README.md`](gdpr-shredding-sample/README.md).
+
 ## Sixty lines
 
 ```java
