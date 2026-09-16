@@ -35,6 +35,12 @@ All notable changes to this project. The format follows
   the same commit produce byte-identical jars, and the release stamps every archive entry with
   the released commit's date.
 
+### Fixed
+- Sample README: the alternate run command, `./mvnw -pl gdpr-shredding-sample -am spring-boot:run`,
+  failed with "Unable to find a suitable main class" because the `run` goal applied to the whole
+  reactor selected by `-am`, including the parent POM. Replaced with a two-step build-then-run
+  (`package` followed by `java -jar`) that was verified end to end from the repo root.
+
 ### Changed
 - The release dry run in CI now runs the tests instead of skipping them: its assertions about
   jar contents are only meaningful against the jar a real release produces.
