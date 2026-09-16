@@ -12,7 +12,8 @@ export SHREDDING_MASTER_KEY=$(head -c 32 /dev/urandom | base64)
 export SHREDDING_ERASURE_LOG_SECRET=$(head -c 32 /dev/urandom | base64)
 export SHREDDING_BLIND_INDEX_SECRET=$(head -c 32 /dev/urandom | base64)
 
-./mvnw -pl gdpr-shredding-sample -am spring-boot:run
+./mvnw -q -pl gdpr-shredding-sample -am package -DskipTests
+java -jar gdpr-shredding-sample/target/gdpr-shredding-sample-*.jar
 ```
 
 Nothing starts without those three. There is no default master key and none is generated.
