@@ -1,5 +1,11 @@
 name: Security scan
 
+# Weekly, and never the gate. The gate is the `Vulnerability scan` job in ci.yml (every
+# pull request) and the scan before signing in release.yml (every release). This workflow
+# is the wider, slower sweep that runs against main whether or not anyone opened a pull
+# request that week - an advisory published on a Tuesday concerns a dependency nobody
+# touched, which is precisely the case a pull-request-triggered check never sees.
+
 on:
   schedule:
     - cron: "17 4 * * 1"
@@ -9,7 +15,65 @@ permissions:
   contents: read
 
 jobs:
+  # Same scanner, same threshold and the same severity gate as the pull-request job: this
+  # one differs only in when it runs and in what it is allowed to do about it (nothing - it
+  # fails the scheduled run, and the weekly duty is to read it).
+  osv-scan:
+    name: OSV weekly sweep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned OSV-Scanner and verify its checksum
+        run: tools/install-scanner.sh osv-scanner "${RUNNER_TEMP}/bin"
+      - name: Scan the resolved dependency graph
+        run: |
+          set -uo pipefail
+          "${RUNNER_TEMP}/bin/osv-scanner" scan source \
+            --data-source=native --maven-registry=https://repo.maven.apache.org/maven2 \
+            --all-packages \
+            --format json --output-file "${RUNNER_TEMP}/osv.json" \
+            -L pom.xml:pom.xml \
+            -L pom.xml:gdpr-shredding-core/pom.xml \
+            -L pom.xml:gdpr-shredding-spring-boot-starter/pom.xml \
+            -L pom.xml:gdpr-shredding-sample/pom.xml
+          rc=$?
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+            echo "::error::osv-scanner exited $rc: the weekly scan did not complete"
+            exit 1
+          fi
+      - name: Fail the week on a known HIGH or CRITICAL vulnerability
+        run: |
+          tools/check-vulnerability-report.py \
+            --format osv --report "${RUNNER_TEMP}/osv.json" --fail-on high \
+            --summary-file "${RUNNER_TEMP}/below-threshold.txt"
+      - name: Report what sits below the threshold
+        if: always()
+        run: |
+          {
+            echo "### Findings below the HIGH threshold"
+            echo
+            if [ -s "${RUNNER_TEMP}/below-threshold.txt" ]; then cat "${RUNNER_TEMP}/below-threshold.txt"; else echo "None."; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: osv-weekly-report
+          path: ${{ runner.temp }}/osv.json
+          if-no-files-found: warn
+
+  # OWASP Dependency-Check is an OPTIONAL deep scan, not a gate: it needs an NVD API key
+  # that was applied for and not issued, and a run without one is rate-limited into a
+  # multi-hour crawl or an outright failure. It is kept because when a key does exist it
+  # sees things the OSV database does not, and it is deliberately allowed to be absent.
+  #
+  # What it must never do is fail the week for the missing key, because a red weekly run
+  # that is red for a known, accepted reason is a red run nobody reads - and then the OSV
+  # job above goes red for a real advisory and nobody reads that either. It skips instead,
+  # LOUDLY: an annotation, a job-summary line, and the reason. A silent skip would be the
+  # same defect facing the other way (checklist line 65: a weaker mode that is exercised is
+  # stated in the result, not in a comment).
   owasp-dependency-check:
+    name: OWASP Dependency-Check (optional deep scan)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -18,10 +82,31 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: maven
+      - name: Say whether this deep scan can run at all
+        id: key
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${NVD_API_KEY:-}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "Dependency-Check will run with an NVD API key." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::SKIPPED: OWASP Dependency-Check needs an NVD API key (secret NVD_API_KEY) and none is configured. This is an optional deep scan; the CVE gate is the OSV job in this workflow, the Vulnerability scan check on every pull request, and the scan before signing in the release. A skipped scan is not a clean scan."
+            {
+              echo "### OWASP Dependency-Check: SKIPPED"
+              echo
+              echo "No \`NVD_API_KEY\` secret is configured, so this optional deep scan did not run."
+              echo "It found nothing because it looked at nothing. The gates that did run are the"
+              echo "OSV weekly sweep in this workflow and the per-pull-request \`Vulnerability scan\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: OWASP Dependency-Check (fails on CVSS >= 7)
+        if: steps.key.outputs.available == 'true'
         run: ./mvnw -B -Psecurity-scan -DskipTests -Dnvd.api.key=${{ secrets.NVD_API_KEY }} verify
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always()
+        if: always() && steps.key.outputs.available == 'true'
         with:
           name: dependency-check-report
           path: "**/target/dependency-check-report.*"
