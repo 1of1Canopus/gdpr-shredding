@@ -4,14 +4,16 @@
 
 When a person asks to be forgotten, GDPR says delete. Audit, accounting and AML rules say keep.
 Crypto-shredding is how teams square the two: encrypt each person's personal fields under that
-person's own key, and destroy the key. That **renders the data permanently unreadable; the row
-survives**, and so do the foreign keys and the audit trail.
+person's own key, and destroy the key. That **renders the data unreadable to anyone who does not
+hold the key, and the key no longer exists** - within the residual risks set out in
+`SECURITY-NOTES.md` - and so do the foreign keys and the audit trail.
 
 Be precise about what that is. Regulators classify it as **pseudonymisation with key destruction**,
-not anonymisation and not deletion (WP216 s.4; CNIL; ICO's "beyond use" test). It is squarely
+not anonymisation and not deletion (WP216 s.4; ICO's "beyond use" test). It is squarely
 Art. 32(1)(a), and it is what lets an Art. 17(1) request be answered without dropping rows another
-law requires you to keep - but whether it satisfies a given erasure request is your DPO's call on
-your facts. The residual risks are in `SECURITY-NOTES.md` and the sources are in `docs/index.md`.
+law requires you to keep (Art. 17(3)(b)) - but whether it satisfies a given erasure request is
+your DPO's call on your facts. The residual risks are in `SECURITY-NOTES.md` and the sources are
+in `docs/index.md`.
 
 Fair source (FSL-1.1-ALv2): free to use, not as a base for a competing product, becomes
 Apache-2.0 two years after each release. Pro edition under a separate commercial licence.
@@ -155,7 +157,7 @@ what was destroyed, when, by whom, and the date the erasure is also complete in 
 
 Free core is everything above. The Pro edition adds Vault / AWS KMS / Azure Key Vault / GCP KMS key
 providers with master-key rotation and re-wrap, per-tenant master keys, the erasure workflow
-(intake, identity verification, grace period, proof-of-erasure PDF for the DPO), the admin UI, and
+(intake, identity verification, grace period, erasure record PDF for the DPO), the admin UI, and
 the resumable batch migrator that encrypts existing plaintext columns.
 
 ## Documentation
