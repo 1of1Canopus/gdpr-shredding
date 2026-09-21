@@ -84,6 +84,17 @@
     -->
     <project.build.outputTimestamp>2026-09-08T00:00:00Z</project.build.outputTimestamp>
     <spring-boot.version>4.1.1</spring-boot.version>
+    <!--
+      Overrides the Tomcat version Spring Boot 4.1.1 manages (11.0.24), which carries three
+      CRITICAL advisories: GHSA-9xv2-5v5q-p794 (DIGEST authenticator, authentication bypass by
+      capture-replay), GHSA-h3x4-894j-xpx5 (FORM authentication, incorrect authorization) and
+      GHSA-gcx9-497g-6cp6 (improper access control). All three are fixed in 11.0.25.
+      gdpr-shredding-sample brings tomcat-embed-core in through spring-boot-starter-webmvc; the
+      core and starter modules do not depend on it at all. Found by this branch's own
+      vulnerability gate on its first real run, which is the whole argument for having one.
+      Remove this line when the managed version passes it.
+    -->
+    <tomcat.version>11.0.25</tomcat.version>
     <archunit.version>1.5.0</archunit.version>
     <errorprone.version>2.50.0</errorprone.version>
     <spotless.version>3.10.2</spotless.version>
