@@ -1,5 +1,9 @@
 # Dependabot: GitHub-native dependency + vulnerability watch (Advisory Database, no NVD key).
 # The scheduled OWASP scan (workflows/security-scan.yml) is the deeper backstop.
+#
+# cooldown: a PR is not opened until 7 days after the upstream release, on every ecosystem, so
+# a poisoned release that gets pulled by its publisher within the week never reaches us as a
+# PR at all. This is what dependabot-auto-merge.yml's condition 2 depends on.
 version: 2
 updates:
   - package-ecosystem: "maven"
@@ -7,6 +11,8 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10
+    cooldown:
+      default-days: 7
     groups:
       minor-and-patch:
         update-types: ["minor", "patch"]
@@ -15,4 +21,6 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     labels: ["dependencies", "ci"]
