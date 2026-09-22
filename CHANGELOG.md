@@ -6,6 +6,12 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.1] - 2026-09-22
+
+## [0.1.0] - 2026-09-15
+
 ### Fixed
 - **CRITICAL**: pinned `tomcat-embed-core` to 11.0.25, overriding the 11.0.24 Spring Boot 4.1.1
   manages. 11.0.24 carries three CRITICAL advisories: GHSA-9xv2-5v5q-p794 (DIGEST authenticator,
