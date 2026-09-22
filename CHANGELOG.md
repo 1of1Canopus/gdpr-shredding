@@ -6,6 +6,23 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **CRITICAL**: pinned `tomcat-embed-core` to 11.0.25, overriding the 11.0.24 Spring Boot 4.1.1
+  manages. 11.0.24 carries three CRITICAL advisories: GHSA-9xv2-5v5q-p794 (DIGEST authenticator,
+  authentication bypass by capture-replay), GHSA-h3x4-894j-xpx5 (FORM authentication, incorrect
+  authorization), GHSA-gcx9-497g-6cp6 (improper access control). Found by the repository's new
+  OSV-Scanner CVE gate on its first real run. No published 0.1.0 artifact was exposed: neither
+  `gdpr-shredding-core` nor `gdpr-shredding-spring-boot-starter` has any dependency path to
+  `tomcat-embed-core` at all; only the sample application, which is never published, pulls it.
+  The pin covers this repository's own build and the sample.
+
+### Changed
+- The release bundle is not yet scanned for known vulnerabilities before signing: the
+  2026-09-16 keyless CVE gate decision has three legs (Dependabot, OSV-Scanner as a required
+  PR check, Grype on the release bundle before signing), and only the first two ship here.
+  `release.yml` signs and publishes without a Grype pass. Wiring that in is a design stop
+  (a new gate on the signing path, out of scope for a corrections pass); tracked as CI-02.
+
 ### Added
 - A Maven Central release pipeline: `.github/workflows/release.yml` publishes
   `gdpr-shredding-core`, `gdpr-shredding-spring-boot-starter` and the parent POM from a signed

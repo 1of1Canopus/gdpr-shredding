@@ -1397,6 +1397,128 @@ probe probe_release_dryrun_skips_the_tests                   "the dry run assert
 probe probe_sources_jar_contents_are_never_asserted          "nothing asserts what a sources jar contains"        probe_sources_jar_contents_are_never_asserted
 probe probe_sources_jar_allowlist_is_extension_only          "RP-3 the sources-jar check is extension-only"       probe_sources_jar_assertion_is_extension_only_not_path_based
 
+# ===========================================================================
+# Keyless CVE gate (backported from stripe-einvoice ebbbd33): probes for the OSV-Scanner
+# gate in ci.yml and the optional, loudly-skipping OWASP Dependency-Check in
+# security-scan.yml. Same rule as every block above.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# S5 - nothing stops a pull request that adds a dependency with a known HIGH or CRITICAL
+#      vulnerability. Runs the REAL severity step from ci.yml against a synthetic report
+#      carrying one HIGH finding (a CVSS 7.5 vector, computed from the vector exactly as
+#      the gate does), rather than asserting that some job name appears in the YAML.
+#      Weak while that step exits 0 on a HIGH finding.
+# ---------------------------------------------------------------------------
+probe_a_high_severity_dependency_passes_the_pull_request_gate() {
+  local body work rc
+  body="$(step_body "$CI" 'Fail on a known HIGH or CRITICAL vulnerability')"
+  [ -n "$body" ] || return 0   # no such step: nothing gates a pull request
+  work="$(mktemp -d)"
+  cat >"$work/osv.json" <<'REPORT'
+{"results":[{"source":{"path":"pom.xml"},"packages":[{
+  "package":{"name":"org.example:vulnerable","version":"1.0","ecosystem":"Maven"},
+  "vulnerabilities":[{"id":"GHSA-synthetic-high","severity":[
+    {"type":"CVSS_V3","score":"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"}]}]}]}]}
+REPORT
+  RUNNER_TEMP="$work" bash -c "$body" >/dev/null 2>&1
+  rc=$?
+  rm -rf "$work"
+  [ "$rc" -eq 0 ]   # the gate accepted a HIGH finding: weak
+}
+
+# ---------------------------------------------------------------------------
+# S7 - a scanner that could not run is indistinguishable from a clean scan. Three shapes of
+#      "no answer" - an empty file, a truncated one, and a syntactically valid report with
+#      no result section - each run through the real gate.
+#      Weak while any of them exits 0.
+# ---------------------------------------------------------------------------
+probe_an_unreadable_scan_report_counts_as_clean() {
+  local work weak=1
+  work="$(mktemp -d)"
+  : > "$work/empty.json"
+  printf '{"results": [' > "$work/truncated.json"
+  printf '{"scanner":"osv","version":"2"}' > "$work/no-results.json"
+  # A syntactically perfect report of a scan that looked at nothing. Without --all-packages an
+  # OSV report lists only VULNERABLE packages, so a resolution that silently produced nothing
+  # renders exactly like a clean tree - the vacuous pass this whole script exists to refuse.
+  printf '{"results":[{"source":{"path":"pom.xml"},"packages":[]}]}' > "$work/no-packages.json"
+  local f
+  for f in empty truncated no-results no-packages; do
+    if tools/check-vulnerability-report.py --format osv --report "$work/$f.json" --fail-on high >/dev/null 2>&1; then
+      echo "the gate accepted $f.json as a clean scan" >/dev/null
+      weak=0
+    fi
+  done
+  rm -rf "$work"
+  [ "$weak" -eq 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# S9 - the weekly deep scan fails the week because no NVD key exists, so the scheduled run
+#      is permanently red and the OSV findings beside it go unread; or it skips in silence,
+#      which is worse. Runs the real step body with no key and requires BOTH: it does not
+#      fail, and it says out loud that it skipped.
+#      Weak while it fails, or while it is silent.
+# ---------------------------------------------------------------------------
+probe_the_weekly_deep_scan_is_red_or_silent_without_a_key() {
+  local body work rc out
+  body="$(step_body .github/workflows/security-scan.yml 'Say whether this deep scan can run at all')"
+  [ -n "$body" ] || return 0
+  work="$(mktemp -d)"
+  : > "$work/out"; : > "$work/summary"
+  ( cd "$work" && NVD_API_KEY="" GITHUB_OUTPUT="$work/out" GITHUB_STEP_SUMMARY="$work/summary" \
+      bash -c "$body" ) >"$work/log" 2>&1
+  rc=$?
+  cat "$work/log" >/dev/null 2>/dev/null || true
+  out="$(cat "$work/log" "$work/summary" 2>/dev/null)"
+  if [ "$rc" -ne 0 ]; then rm -rf "$work"; return 0; fi                    # red for a known reason: weak
+  grep -q 'available=false' "$work/out" 2>/dev/null || { rm -rf "$work"; return 0; }
+  grep -qi 'skipped' <<<"$out" || { rm -rf "$work"; return 0; }            # silent skip: weak
+  rm -rf "$work"
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# S10 - the pinned scanner binaries are fetched without being verified, so whatever the
+#       release page serves on the day is what decides whether a build is safe to trust.
+#       Runs the REAL installer against a local file:// URL (a copy of the script with the
+#       download location redirected - the production script has no such switch, on purpose)
+#       with the right checksum and then with a tampered payload.
+#       Weak while a tampered payload installs.
+# ---------------------------------------------------------------------------
+probe_scanner_downloads_are_installed_without_verification() {
+  local work script good_sha rc
+  work="$(mktemp -d)"
+  printf 'not really a scanner\n' > "$work/payload"
+  if command -v sha256sum >/dev/null 2>&1; then good_sha="$(sha256sum "$work/payload" | cut -d" " -f1)"
+  else good_sha="$(shasum -a 256 "$work/payload" | cut -d" " -f1)"; fi
+  script="$work/install-scanner.sh"
+  # Redirect the download to the local payload and make the "does it run" check a no-op:
+  # this probe is about the checksum, not about whether a text file is a scanner.
+  sed -e "s#url=\"https://github.com/google/osv-scanner/releases/download/[^\"]*\"#url=\"file://$work/payload\"#" \
+      -e 's#"\$dest/osv-scanner" --version >/dev/null#true#' \
+      tools/install-scanner.sh > "$script"
+  chmod +x "$script"
+  # 1. the honest case: the recorded checksum matches the payload, so it installs.
+  sed -i.bak "s/^OSV_SHA256_linux_amd64=.*/OSV_SHA256_linux_amd64=\"$good_sha\"/;s/^OSV_SHA256_linux_arm64=.*/OSV_SHA256_linux_arm64=\"$good_sha\"/;s/^OSV_SHA256_darwin_arm64=.*/OSV_SHA256_darwin_arm64=\"$good_sha\"/" "$script"
+  if ! "$script" osv-scanner "$work/bin" >/dev/null 2>&1; then
+    echo "the installer refused a payload matching its own recorded checksum" >/dev/null
+    rm -rf "$work"; return 0
+  fi
+  # 2. the tampered case: same recorded checksum, different bytes on the wire.
+  printf 'tampered\n' > "$work/payload"
+  "$script" osv-scanner "$work/bin" >/dev/null 2>&1
+  rc=$?
+  rm -rf "$work"
+  [ "$rc" -eq 0 ]   # a tampered payload installed: weak
+}
+
+probe probe_high_severity_dep_passes_pr_gate                 "S5 a HIGH-severity dependency passes the PR gate"    probe_a_high_severity_dependency_passes_the_pull_request_gate
+probe probe_unreadable_report_counts_as_clean                "S7 an unreadable scan report counts as clean"        probe_an_unreadable_scan_report_counts_as_clean
+probe probe_weekly_deep_scan_red_or_silent_without_key        "S9 the weekly deep scan is red or silent without a key" probe_the_weekly_deep_scan_is_red_or_silent_without_a_key
+probe probe_scanner_download_unverified                      "S10 a tampered scanner download installs"            probe_scanner_downloads_are_installed_without_verification
+
 echo
 echo "still weak: $pass    fixed: $flipped"
 [ "$pass" -eq 0 ]
