@@ -1,0 +1,119 @@
+name: Dependabot auto-merge
+
+# Explicit exception to "every PR gets a Cipher pass" and "merging is Souhaile's": a
+# Dependabot PR merges itself when every condition below holds, and never otherwise
+# (see ~/.claude/CLAUDE.md "Dependabot auto-merge (GLOBAL)", approved by Souhaile
+# 2026-09-21). Every refusal is a `::notice::` and exit 0 - a refusal is not a failure,
+# the PR simply waits for a human, the same as any other Dependabot PR today.
+#
+# `pull_request`, never `pull_request_target`: this workflow's definition always comes
+# from main, never from the PR branch, and it never checks out the PR head. There is
+# nothing here for a malicious dependabot.yml edit on a fork or branch to influence.
+# All decision logic lives in shell, reading from env vars set from the event/API
+# responses, rather than in YAML `if:` expressions - so each condition is a step body
+# that can be extracted and run against a synthetic input outside the Actions runtime.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    name: Auto-merge a patch/minor Dependabot PR after review
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      # No checkout: everything this job needs comes from the GitHub API (fetch-metadata
+      # reads the PR's own commit message, gh api reads the PR's files and head commit).
+      - name: Read the update metadata Dependabot left in the commit message
+        id: metadata
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: "${{ secrets.GITHUB_TOKEN }}"
+
+      # Condition 1: patch or minor only. Fail closed: anything other than exactly those
+      # two values (major, unknown, empty) refuses. Dependabot security updates carry the
+      # same update-type values, so they are covered by the same rule with no carve-out.
+      - name: Refuse anything other than a patch or minor update
+        env:
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+        run: |
+          set -uo pipefail
+          case "$UPDATE_TYPE" in
+            version-update:semver-patch|version-update:semver-minor) ;;
+            *)
+              echo "::notice::refusing auto-merge: update-type is '$UPDATE_TYPE' (only patch and minor auto-merge; majors and security updates outside those two wait for a human)"
+              echo "STOP=1" >> "$GITHUB_ENV"
+              ;;
+          esac
+
+      # Condition 4: the PR changes only manifest files. Read the changed-files list from
+      # the PR itself via the API, not from a local checkout (there is none) - a
+      # Dependabot PR that also touched application code (which Dependabot never does,
+      # but this refuses to trust that) must not auto-merge.
+      - name: Refuse a PR that touches anything but a manifest
+        if: env.STOP != '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          files="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" --paginate --jq '.[].filename')"
+          bad=0
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            case "$f" in
+              pom.xml|*/pom.xml) ;;
+              .github/workflows/*.yml) ;;
+              .github/dependabot.yml) ;;
+              *)
+                echo "::notice::refusing auto-merge: changed file outside the manifest allowlist: $f"
+                bad=1
+                ;;
+            esac
+          done <<<"$files"
+          if [ "$bad" -eq 1 ]; then
+            echo "STOP=1" >> "$GITHUB_ENV"
+          fi
+
+      # Condition 5: the head commit is authored by dependabot[bot] with a verified
+      # signature. A human pushing onto a Dependabot branch (to slip in an unrelated
+      # change under cover of a dependency bump) disables auto-merge.
+      - name: Refuse an unverified or non-Dependabot head commit
+        if: env.STOP != '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          commit="$(gh api "repos/${REPO}/commits/${HEAD_SHA}")"
+          author_login="$(printf '%s' "$commit" | jq -r '.author.login // empty')"
+          verified="$(printf '%s' "$commit" | jq -r '.commit.verification.verified')"
+          if [ "$author_login" != "dependabot[bot]" ]; then
+            echo "::notice::refusing auto-merge: head commit author is '${author_login:-unknown}', not dependabot[bot]"
+            echo "STOP=1" >> "$GITHUB_ENV"
+          elif [ "$verified" != "true" ]; then
+            echo "::notice::refusing auto-merge: head commit signature is not verified"
+            echo "STOP=1" >> "$GITHUB_ENV"
+          fi
+
+      # Condition 3 (every required check green) is enforced by GitHub's native auto-merge
+      # itself, not by this workflow: `gh pr merge --auto` only completes the merge once
+      # every required check on the branch protection ruleset is green, and does nothing
+      # before that. This job does not poll checks; it only decides whether the PR is
+      # ALLOWED to wait for them with auto-merge armed.
+      - name: Enable auto-merge
+        if: env.STOP != '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+        run: |
+          set -euo pipefail
+          echo "::notice::update-type $UPDATE_TYPE, manifest-only, verified Dependabot commit: arming auto-merge"
+          gh pr merge --auto --merge "$PR_URL"

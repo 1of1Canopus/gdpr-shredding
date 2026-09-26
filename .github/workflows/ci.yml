@@ -166,6 +166,8 @@ jobs:
       # pinned Maven wrapper.
       - name: Run the security review probe suite
         run: CIPHER_PROBE_MAVEN=1 tools/cipher-probe-release-pipeline.sh
+      - name: Run the Dependabot auto-merge probe suite
+        run: tools/cipher-probe-dependabot.sh
 
   # Keyless CVE gate, pull-request half. OSV-Scanner reads the real, transitively resolved
   # dependency graph of every pom in the tree (deps.dev's resolver, not a text match on the
