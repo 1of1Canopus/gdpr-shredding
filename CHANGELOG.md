@@ -6,7 +6,16 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+- SECURITY-NOTES.md documented the runtime database role with `INSERT` and `SELECT` on
+  `shredding_erasure` only, omitting `USAGE` on the `bigserial` sequence behind its `seq` column
+  (`shredding_erasure_seq_seq`) and `UPDATE` on `shredding_erased_subject` (needed for the
+  `SELECT ... FOR SHARE` row lock `mint()` takes, which Postgres checks against `UPDATE`, not
+  `SELECT`). A role granted exactly what was documented fails every erasure write with
+  `permission denied for sequence shredding_erasure_seq_seq` and every key mint with
+  `permission denied for table shredding_erased_subject`. Added a "Database roles" section with
+  the complete, copy-pasteable `GRANT` block for every table and sequence the runtime role needs,
+  and the reason each of the two easy-to-miss grants exists.
 
 ## [0.1.1] - 2026-09-22
 

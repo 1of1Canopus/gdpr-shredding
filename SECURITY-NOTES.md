@@ -741,11 +741,47 @@ support ticket or a PDF the application itself produced. Those are the applicati
 
 - **Back up the keys table separately from the data**, or use a KMS. A single backup that holds
   both is a backup that undoes every erasure it contains.
-- **Run the application with a role that has INSERT and SELECT on `shredding_erasure`**, not the
-  owner. The append-only triggers stop the runtime role; only the owner can disable them.
+- **Run the application with a role that is not the schema owner.** The append-only triggers stop
+  the runtime role from deleting or truncating the log tables; only the owner can disable a
+  trigger. See "Database roles" below for the exact grants that role needs, and why leaving one
+  out is not a smaller version of least privilege, it is a runtime failure.
 - **Never store `shredding.erasure-log.hmac-secret` beside the datasource password.** If one
   compromise yields both, the chain key is not a second factor, it is decoration. Module B's rule.
 - **Losing the master key erases everyone.** The startup health check reports whether it can unwrap
   a known key; wire it into your readiness probe.
 - The erasure-log HMAC secret is **not** a data key and is **never** destroyed by an erasure.
   Destroying it would break the very record that proves the erasure happened.
+
+### Database roles
+
+The schema step (`schema-postgresql.sql`) must run as the owner, or another role that can create
+tables, functions and triggers. The application itself must run as a separate, non-owner role, so
+that the append-only triggers on the log tables are load-bearing: an owner can `ALTER TABLE ...
+DISABLE TRIGGER`, a non-owner cannot. Grant exactly this, no more:
+
+```sql
+GRANT SELECT, INSERT, UPDATE, DELETE ON shredding_data_key         TO shredding_app;
+GRANT SELECT, INSERT, UPDATE         ON shredding_erased_subject   TO shredding_app;
+GRANT SELECT, INSERT                 ON shredding_erasure          TO shredding_app;
+GRANT USAGE,  SELECT ON SEQUENCE shredding_erasure_seq_seq         TO shredding_app;
+GRANT SELECT, INSERT, UPDATE         ON shredding_erasure_anchor   TO shredding_app;
+```
+
+Two of these are easy to miss and both fail loudly, not silently, if skipped:
+
+- **`shredding_erasure_seq_seq`.** `shredding_erasure.seq` is a `bigserial`; Postgres names its
+  backing sequence `<table>_<column>_seq`, so it is not covered by a table-level `GRANT ... ON
+  shredding_erasure` at all. Without `USAGE` on it, every erasure write fails at insert time with
+  `ERROR: permission denied for sequence shredding_erasure_seq_seq` — the erasure never reaches
+  the log, and the caller sees a hard failure rather than a silently missing row.
+- **`UPDATE` on `shredding_erased_subject`.** The application never issues an `UPDATE` against
+  this table (the append-only triggers would refuse it if it did); the grant is there because
+  `mint()` takes `SELECT ... FOR SHARE` on it to serialise against a concurrent erasure
+  (CIPHER-03), and Postgres checks row-locking clauses (`FOR UPDATE`, `FOR SHARE`, `FOR NO KEY
+  UPDATE`, `FOR KEY SHARE`) against the `UPDATE` privilege, not `SELECT`. Without it, `mint()`
+  fails with `ERROR: permission denied for table shredding_erased_subject` on the very first call.
+
+The runtime role is never granted `DELETE` or `TRUNCATE` on `shredding_erasure`,
+`shredding_erased_subject` or `shredding_erasure_anchor`: the append-only triggers refuse those
+statements from any role including one that happens to hold the privilege, but the grants above
+keep the role from being handed the privilege to try in the first place.
