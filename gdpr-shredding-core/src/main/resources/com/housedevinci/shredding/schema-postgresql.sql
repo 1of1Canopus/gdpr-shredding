@@ -10,7 +10,8 @@ SELECT pg_advisory_xact_lock(6072873668427846209);
 -- on a trigger or a missing column.
 -- Both oids are resolved against quote_ident(current_schema()) explicitly, because to_regclass
 -- resolves like a reference (the first schema on the search_path that holds the name) while an
--- unqualified CREATE TABLE targets current_schema() only. Module B, Cipher findings J1 and K1.
+-- unqualified CREATE TABLE targets current_schema() only. Module B, security-review findings
+-- J1 and K1.
 DO $$
 DECLARE
   e oid := to_regclass(quote_ident(current_schema()) || '.shredding_erasure');

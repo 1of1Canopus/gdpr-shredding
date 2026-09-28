@@ -21,9 +21,10 @@ All notable changes to this project. The format follows
   instead: the four tables as permanent ordinary tables with exactly the expected columns and
   constraints, the `bigserial` sequence and its dependency edge, the three guard functions with the
   bodies from the bundled script compared text for text, exactly the seven guard triggers each
-  pointing through `tgfoid` at the right function and each at `ENABLE ALWAYS`, no rewrite rule, no
-  row-level-security flag, no policy, and a runtime role that owns none of the nine objects and
-  holds no privilege beyond the documented grant set. A catalogue read that cannot be performed is
+  pointing through `tgfoid` at the right function, each at `ENABLE ALWAYS`, and each with no `WHEN`
+  predicate and no `UPDATE OF` column list, no rewrite rule, no row-level-security flag, no policy,
+  no inheritance child, and a runtime role that owns none of the nine objects and holds no
+  privilege beyond the documented grant set. A catalogue read that cannot be performed is
   a refusal, not a warning. **An installation that upgrades and changes nothing stops booting.**
   Step-by-step upgrade: [docs/upgrading-0.2.0.md](docs/upgrading-0.2.0.md).
 - **Every statement this module issues is now qualified to the schema verified at boot.** An

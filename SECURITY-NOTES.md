@@ -838,8 +838,12 @@ columns and constraints the bundled script creates; the erasure log's `bigserial
 present and owned by its column; the three guard functions exist with the **bodies from the bundled
 script**, compared text for text, because `CREATE OR REPLACE FUNCTION` keeps the oid and every
 identity check passes after a body swap; exactly the seven guard triggers exist, each pointing
-through `tgfoid` at the right function and each at `ENABLE ALWAYS`; there is no rewrite rule, no
-row-level-security flag and no policy on any of the four tables; and the runtime role is not
+through `tgfoid` at the right function, each at `ENABLE ALWAYS`, **each with no `WHEN` predicate
+(`tgqual`) and no `UPDATE OF` column list (`tgattr`)** - a guard recreated `WHEN (false)` or
+narrowed to one column is identical in every other column and fires never; there is no rewrite
+rule, no row-level-security flag, no policy and **no inheritance child** on any of the four tables
+(a child carries none of the parent's triggers while its rows are read and deleted through the
+parent's name); and the runtime role is not
 privileged in any of the senses above. A catalogue read this module cannot perform is a refusal,
 not a warning: unverifiable is not clean.
 
@@ -858,6 +862,17 @@ Three things it does not prove, and they are named here rather than implied.
    `schema-postgresql.sql`, so an attacker who can rewrite the deployed jar controls the
    expectation as well as the database. That, not "a guard body was rewritten", is what remains
    outside detection.
+
+### The health endpoint publishes the posture
+
+`/actuator/health` gains two details from the gate's verdict rather than re-deriving them:
+`schema`, the schema that was verified, and `runtimeRolePrivileged`, `yes` or `no`.
+
+`runtimeRolePrivileged: yes` is a one-word statement that this application's append-only controls
+are advisory - useful to an operator, and equally useful to anyone else who can read it. Health
+details are hidden by default in Spring Boot; keep them that way on any endpoint that is reachable
+without authentication. If you set `management.endpoint.health.show-details`, set it to
+`when-authorized`, not `always`, and put the actuator on a port your ingress does not publish.
 
 ### What qualification covers, and what it does not
 
