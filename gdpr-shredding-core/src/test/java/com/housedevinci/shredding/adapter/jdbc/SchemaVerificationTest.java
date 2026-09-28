@@ -210,6 +210,14 @@ class SchemaVerificationTest {
   }
 
   @Test
+  void sequence_with_the_default_dropped_is_refused() {
+    owner("ALTER TABLE shredding_erasure ALTER COLUMN seq DROP DEFAULT");
+    var thrown = refusal();
+    assertThat(thrown.code()).isEqualTo(ErrorCodes.SCHEMA_INCOMPLETE);
+    assertThat(thrown).hasMessageContaining("no default wired to shredding_erasure_seq_seq");
+  }
+
+  @Test
   void t5_a_dropped_hash_unique_constraint_is_incomplete() {
     owner("ALTER TABLE shredding_erasure DROP CONSTRAINT shredding_erasure_hash_key");
     var thrown = refusal();

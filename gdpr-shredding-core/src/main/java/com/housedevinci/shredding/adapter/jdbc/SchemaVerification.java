@@ -25,9 +25,10 @@ import java.util.Set;
  * carries the guards this module's controls rest on, and whether the role that is about to write to
  * it is privileged enough to remove them.
  *
- * <p>Design §4 of {@code no-ddl-at-runtime-design.md}, version 2.1. One connection, catalogue reads
- * only, no DDL and no writes of any kind. Every leg runs before anything is thrown, so a partial
- * schema is reported in one message rather than one object per restart.
+ * <p>Design §4 of {@code no-ddl-at-runtime-design.md}, version 2.2. One connection, one read-only
+ * REPEATABLE READ transaction, catalogue reads only, no DDL and no writes of any kind. Every leg
+ * runs before anything is thrown, so a partial schema is reported in one message rather than one
+ * object per restart.
  *
  * <p>Two rules run through all of it. <b>Unverifiable is not clean</b>: any {@link SQLException}
  * from verification itself is {@code SHRED-SCHEMA-005}, never a pass and never a warning - {@code
@@ -40,16 +41,15 @@ final class SchemaVerification {
   private SchemaVerification() {}
 
   /**
-   * @param allowPrivilegedRuntimeRole when true, the {@code 004} legs become the verdict's {@link
-   *     Verdict#privilegeLegs()} for the caller to warn about, instead of a refusal. {@code 007} is
-   *     never downgraded.
-   */
-  /**
    * Verifies in <b>one read-only transaction of its own</b> (C-13-4). Without this the eleven
    * catalogue reads take eleven snapshots, so "schema verified" is a claim about no single instant
    * of the database, and nothing on the server side refuses a write from a connection whose whole
    * contract is "catalogue reads only" - the rule would be enforced by review alone. The connection
    * is rolled back and all three settings restored whatever happens.
+   *
+   * @param allowPrivilegedRuntimeRole when true, the {@code 004} legs become the verdict's {@link
+   *     SchemaVerdict#privilegeLegs()} for the caller to warn about, instead of a refusal. {@code
+   *     007} is never downgraded.
    */
   static SchemaVerdict verify(Connection connection, boolean allowPrivilegedRuntimeRole) {
     boolean previousAutoCommit;
@@ -358,7 +358,12 @@ final class SchemaVerification {
             "SELECT s.relkind, (SELECT count(*) FROM pg_depend d"
                 + "   WHERE d.classid = 'pg_class'::regclass AND d.objid = s.oid"
                 + "     AND d.refclassid = 'pg_class'::regclass AND d.refobjid = t.oid"
-                + "     AND d.refobjsubid = a.attnum AND d.deptype = 'a')"
+                + "     AND d.refobjsubid = a.attnum AND d.deptype = 'a'),"
+                + " (SELECT count(*) FROM pg_attrdef ad"
+                + "   JOIN pg_depend d2 ON d2.classid = 'pg_attrdef'::regclass AND d2.objid = ad.oid"
+                + "     AND d2.refclassid = 'pg_class'::regclass AND d2.refobjid = s.oid"
+                + "     AND d2.deptype = 'n'"
+                + "   WHERE ad.adrelid = t.oid AND ad.adnum = a.attnum)"
                 + " FROM pg_class s, pg_class t, pg_attribute a"
                 + " WHERE s.relnamespace = current_schema()::regnamespace AND s.relname = ?"
                 + "   AND t.oid = ? AND a.attrelid = t.oid AND a.attname = 'seq'")) {
@@ -385,6 +390,14 @@ final class SchemaVerification {
                   + " is not the sequence owned by shredding_erasure.seq (no pg_depend 'a' edge)."
                   + " A hand-made table with no bigserial default takes its first append to"
                   + " discover that.");
+        }
+        if (rs.getLong(3) != 1) {
+          shape.add(
+              "shredding_erasure.seq has no default wired to "
+                  + SchemaExpectations.SEQUENCE
+                  + " (no pg_attrdef row with a pg_depend 'n' edge to the sequence). A dropped"
+                  + " bigserial default, or a default wired to a different sequence, takes the"
+                  + " first append to discover that.");
         }
       }
     }
