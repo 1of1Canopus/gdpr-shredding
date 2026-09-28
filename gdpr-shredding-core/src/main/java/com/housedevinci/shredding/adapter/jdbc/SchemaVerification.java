@@ -44,11 +44,62 @@ final class SchemaVerification {
    *     Verdict#privilegeLegs()} for the caller to warn about, instead of a refusal. {@code 007} is
    *     never downgraded.
    */
+  /**
+   * Verifies in <b>one read-only transaction of its own</b> (C-13-4). Without this the eleven
+   * catalogue reads take eleven snapshots, so "schema verified" is a claim about no single instant
+   * of the database, and nothing on the server side refuses a write from a connection whose whole
+   * contract is "catalogue reads only" - the rule would be enforced by review alone. The connection
+   * is rolled back and all three settings restored whatever happens.
+   */
   static SchemaVerdict verify(Connection connection, boolean allowPrivilegedRuntimeRole) {
+    boolean previousAutoCommit;
+    boolean previousReadOnly;
+    int previousIsolation;
+    try {
+      previousAutoCommit = connection.getAutoCommit();
+      previousReadOnly = connection.isReadOnly();
+      previousIsolation = connection.getTransactionIsolation();
+      // Both before setAutoCommit(false): PostgreSQL refuses either inside an open transaction.
+      connection.setReadOnly(true);
+      connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+      connection.setAutoCommit(false);
+    } catch (SQLException e) {
+      throw unverifiable(e);
+    }
     try {
       return run(connection, allowPrivilegedRuntimeRole);
     } catch (SQLException e) {
       throw unverifiable(e);
+    } finally {
+      restore(connection, previousAutoCommit, previousReadOnly, previousIsolation);
+    }
+  }
+
+  /**
+   * Verifies inside a transaction the caller already opened, changing no connection setting. The
+   * creation path is the only caller: it has just run the bundled script in this very transaction,
+   * under the script's advisory lock, so it is neither read-only nor a fresh snapshot and must not
+   * be made either.
+   */
+  static SchemaVerdict verifyInCallersTransaction(
+      Connection connection, boolean allowPrivilegedRuntimeRole) {
+    try {
+      return run(connection, allowPrivilegedRuntimeRole);
+    } catch (SQLException e) {
+      throw unverifiable(e);
+    }
+  }
+
+  private static void restore(Connection c, boolean autoCommit, boolean readOnly, int isolation) {
+    try {
+      c.rollback();
+      c.setAutoCommit(autoCommit);
+      c.setReadOnly(readOnly);
+      c.setTransactionIsolation(isolation);
+    } catch (SQLException ignored) {
+      // The connection is about to be closed or returned to a pool that discards a broken one. A
+      // failure to put settings back is never a reason to turn a clean verification into a refusal,
+      // or a refusal into something else.
     }
   }
 
@@ -76,6 +127,7 @@ final class SchemaVerification {
     checkGuardFunctions(functions, guards);
     checkTriggers(c, relations, functions, guards);
     checkRulesAndPolicies(c, relations, guards);
+    checkInheritance(c, relations, guards);
 
     List<String> indexWarnings = new ArrayList<>();
     Map<String, Relation> indexes = indexes(c);
@@ -537,13 +589,26 @@ final class SchemaVerification {
       Map<String, Function> functions,
       List<String> guards)
       throws SQLException {
+    // tgqual and tgattr are read for C-13-1. Every other column here is byte-identical before and
+    // after the two rewrites they catch, so without them a guard recreated WHEN (false), or
+    // narrowed to UPDATE OF one column, is present, enabled, pointing at the right function and of
+    // the right type - and never fires once. Both are constants on a script-created schema,
+    // measured: tgqual null and tgattr empty for all seven.
     record Found(
-        String name, String table, String function, int type, String enabled, boolean inSchema) {}
+        String name,
+        String table,
+        String function,
+        int type,
+        String enabled,
+        boolean inSchema,
+        boolean hasWhenClause,
+        String columnList) {}
     var actual = new LinkedHashMap<String, Found>();
     try (PreparedStatement ps =
         c.prepareStatement(
             "SELECT t.tgname, c.relname, p.proname, t.tgtype, t.tgenabled,"
-                + " p.pronamespace = current_schema()::regnamespace"
+                + " p.pronamespace = current_schema()::regnamespace,"
+                + " t.tgqual IS NOT NULL, t.tgattr::text"
                 + " FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid"
                 + " JOIN pg_proc p ON p.oid = t.tgfoid"
                 + " WHERE c.relnamespace = current_schema()::regnamespace"
@@ -551,6 +616,7 @@ final class SchemaVerification {
       ps.setArray(1, c.createArrayOf("text", SchemaExpectations.TABLES.toArray()));
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
+          String attributes = rs.getString(8);
           actual.put(
               rs.getString(1),
               new Found(
@@ -559,7 +625,9 @@ final class SchemaVerification {
                   rs.getString(3),
                   rs.getInt(4),
                   rs.getString(5),
-                  rs.getBoolean(6)));
+                  rs.getBoolean(6),
+                  rs.getBoolean(7),
+                  attributes == null ? "" : attributes.trim()));
         }
       }
     }
@@ -596,6 +664,33 @@ final class SchemaVerification {
                 + want.function()
                 + " in this schema. The function is followed through tgfoid, so a trigger repointed"
                 + " at a same-named no-op elsewhere is caught.");
+      }
+      if (have.hasWhenClause()) {
+        guards.add(
+            "trigger "
+                + want.name()
+                + " on "
+                + want.table()
+                + " carries a WHEN clause (pg_trigger.tgqual is set). The guards this module ships"
+                + " have none, and a WHEN predicate decides whether the trigger body runs at all:"
+                + " WHEN (false) leaves the name, the relation, the function, the tgtype and"
+                + " ENABLE ALWAYS exactly as this check expects, and fires never. It is visible in"
+                + " psql with \\d+ "
+                + want.table()
+                + ". Re-apply schema-postgresql.sql as the owner role.");
+      }
+      if (!have.columnList().isEmpty()) {
+        guards.add(
+            "trigger "
+                + want.name()
+                + " on "
+                + want.table()
+                + " is narrowed to a column list (pg_trigger.tgattr = "
+                + have.columnList()
+                + "), so it fires for an UPDATE of those columns and for no others. The guards this"
+                + " module ships are narrowed to nothing. Neither tgtype nor tgenabled changes when"
+                + " a trigger is narrowed this way, which is why this is its own check. Re-apply"
+                + " schema-postgresql.sql as the owner role.");
       }
       if (!"A".equals(have.enabled())) {
         guards.add(
@@ -645,6 +740,68 @@ final class SchemaVerification {
               + " pg_restore --disable-triggers.";
       default -> "";
     };
+  }
+
+  /**
+   * C-13-2. An inheritance child of one of the four tables carries none of the parent's triggers,
+   * and its rows are returned by every read of the <em>parent</em> name - this module's own {@code
+   * read()} and the chain verifier included - and deletable through the parent name with no guard
+   * anywhere near the statement. Same shape as the rules and the policies: a statement re-targeted
+   * before any guard sees it.
+   *
+   * <p>{@code pg_inherits}, deliberately not {@code pg_class.relhassubclass}: that flag is a hint,
+   * PostgreSQL does not clear it when the last child is dropped, and a refusal an operator cannot
+   * clear by fixing the database is a refusal that teaches people to set the weaker property.
+   *
+   * <p>Both directions. A child of ours is the attack; a table of ours that is itself a child is
+   * the mirror case, costs one more row in the same query, and nothing legitimate produces it.
+   */
+  private static void checkInheritance(
+      Connection c, Map<String, Relation> relations, List<String> guards) throws SQLException {
+    if (relations.isEmpty()) {
+      return;
+    }
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT parent.relname, child.relname,"
+                + " parent.relnamespace = current_schema()::regnamespace"
+                + " FROM pg_inherits i"
+                + " JOIN pg_class parent ON parent.oid = i.inhparent"
+                + " JOIN pg_class child ON child.oid = i.inhrelid"
+                + " WHERE (parent.relnamespace = current_schema()::regnamespace"
+                + "        AND parent.relname = ANY(?))"
+                + "    OR (child.relnamespace = current_schema()::regnamespace"
+                + "        AND child.relname = ANY(?))")) {
+      var names = c.createArrayOf("text", SchemaExpectations.TABLES.toArray());
+      ps.setArray(1, names);
+      ps.setArray(2, names);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          String parent = rs.getString(1);
+          String child = rs.getString(2);
+          if (relations.containsKey(parent)) {
+            guards.add(
+                parent
+                    + " has an inheritance child, "
+                    + child
+                    + ". A child carries none of the parent's triggers, its rows are returned by"
+                    + " every read of "
+                    + parent
+                    + " - this module's own reads and the chain verifier included - and a DELETE"
+                    + " against "
+                    + parent
+                    + " removes them with no guard firing. Drop the child, as the owner.");
+          } else {
+            guards.add(
+                child
+                    + " inherits from "
+                    + parent
+                    + ". This module's tables inherit from nothing; a parent decides what a read of"
+                    + " this relation returns. Drop the inheritance, as the owner.");
+          }
+        }
+      }
+    }
   }
 
   private static void checkRulesAndPolicies(

@@ -236,7 +236,10 @@ public final class JdbcSupport {
                   + " driver's own message is not repeated here because it can quote a statement.",
               ddl);
         }
-        SchemaVerdict verdict = SchemaVerification.verify(c, allowPrivilegedRuntimeRole);
+        // The caller's transaction, which has just run the DDL under the script's advisory lock:
+        // not read-only and not a fresh snapshot, and it must not be made either (C-13-4).
+        SchemaVerdict verdict =
+            SchemaVerification.verifyInCallersTransaction(c, allowPrivilegedRuntimeRole);
         c.commit();
         return verdict;
       } catch (RuntimeException e) {
