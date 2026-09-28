@@ -8,7 +8,6 @@ import com.housedevinci.shredding.domain.ShreddingException;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import java.lang.reflect.InvocationHandler;
-import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
@@ -165,11 +164,11 @@ class CipherProbeNoDdlPr13Test {
   // ---------------------------------------------------------------- C-13-2
 
   /**
-   * C-13-2, MEDIUM. An inheritance child of the erasure log is one {@code CREATE TABLE ... INHERITS}
-   * away and carries none of the parent's triggers. Rows written into the child are returned by
-   * every read of the verified parent relation - the module's own {@code read()} and the chain
-   * verifier included - and a {@code DELETE} against the parent name removes them with no guard
-   * anywhere near it. {@code pg_class.relhassubclass} is one column, exactly like the {@code
+   * C-13-2, MEDIUM. An inheritance child of the erasure log is one {@code CREATE TABLE ...
+   * INHERITS} away and carries none of the parent's triggers. Rows written into the child are
+   * returned by every read of the verified parent relation - the module's own {@code read()} and
+   * the chain verifier included - and a {@code DELETE} against the parent name removes them with no
+   * guard anywhere near it. {@code pg_class.relhassubclass} is one column, exactly like the {@code
    * relhasrules} leg this check already has, and it is not read.
    */
   @Test
