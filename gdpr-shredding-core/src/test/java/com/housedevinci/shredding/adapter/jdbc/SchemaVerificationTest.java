@@ -941,17 +941,29 @@ class SchemaVerificationTest {
   /**
    * PostgreSQL resolves {@code is_superuser}, role membership and a role-level {@code search_path}
    * when the session starts, so a pooled connection opened before {@code ALTER ROLE} still answers
-   * the old values. Every superuser statement here may be one of those, so the pools are emptied
-   * after each of them: the test must measure the database, not Hikari's cache.
+   * the old values. The two role pools are therefore <em>closed and rebuilt</em> after every
+   * superuser statement, not soft-evicted.
+   *
+   * <p>Soft eviction was the first version and it is a race: {@code softEvictConnections()} marks
+   * connections for retirement, and a connection that has already been handed back is closed on the
+   * housekeeper's schedule rather than before the next {@code getConnection()}. On a loaded machine
+   * the next call can still get the old session, {@code current_schema()} answers with the old
+   * {@code search_path}, and T16 sees a clean verification where it expects a refusal. Closing the
+   * pool is synchronous, so the next connection is necessarily a new session. Found by {@code
+   * scripts/verify-reproducible.sh}, which fails on a flaky test on purpose.
    */
   private static void su(String... sql) {
     exec(superuserDs, sql);
-    if (appDs != null) {
-      appDs.getHikariPoolMXBean().softEvictConnections();
+    appDs = rebuild(appDs, APP);
+    ownerDs = rebuild(ownerDs, OWNER);
+  }
+
+  private static HikariDataSource rebuild(HikariDataSource pool, String user) {
+    if (pool == null) {
+      return null;
     }
-    if (ownerDs != null) {
-      ownerDs.getHikariPoolMXBean().softEvictConnections();
-    }
+    pool.close();
+    return pool(user, "pw", POSTGRES.getDatabaseName());
   }
 
   private static void owner(String... sql) {
