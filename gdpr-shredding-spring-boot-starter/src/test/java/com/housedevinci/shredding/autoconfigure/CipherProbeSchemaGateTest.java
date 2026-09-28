@@ -179,6 +179,24 @@ class CipherProbeSchemaGateTest {
   }
 
   @Test
+  void t13b_on_the_shipped_defaults_a_privileged_role_cannot_start_the_application()
+      throws SQLException {
+    // The mutation detector for the default of shredding.jdbc.allow-privileged-runtime-role: with
+    // the documented non-owner role the default makes no difference, because no leg fires. It only
+    // shows up as a role the property would have let through.
+    ownerAppliesSchemaAndGrants();
+
+    String outcome = start(ownerBuilder(PlainApp.class));
+
+    assertThat(outcome).startsWith("REFUSED " + ErrorCodes.RUNTIME_ROLE_PRIVILEGED);
+    assertThat(outcome)
+        .contains("owns table shredding_erasure")
+        .contains("owns guard function shredding_erasure_append_only")
+        .contains("shredding.jdbc.allow-privileged-runtime-role=true")
+        .contains("docs/upgrading-0.2.0.md");
+  }
+
+  @Test
   void t14_creation_mode_creates_verifies_warns_and_is_idempotent_across_two_boots() {
     var first = new CapturingAppender();
     try (var ctx =
@@ -230,6 +248,29 @@ class CipherProbeSchemaGateTest {
     assertThat(outcome)
         .describedAs("a boot-time control a property can move to request time is not one")
         .startsWith("REFUSED " + ErrorCodes.SCHEMA_ABSENT);
+  }
+
+  @Test
+  void t33b_the_gate_is_registered_as_excluded_from_lazy_initialization() throws SQLException {
+    // T33 and T34 show the end-to-end behaviour, and they are worth having - but they do not prove
+    // the filter. Measured: with the filter removed, this bean graph still creates the gate eagerly
+    // under spring.main.lazy-initialization=true, because something else in it forces the gate
+    // before the context finishes refreshing. That is a property of this graph, not a guarantee of
+    // the module: an application with no Spring Data repositories, or with its own adapters, can
+    // have a graph where nothing does. The filter is the guarantee, so the filter is what is
+    // asserted here, directly.
+    ownerAppliesSchemaAndGrants();
+    try (var ctx = builder(PlainApp.class, "spring.main.lazy-initialization=true").run()) {
+      var definition =
+          new org.springframework.beans.factory.support.RootBeanDefinition(
+              ShreddingSchemaGate.class);
+      assertThat(
+              ctx.getBeansOfType(org.springframework.boot.LazyInitializationExcludeFilter.class)
+                  .values())
+          .anyMatch(
+              filter ->
+                  filter.isExcluded("shreddingSchemaGate", definition, ShreddingSchemaGate.class));
+    }
   }
 
   @Test
