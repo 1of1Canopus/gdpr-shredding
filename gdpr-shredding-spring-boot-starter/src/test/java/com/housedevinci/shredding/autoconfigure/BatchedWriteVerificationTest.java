@@ -82,6 +82,8 @@ class BatchedWriteVerificationTest {
   @DynamicPropertySource
   static void secrets(DynamicPropertyRegistry registry) {
     registry.add("shredding.master-key", () -> b64("starter-integration-master-key32"));
+    registry.add("shredding.jdbc.initialize-schema", () -> "true");
+    registry.add("shredding.jdbc.allow-privileged-runtime-role", () -> "true");
     registry.add(
         "shredding.erasure-log.hmac-secret", () -> b64("starter-integration-chain-secret"));
     registry.add(

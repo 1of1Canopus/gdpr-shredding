@@ -165,6 +165,8 @@ class CipherProbeTenthPassTest {
             .web(WebApplicationType.NONE)
             .properties(
                 "shredding.master-key=" + b64("tenthpass-master-key-32-bytes!!!"),
+                "shredding.jdbc.initialize-schema=true",
+                "shredding.jdbc.allow-privileged-runtime-role=true",
                 "shredding.erasure-log.hmac-secret=" + b64("tenthpass-chain-secret-32-bytes!"),
                 "shredding.blind-index.hmac-secret=" + b64("tenthpass-index-secret-32-bytes!"),
                 "spring.datasource.url=" + POSTGRES.getJdbcUrl(),
@@ -425,6 +427,8 @@ class CipherProbeTenthPassTest {
         .web(WebApplicationType.NONE)
         .properties(
             "shredding.master-key=" + b64("tenthpass-master-key-32-bytes!!!"),
+            "shredding.jdbc.initialize-schema=true",
+            "shredding.jdbc.allow-privileged-runtime-role=true",
             "shredding.erasure-log.hmac-secret=" + b64("tenthpass-chain-secret-32-bytes!"),
             "shredding.blind-index.hmac-secret=" + b64("tenthpass-index-secret-32-bytes!"),
             "spring.datasource.url=" + POSTGRES.getJdbcUrl(),

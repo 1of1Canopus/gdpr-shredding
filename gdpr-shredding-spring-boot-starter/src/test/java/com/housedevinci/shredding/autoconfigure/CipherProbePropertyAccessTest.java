@@ -73,6 +73,8 @@ class CipherProbePropertyAccessTest {
             .web(WebApplicationType.NONE)
             .properties(
                 "shredding.master-key=" + b64("propaccess-master-key-32-bytes!!"),
+                "shredding.jdbc.initialize-schema=true",
+                "shredding.jdbc.allow-privileged-runtime-role=true",
                 "shredding.erasure-log.hmac-secret=" + b64("propaccess-chain-secret-32bytes!"),
                 "shredding.blind-index.hmac-secret=" + b64("propaccess-index-secret-32bytes!"),
                 "spring.jpa.hibernate.ddl-auto=create-drop",

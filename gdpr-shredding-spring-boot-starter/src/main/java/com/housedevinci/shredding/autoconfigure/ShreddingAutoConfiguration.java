@@ -2,7 +2,6 @@ package com.housedevinci.shredding.autoconfigure;
 
 import com.housedevinci.shredding.adapter.jdbc.JdbcErasureStore;
 import com.housedevinci.shredding.adapter.jdbc.JdbcKeyProvider;
-import com.housedevinci.shredding.adapter.jdbc.JdbcSupport;
 import com.housedevinci.shredding.application.DataKeyCache;
 import com.housedevinci.shredding.application.ErasureChainVerifier;
 import com.housedevinci.shredding.application.ErasureService;
@@ -32,6 +31,7 @@ import org.hibernate.jpa.boot.spi.JpaSettings;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.LazyInitializationExcludeFilter;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -116,12 +116,34 @@ public class ShreddingAutoConfiguration {
     return new DataKeyCache(cache.getTtl(), cache.getMaxSize(), clock);
   }
 
+  /**
+   * The gate, and the only bean in this starter that may run DDL. Unconditional and eager on
+   * purpose: see {@link ShreddingSchemaGate}. Every other bean that reaches the database takes its
+   * {@code DataSource} from here rather than by type.
+   */
+  @Bean
+  public ShreddingSchemaGate shreddingSchemaGate(
+      DataSource dataSource, ShreddingProperties properties) {
+    return new ShreddingSchemaGate(dataSource, properties);
+  }
+
+  /**
+   * D-8(a). {@code spring.main.lazy-initialization=true} otherwise defers the gate's constructor -
+   * and therefore the whole schema verification - to whatever first asks for it, which on a quiet
+   * application is the first erasure request. A boot-time control that a property can move to
+   * request time is not a boot-time control. {@code static}, so registering it does not force the
+   * declaring configuration class to be instantiated early.
+   */
+  @Bean
+  public static LazyInitializationExcludeFilter shreddingSchemaGateEager() {
+    return LazyInitializationExcludeFilter.forBeanTypes(ShreddingSchemaGate.class);
+  }
+
   @Bean
   @ConditionalOnMissingBean
   public KeyProvider shreddingKeyProvider(
-      DataSource dataSource, MasterKey masterKey, RandomSource random, Clock clock) {
-    JdbcSupport.initializeSchema(dataSource);
-    return new JdbcKeyProvider(dataSource, masterKey, random, clock);
+      ShreddingSchemaGate gate, MasterKey masterKey, RandomSource random, Clock clock) {
+    return new JdbcKeyProvider(gate.dataSource(), gate.schema(), masterKey, random, clock);
   }
 
   @Bean
@@ -164,16 +186,16 @@ public class ShreddingAutoConfiguration {
   @Bean
   @ConditionalOnMissingBean
   public JdbcErasureStore shreddingErasureStore(
-      DataSource dataSource,
+      ShreddingSchemaGate gate,
       ErasureChain chain,
       ShreddedModel model,
       EntityManagerFactory entityManagerFactory) {
-    JdbcSupport.initializeSchema(dataSource);
     // Design addendum 4, §4.5: the store's own statements are never the only thing that checks
     // them. The residual is rendered by Hibernate from the mapping, on the erasure's own
     // connection - see HibernateBlindIndexResidual for the contract and its two hazards.
     return new JdbcErasureStore(
-        dataSource,
+        gate.dataSource(),
+        gate.schema(),
         chain,
         model.blindIndexColumns(),
         new HibernateBlindIndexResidual(
@@ -312,11 +334,11 @@ public class ShreddingAutoConfiguration {
       ShreddingProperties properties,
       FieldCipher cipher,
       ShreddedModel model,
-      DataSource dataSource,
+      ShreddingSchemaGate gate,
       EntityManagerFactory entityManagerFactory,
       ShreddingEventListener shreddingEventListener) {
     return new ShreddingStartupCheck(
-        properties, cipher, model, dataSource, entityManagerFactory, shreddingEventListener);
+        properties, cipher, model, gate, entityManagerFactory, shreddingEventListener);
   }
 
   static byte[] requiredSecret(String property, String value) {

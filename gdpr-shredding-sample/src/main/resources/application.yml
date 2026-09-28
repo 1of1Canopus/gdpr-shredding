@@ -14,6 +14,27 @@ spring:
     open-in-view: false
 
 shredding:
+  jdbc:
+    # DEMO POSTURE, and both of these are deliberately wrong for production. They are set here,
+    # explicitly rather than by omission, so that reading this file tells you which controls are
+    # off. The sample runs one PostgreSQL role against one throwaway database; it creates its own
+    # schema and therefore owns its own guards, which means the append-only erasure log (control 8)
+    # and the erasure tombstone (control 11) are not enforced against the sample itself. The
+    # application WARNs about both at every startup - that is the point of the WARN.
+    #
+    # For production, delete both lines (false is the default), apply
+    # com/housedevinci/shredding/schema-postgresql.sql once with an owner role, and give the
+    # application a role holding only the grants in SECURITY-NOTES.md "Database roles":
+    #
+    #   initialize-schema: false
+    #   allow-privileged-runtime-role: false
+    #
+    # Note that spring.jpa.hibernate.ddl-auto=update above is incompatible with that posture: it
+    # needs CREATE on the schema, which the hardened check refuses. Use ddl-auto=none or validate
+    # and apply your own schema from a migration step with its own credential. ddl-auto never
+    # creates this module's tables in any case - they are plain JDBC, not JPA entities.
+    initialize-schema: true
+    allow-privileged-runtime-role: true
   # Environment only. There is no default and none is generated; a sample value is refused.
   #   export SHREDDING_MASTER_KEY=$(head -c 32 /dev/urandom | base64)
   master-key: ${SHREDDING_MASTER_KEY}

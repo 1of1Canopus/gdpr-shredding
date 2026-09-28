@@ -91,7 +91,7 @@ CREATE INDEX IF NOT EXISTS shredding_erasure_subject
 -- way the keyed-from-birth check above does, so a second schema is not silently left unguarded.
 CREATE OR REPLACE FUNCTION shredding_erasure_append_only() RETURNS trigger AS $$
 BEGIN
-  RAISE EXCEPTION 'shredding_erasure is append-only (attempted %)', TG_OP;
+  RAISE EXCEPTION '% is append-only (attempted %)', TG_TABLE_NAME, TG_OP;
 END;
 $$ LANGUAGE plpgsql;
 DO $$ BEGIN
@@ -182,7 +182,7 @@ END $$;
 
 CREATE OR REPLACE FUNCTION shredding_erasure_anchor_append_only() RETURNS trigger AS $$
 BEGIN
-  RAISE EXCEPTION 'shredding_erasure_anchor is append-only (attempted %)', TG_OP;
+  RAISE EXCEPTION '% is append-only (attempted %)', TG_TABLE_NAME, TG_OP;
 END;
 $$ LANGUAGE plpgsql;
 DO $$ BEGIN
@@ -205,6 +205,27 @@ DO $$ BEGIN
       FOR EACH STATEMENT EXECUTE FUNCTION shredding_erasure_anchor_append_only();
   END IF;
 END $$;
+
+-- C-12-1, design section 4.4: the seven guards are set to ENABLE ALWAYS, unconditionally and
+-- idempotently, every time this script runs. Two reasons, and neither is cosmetic.
+--   1. A trigger created by CREATE TRIGGER is `O` (origin): it does not fire for a replication
+--      apply worker, for a superuser session in `session_replication_role = replica`, or under
+--      `pg_restore --disable-triggers`. `A` (always) fires in all three. It does NOT defend
+--      against the table's owner, who needs none of that: ALTER TABLE ... DISABLE TRIGGER is
+--      already theirs. Say which actor, not "it protects the log".
+--   2. Before this, the script had no way to repair a trigger someone had disabled - the
+--      CREATE TRIGGER blocks above are all guarded by "IF NOT EXISTS", so a disabled trigger
+--      stayed disabled through every re-apply. Re-applying the script is now the documented and
+--      the working remedy for tgenabled = 'D', 'R' or 'O' (docs/upgrading-0.2.0.md step 3).
+-- Startup verification refuses anything other than 'A', so these seven statements are what makes
+-- that refusal payable rather than a wall an operator cannot climb.
+ALTER TABLE shredding_erasure        ENABLE ALWAYS TRIGGER shredding_erasure_append_only;
+ALTER TABLE shredding_erasure        ENABLE ALWAYS TRIGGER shredding_erasure_no_truncate;
+ALTER TABLE shredding_erased_subject ENABLE ALWAYS TRIGGER shredding_erased_subject_append_only;
+ALTER TABLE shredding_erased_subject ENABLE ALWAYS TRIGGER shredding_erased_subject_no_truncate;
+ALTER TABLE shredding_erasure_anchor ENABLE ALWAYS TRIGGER shredding_erasure_anchor_monotonic;
+ALTER TABLE shredding_erasure_anchor ENABLE ALWAYS TRIGGER shredding_erasure_anchor_no_delete;
+ALTER TABLE shredding_erasure_anchor ENABLE ALWAYS TRIGGER shredding_erasure_anchor_no_truncate;
 
 -- The schema step never seeds an anchor row from an existing, non-empty trail: deriving `keyed`
 -- from row data is exactly the guess the anchor exists to make unnecessary. A trail with rows and

@@ -82,6 +82,8 @@ class CipherProbeCompositeIdTest {
             .web(WebApplicationType.NONE)
             .properties(
                 "shredding.master-key=" + b64("compositeid-master-key-32-bytes!"),
+                "shredding.jdbc.initialize-schema=true",
+                "shredding.jdbc.allow-privileged-runtime-role=true",
                 "shredding.erasure-log.hmac-secret=" + b64("compositeid-chain-secret-32byte!"),
                 "shredding.blind-index.hmac-secret=" + b64("compositeid-index-secret-32byte!"),
                 "spring.jpa.hibernate.ddl-auto=create-drop",
