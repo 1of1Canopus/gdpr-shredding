@@ -209,6 +209,18 @@ There is no fail-open property anywhere in this module.
 | `SHRED-READ-UNVERIFIED` | a decrypt happened inside an open read region but no entity load ever installed it before the region closed - a projection, or residue from a region an error unwound past - see "How the read path verifies" above |
 | `SHRED-SUBJECT-UNRESOLVED` | a row carries at least one shredded value and its data subject could not be resolved |
 | `SHRED-EMF-UNINSTRUMENTED` | more than one `EntityManagerFactory` bean exists in the application context; the read bracket cannot tell which repository is bound to which, so every repository is refused rather than bracketed on the chance it is the wrong one |
+| `SHRED-SCHEMA-001` | none of this module's tables exist in the resolved schema. The application never creates them with its own credentials; apply `schema-postgresql.sql` with a privileged role |
+| `SHRED-SCHEMA-002` | the objects exist but are wrong in shape: a missing table, column, constraint, or the `bigserial` sequence |
+| `SHRED-SCHEMA-003` | a guard is not load-bearing: a trigger missing, extra, disabled, not `ENABLE ALWAYS` or pointing at the wrong function; a guard-function body that differs from the bundled script; or a rule, an RLS flag or a policy. Control 8 and control 11 do not hold |
+| `SHRED-SCHEMA-004` | the runtime database role is privileged over this module's objects and could remove its own guards. `shredding.jdbc.allow-privileged-runtime-role=true` turns this into a WARN at every startup |
+| `SHRED-SCHEMA-005` | verification could not complete - a refused catalogue read, a lost connection, an unreadable bundled resource, or a migration in flight. Never a pass and never a warning |
+| `SHRED-SCHEMA-006` | `shredding.jdbc.initialize-schema=true` and the DDL failed. Carries the SQLState only |
+| `SHRED-SCHEMA-007` | a privilege the adapters need is missing. Never downgraded by `allow-privileged-runtime-role` |
+
+The `SHRED-SCHEMA-*` codes are startup refusals: the application context fails to build, so nothing
+serves traffic against a schema this module cannot vouch for. Each message lists every problem it
+found, names the schema, the role and the property that changes the outcome, and points at
+[upgrading-0.2.0.md](upgrading-0.2.0.md).
 
 The per-key encryption limit (`shredding.crypto.max-encryptions-per-key`) has no error code: reaching
 it rotates to the next key version rather than refusing, so there is nothing a caller ever sees.

@@ -6,7 +6,78 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+- **BREAKING. The application no longer creates its own database schema, and refuses to start
+  against a schema whose append-only guards it could remove itself.** Until 0.1.1 the starter ran
+  the bundled `schema-postgresql.sql` with the application's own database credentials on every
+  boot, unconditionally. Running that DDL makes the application's role the owner of the erasure
+  tables and the guard functions, and an owner can `ALTER TABLE ... DISABLE TRIGGER`, or
+  `CREATE OR REPLACE` a guard function with a body that allows everything, and then delete from
+  the erasure log. The documentation prescribed a non-owner role; the code could only start as the
+  owner. The append-only erasure log (control 8) and the erasure tombstone (control 11) therefore
+  held in no configuration an operator could actually run.
+
+  From this release the application issues no DDL by default and verifies the schema at startup
+  instead: the four tables as permanent ordinary tables with exactly the expected columns and
+  constraints, the `bigserial` sequence and its dependency edge, the three guard functions with the
+  bodies from the bundled script compared text for text, exactly the seven guard triggers each
+  pointing through `tgfoid` at the right function and each at `ENABLE ALWAYS`, no rewrite rule, no
+  row-level-security flag, no policy, and a runtime role that owns none of the nine objects and
+  holds no privilege beyond the documented grant set. A catalogue read that cannot be performed is
+  a refusal, not a warning. **An installation that upgrades and changes nothing stops booting.**
+  Step-by-step upgrade: [docs/upgrading-0.2.0.md](docs/upgrading-0.2.0.md).
+- **Every statement this module issues is now qualified to the schema verified at boot.** An
+  unqualified name resolves through `search_path` at parse time, which any session can change with
+  no privilege at all. Three shapes were reproduced in which verification answered clean, the INFO
+  line said "schema verified", and the appends, deletes and truncates went somewhere else: a second
+  schema the runtime role owns, placed first on the path; a `pg_temp` copy created by the runtime
+  role itself while it holds `TEMPORARY`; and a plain `SET search_path` issued between two adapter
+  calls on a pooled connection. Qualification closes all three in this module's own SQL. The
+  application's own tables, reached through the entity mapping by the blind-index clear and the
+  Hibernate-rendered read-back, are deliberately left where the mapping puts them.
+- `schema-postgresql.sql` sets all seven guard triggers to `ENABLE ALWAYS`, unconditionally and
+  idempotently, every time it runs. `CREATE TRIGGER` leaves a trigger at `O`, which does not fire
+  for a replication apply worker, for a superuser session in `session_replication_role = replica`,
+  or under `pg_restore --disable-triggers`. It also gives the script, for the first time, a way to
+  repair a trigger someone disabled: the `CREATE TRIGGER` blocks are all guarded by "if not
+  exists", so a disabled trigger used to stay disabled through every re-apply. `ENABLE ALWAYS` does
+  **not** defend against the table's owner, who does not need replica mode.
+- The append-only guard functions now name the table they refused with `TG_TABLE_NAME`. A refused
+  write on `shredding_erased_subject` reported `shredding_erasure is append-only`, which during an
+  incident points the responder at the wrong table.
+- Two new properties, both secure by default, each WARNing at **every** startup when set to the
+  weaker value and naming the legs that fired: `shredding.jdbc.initialize-schema` (default `false`)
+  and `shredding.jdbc.allow-privileged-runtime-role` (default `false`). Neither ever suppresses
+  `SHRED-SCHEMA-007`, a privilege the adapters actually need: an application that cannot write the
+  erasure log is broken, not differently configured.
+- `SECURITY-NOTES.md` gains a "Database roles" section with the complete, copy-pasteable grant
+  block, the `REVOKE`s that `GRANT` alone does not cover, and a statement of what startup
+  verification does and does not prove. The previous prescription - "a role that has INSERT and
+  SELECT on `shredding_erasure`" - was incomplete in both directions: it omitted `USAGE` on the
+  `bigserial` sequence behind `shredding_erasure.seq` and the column-level `UPDATE` grants the row
+  locks need, so a role granted exactly what was documented failed every erasure write and every
+  key mint; and it granted table-wide `UPDATE` where one column is enough.
+- The sample's `application.yml` sets both new properties to the weaker value **explicitly**, with
+  a comment saying so, rather than inheriting it by omission: reading that file now tells you which
+  controls are off in the demo.
+
+### Removed
+- **BREAKING.** `JdbcSupport.runtimeRoleOwnsErasureTable`, public since 0.1.0. Its query had no
+  `schemaname` predicate, so it answered about whichever copy of `shredding_erasure` `pg_tables`
+  listed first, and it tested ownership of one table when owning one guard function is enough to
+  replace every guard. Startup verification replaces it and refuses rather than warning.
+- **BREAKING.** `JdbcKeyProvider` and `JdbcErasureStore` take a `VerifiedSchema`, which only
+  `JdbcSupport.verifySchema` produces. There is no constructor left that takes a bare `DataSource`:
+  that would be the one path back to relation names a `search_path` decides.
+- The startup warning about the runtime role owning `shredding_erasure`, and the grant list inside
+  it. The list was wrong, and an operator who followed the log line rather than the document landed
+  in a role that could not start the application.
+
+### Added
+- `JdbcSupport.verifySchema(DataSource)` and `verifySchema(DataSource, boolean)`, public core API,
+  so a caller that does not use Spring makes the same assertion at its own startup.
+- Error codes `SHRED-SCHEMA-001` to `SHRED-SCHEMA-007`, documented in
+  [docs/upgrading-0.2.0.md](docs/upgrading-0.2.0.md) with the upgrade step each one points at.
 
 ## [0.1.1] - 2026-09-22
 

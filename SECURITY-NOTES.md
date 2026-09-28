@@ -741,11 +741,129 @@ support ticket or a PDF the application itself produced. Those are the applicati
 
 - **Back up the keys table separately from the data**, or use a KMS. A single backup that holds
   both is a backup that undoes every erasure it contains.
-- **Run the application with a role that has INSERT and SELECT on `shredding_erasure`**, not the
-  owner. The append-only triggers stop the runtime role; only the owner can disable them.
+- **Run the application with a role that is not the schema owner, and do not let it run DDL.** The
+  append-only triggers stop the runtime role from deleting or truncating the log tables; only the
+  owner can disable a trigger. From 0.2.0 the application verifies this at startup and refuses to
+  start if it does not hold. See "Database roles" below for the exact grants that role needs, and
+  why leaving one out is not a smaller version of least privilege, it is a runtime failure.
 - **Never store `shredding.erasure-log.hmac-secret` beside the datasource password.** If one
   compromise yields both, the chain key is not a second factor, it is decoration. Module B's rule.
 - **Losing the master key erases everyone.** The startup health check reports whether it can unwrap
   a known key; wire it into your readiness probe.
 - The erasure-log HMAC secret is **not** a data key and is **never** destroyed by an erasure.
   Destroying it would break the very record that proves the erasure happened.
+
+### Database roles
+
+The schema step (`schema-postgresql.sql`) must be applied **once, by an owner role**, or another
+role that can create tables, functions and triggers. The application itself runs as a separate,
+non-owner role, so that the append-only triggers on the log tables are load-bearing: an owner can
+`ALTER TABLE ... DISABLE TRIGGER` or `CREATE OR REPLACE` a guard function into a no-op, and a
+non-owner can do neither.
+
+Until 0.1.1 that was advice the code made impossible to follow - the starter ran the schema DDL
+with the application's own credentials on every boot, so the only role that could start it was the
+owner. From 0.2.0 the application issues no DDL by default (`shredding.jdbc.initialize-schema` is
+`false`), verifies the schema at startup instead, and refuses to start when the schema is missing,
+wrong, unguarded, or when its own role could remove the guards. The upgrade steps for an existing
+installation are in [docs/upgrading-0.2.0.md](docs/upgrading-0.2.0.md).
+
+Grant exactly this, no more, with the module's schema on the `search_path` of whoever runs it (or
+the names qualified):
+
+```sql
+GRANT USAGE                  ON SCHEMA <schema>                     TO shredding_app;
+GRANT SELECT, INSERT, DELETE ON shredding_data_key                  TO shredding_app;
+GRANT UPDATE (encryption_count) ON shredding_data_key               TO shredding_app;
+GRANT SELECT, INSERT         ON shredding_erased_subject            TO shredding_app;
+GRANT UPDATE (erased_at)     ON shredding_erased_subject            TO shredding_app;
+GRANT SELECT, INSERT         ON shredding_erasure                   TO shredding_app;
+GRANT SELECT, INSERT, UPDATE ON shredding_erasure_anchor            TO shredding_app;
+GRANT USAGE                  ON SEQUENCE shredding_erasure_seq_seq  TO shredding_app;
+```
+
+And take these away, which `GRANT` alone does not do:
+
+```sql
+REVOKE CREATE    ON SCHEMA   <schema> FROM shredding_app;
+REVOKE CREATE    ON SCHEMA   public   FROM PUBLIC;   -- PostgreSQL 14 and earlier
+REVOKE TEMPORARY ON DATABASE <db>     FROM shredding_app, PUBLIC;
+REVOKE CREATE    ON DATABASE <db>     FROM shredding_app, PUBLIC;
+```
+
+Four of these are easy to miss, and each of them fails in a different way.
+
+- **`shredding_erasure_seq_seq`.** `shredding_erasure.seq` is a `bigserial`; PostgreSQL names its
+  backing sequence `<table>_<column>_seq`, so it is not covered by a table-level `GRANT ... ON
+  shredding_erasure` at all. Without `USAGE` on it, every erasure write fails at insert time with
+  `permission denied for sequence shredding_erasure_seq_seq` - the erasure never reaches the log,
+  and the caller sees a hard failure rather than a silently missing row. `SELECT` on the sequence
+  is deliberately **not** granted: no statement this module issues reads it.
+- **`UPDATE (erased_at)` on `shredding_erased_subject`.** The application never issues an `UPDATE`
+  against this table; the grant exists because minting a key takes `SELECT ... FOR SHARE` on it to
+  serialise against a concurrent erasure, and PostgreSQL checks every row-locking clause (`FOR
+  UPDATE`, `FOR SHARE`, `FOR NO KEY UPDATE`, `FOR KEY SHARE`) against the `UPDATE` privilege, not
+  `SELECT`. A **column** grant is enough, and a table-wide one would let anything that took the
+  role over rewrite a tombstone's tenant or subject.
+- **`UPDATE (encryption_count)` on `shredding_data_key`.** The same shape and the same reason to
+  keep it to one column: table-wide `UPDATE` would allow resetting the counter that drives
+  `shredding.crypto.max-encryptions-per-key`, reopening a non-active key row, overwriting wrapped
+  key material in place, or backdating a row - none of which the module ever does.
+- **`TEMPORARY` and `CREATE` on the database.** These are not housekeeping. `TEMPORARY` lets the
+  runtime role create `pg_temp.shredding_erasure` and, with unqualified SQL, divert its own appends
+  into it; `CREATE` on a database is `CREATE SCHEMA`, which is the same attack with a permanent
+  schema. From 0.2.0 every statement this module issues is qualified to the schema verified at
+  boot, so neither buys a diverted write any more - but the privileges are refused at startup as
+  well, because a role that holds them is one `SET search_path` away from shadowing anything else
+  in your estate. **And the database must not be owned by the application role:** an owner
+  re-`GRANT`s itself either privilege in one statement, so the `REVOKE` above does not bind it.
+  Check with `SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = current_database();`.
+
+The runtime role is never granted `DELETE` or `TRUNCATE` on `shredding_erasure`,
+`shredding_erased_subject` or `shredding_erasure_anchor`, nor `TRIGGER` or `REFERENCES` on any of
+the four tables. The append-only triggers refuse those statements from any role that holds the
+privilege, but `TRIGGER` in particular is not covered by them at all: a non-owner holding `TRIGGER`
+can add a trigger of its own to the erasure log.
+
+A privilege can be held **directly, through a group role, through a predefined role such as
+`pg_write_all_data`, or through `PUBLIC`**. An empty grep of your grant scripts therefore proves
+nothing; check with `has_table_privilege('<role>', '<table>', '<privilege>')`, which is what the
+startup verification uses.
+
+### What startup verification does and does not prove
+
+From 0.2.0, `ShreddingSchemaGate` refuses to start the application unless, in the schema
+`current_schema()` resolves to: the four tables exist as permanent ordinary tables with exactly the
+columns and constraints the bundled script creates; the erasure log's `bigserial` sequence is
+present and owned by its column; the three guard functions exist with the **bodies from the bundled
+script**, compared text for text, because `CREATE OR REPLACE FUNCTION` keeps the oid and every
+identity check passes after a body swap; exactly the seven guard triggers exist, each pointing
+through `tgfoid` at the right function and each at `ENABLE ALWAYS`; there is no rewrite rule, no
+row-level-security flag and no policy on any of the four tables; and the runtime role is not
+privileged in any of the senses above. A catalogue read this module cannot perform is a refusal,
+not a warning: unverifiable is not clean.
+
+Three things it does not prove, and they are named here rather than implied.
+
+1. **It is a point in time.** An owner who disables a trigger or replaces a guard body at 03:00 is
+   not noticed until the next restart. Periodic re-verification is future work; until then, audit
+   `pg_proc` and `pg_trigger` from the owner's side and monitor DDL in the database audit log. The
+   `REVOKE TEMPORARY`/`REVOKE CREATE` above are also grant-side, and a role that owns the database
+   can restore them to itself after boot - which is why the verification refuses that role.
+2. **`ENABLE ALWAYS` defends against a narrower actor than it looks.** It makes the guards fire for
+   a replication apply worker, for a superuser session in `session_replication_role = replica`, and
+   under `pg_restore --disable-triggers`. It does **not** defend against the table's owner, who
+   needs none of those: `ALTER TABLE ... DISABLE TRIGGER` is already theirs.
+3. **The expectation lives in the jar.** Guard bodies are compared against the bundled
+   `schema-postgresql.sql`, so an attacker who can rewrite the deployed jar controls the
+   expectation as well as the database. That, not "a guard body was rewritten", is what remains
+   outside detection.
+
+### What qualification covers, and what it does not
+
+Every statement this module issues names its relation as `"<verified schema>"."<table>"`, so none
+of them depends on `search_path` at parse time. The application's **own** tables are a different
+matter: the blind-index clear and the Hibernate-rendered read-back address the relations the entity
+mapping names, and this module neither verifies nor qualifies those on your behalf. If your own
+schema must not be shadowable either, pin `hibernate.default_schema` or map `@Table(schema = ...)`.
+
