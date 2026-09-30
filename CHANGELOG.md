@@ -6,7 +6,15 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
-Nothing yet.
+### Security
+- Pinned `tools.jackson.core:jackson-databind` to 3.1.6 by overriding the `jackson-bom.version`
+  property Spring Boot 4.1.1 manages (3.1.5). GHSA-q4xh-88c3-wmh7 (HIGH, CVSS 7.5, denial of
+  service) affects `jackson-databind` >= 3.0.0 < 3.1.6, fixed upstream in 3.1.6. Only
+  `gdpr-shredding-sample` pulls `jackson-databind` at all, transitively through
+  `spring-boot-starter-webmvc` -> `spring-boot-starter-jackson` -> `spring-boot-jackson`; the
+  core and starter modules have no dependency path to it. Spring Boot 4.1.1 is the latest
+  4.1.x patch and does not yet ship the fix, so the property is overridden directly rather than
+  waiting on a BOM bump.
 
 ## [0.1.1] - 2026-09-22
 
