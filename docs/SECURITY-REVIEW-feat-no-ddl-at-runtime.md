@@ -470,3 +470,192 @@ C-13-7 and C-13-8 are corrections inside code the builder already wrote; both ar
 needs a new mechanism, so neither is a design stop and both go to the fix pass. This is the second
 and final review pass on this PR: the fix pass closes both, the red probe turns green, and the
 result goes to the coordinator, not back to this review.
+
+## Addendum, B-38-10 class (2026-10-02)
+
+Targeted probe, not a third pass. One question, asked because the same class was found HIGH on
+another module's no-DDL design page: **does `SchemaVerification` answer "schema verified" to a
+runtime role that shadows the catalogue functions it calls?** It does.
+
+Pass 2 recorded, under "Attacks attempted that produced no finding", item 4: a decoy earlier on the
+`search_path` cannot divert the module's own statements, because every one of them is built from
+`VerifiedSchema.qualify`. That is true and it still is. It is a statement about **relation
+references**. The probe below is about **function names**, which were not in scope on either pass.
+
+### The threat model, with nothing added
+
+The hardened deployment of SECURITY-NOTES.md "Database roles": the application connects as a
+runtime role holding only the grant block, and that role owns its own business schema - the normal
+shape, since an application owns the tables its own entities live in. Two PostgreSQL facts do the
+rest.
+
+1. A role may always set its own default `search_path` (`ALTER ROLE <itself> SET search_path = ...`).
+   There is no privilege to revoke and no server setting that refuses it. It is carried by any
+   connection from any client, so it is not something the application's configuration can pin away.
+2. `pg_catalog` is searched **first only when it is not named**. Name it explicitly and it is
+   searched in the position it is named, so `search_path = public, app, pg_catalog` puts a
+   role-owned schema ahead of the system catalogue for **every unqualified function and relation
+   name** that server-side SQL resolves.
+
+`SchemaVerification` writes all of them unqualified: `pg_has_role`, `has_table_privilege`,
+`has_column_privilege`, `has_schema_privilege`, `has_database_privilege`,
+`has_sequence_privilege`, `current_setting`, `format_type`, `pg_get_constraintdef`,
+`pg_get_function_result`, `count`, `current_schema`, and the eleven catalogue relations. So does the
+bundled script (`to_regclass`, `quote_ident`, `pg_advisory_xact_lock`, `pg_attribute`, `pg_trigger`)
+and so does the erasure store's blind-index read-back (`count`, `now`). Nothing in the verification
+transaction pins the `search_path`. The verdict is therefore an answer supplied by the role being
+verified.
+
+### C-13-9 (HIGH) - the verified role answers its own privilege legs
+
+`CipherProbeNoDdlPr13cTest`, PostgreSQL 16.14 on the digest the module's tests already pin.
+Fixture: role `probe_shadow_app`, `NOSUPERUSER NOCREATEDB NOCREATEROLE`, no `TEMPORARY` and no
+`CREATE` on the database, owner of its own schema `app`; it is given `CREATE` on `public` for the
+length of one script run, applies the bundled script, and the grant is taken straight back. It now
+owns the four tables, the two indexes, the sequence and the three guard functions and holds every
+privilege an owner holds - the exact state `SHRED-SCHEMA-004` exists to refuse. Eight SQL functions
+in `app`, then `ALTER ROLE probe_shadow_app SET search_path = public, app, pg_catalog`, then a new
+pool:
+
+| function shadowed in `app` | returns | leg it silences |
+|---|---|---|
+| `pg_has_role(name, oid, text)` | `false` | owns 4 tables, 2 indexes, 1 sequence, 3 guard functions, the database |
+| `current_setting(text)` | `off` for `is_superuser` | "is a superuser" |
+| `has_schema_privilege(name, text, text)` | `$3 = 'USAGE'` | "holds CREATE on schema public" |
+| `has_database_privilege(name, text, text)` | `false` | TEMPORARY, CREATE on the database |
+| `has_sequence_privilege(name, oid, text)` | `$3 = 'USAGE'` | SELECT and UPDATE on `shredding_erasure_seq_seq` |
+| `has_table_privilege(name, oid, text)` | the documented matrix, by `relname` | UPDATE, DELETE, TRUNCATE, TRIGGER, REFERENCES on all four tables |
+| `has_column_privilege(name, oid, smallint, text)` | the two documented columns only | per-column UPDATE excess |
+
+Result, `probe_a_clean_verdict_implies_the_erasure_log_guards_cannot_be_disabled`:
+`JdbcSupport.verifySchema(ds, false)` **returns** a verdict, `runtimeRoleIsUnprivileged()` is
+`true`, and `summary()` carries the sentence "the role owns none of the 9 objects, holds no
+privilege on them beyond the documented grant set, and holds no CREATE or TEMPORARY in this
+database". On the same connection, immediately afterwards:
+
+```
+INSERT INTO public.shredding_erasure (...)        -- 1 row
+ALTER TABLE public.shredding_erasure DISABLE TRIGGER ALL   -- succeeds
+DELETE FROM public.shredding_erasure              -- succeeds, trail emptied
+```
+
+So the INFO line an auditor reads is false, and `SHRED-SCHEMA-004` - the whole of §4.6 - is not a
+control against the role it is about. `allow-privileged-runtime-role=false`, the secure default,
+is indistinguishable from the weaker mode. HIGH, and the same severity as B-38-10 for the same
+reason: the control's subject is its witness.
+
+Control test in the same class, no shadowing, same ownership: `SHRED-SCHEMA-004` is thrown
+(`control_without_shadowing_the_same_state_is_refused_as_privileged`), and the honest two-role
+deployment still verifies.
+
+### C-13-10 (HIGH) - the shape legs are answerable too
+
+Same role, same fixture. Two legs documented as deliberately definition-based rather than
+name-based, both answered by one function each:
+
+- `probe_a_shadowed_pg_get_constraintdef_cannot_hide_a_weakened_anchor_check`:
+  `shredding_erasure_anchor_id_check` is dropped and re-added in place as `CHECK (id >= 1)`, so the
+  anchor can hold a second head row; a 3-line `pg_get_constraintdef(oid)` reports
+  `CHECK ((id = 1))` for that one `conname` and the truth for the other five. Verification passes.
+- `probe_a_shadowed_format_type_cannot_hide_a_widened_hash_column`: `shredding_erasure.hash` is
+  widened from `character(64)` to `character varying(100)`, so the chain's hash column stops being
+  fixed width and blank-padded. `format_type` receives only the type oid and the modifier, so the
+  lie has to be exact - no other column of the four tables is `varchar(100)` - and one `CASE` on
+  the pair `(1043, 104)` is exact. Verification passes. (A crude shadow is caught: mapping all of
+  `text` to `character(64)` makes the honest `hook_outcomes` leg fire, which is how this one was
+  measured.)
+
+### C-13-11 (MEDIUM) - the erasure store's blind-index read-back
+
+`probe_a_shadowed_count_cannot_hide_blind_index_residue_from_the_read_back`. Not the gate:
+`JdbcErasureStore`'s three `SELECT count(*)` read-backs, the control that refuses an erasure which
+left an HMAC of the erased plaintext behind, and that is documented as sharing no identifier with
+the statements the erasure built. `count` is an unqualified aggregate name and resolves through the
+same `search_path`. With `CREATE AGGREGATE app.count(*)` whose `sfunc` returns the state unchanged,
+the module's own read-back statement returns 0 against a table that holds 1 matching row. The
+erasure is then recorded `COMPLETE`. `now()` in the `shredding_erased_subject` insert is the same
+surface for the erasure timestamp. MEDIUM rather than HIGH only because the actor is the role whose
+own erasure is being falsified, with no second party deceived until the trail is read.
+
+### C-13-12 (MEDIUM) - the bundled script's own catalogue reads
+
+`probe_a_shadowed_to_regclass_cannot_silence_the_scripts_keyed_from_birth_preflight`. The script's
+first guard refuses a database written before keyed-from-birth and resolves both oids through
+`to_regclass`, unqualified, inside a `DO` block - which resolves function names against the session
+`search_path` like anything else. With `app.to_regclass(text) -> NULL`, both oids are NULL, both
+arms of the `IF` are false, and the `RAISE` cannot fire: the script runs on a pre-redesign erasure
+log and fails later and elsewhere (here, on the missing `subject_pseudonym` in `CREATE INDEX`)
+rather than with the message written for it. The same shadow removes the `tgrelid` scoping from all
+five trigger guards below it - the CIPHER-05 fix - and breaks idempotence, since every
+`NOT EXISTS` is then true and `CREATE TRIGGER` hits "already exists" on a second run. Reachable on
+the `initialize-schema=true` path, where the runtime role runs the script itself. MEDIUM: every
+outcome measured so far is a refusal with the wrong message, not an accepted database - but the
+leg does not do what it says, and the legs that would catch the result downstream are C-13-9 and
+C-13-10.
+
+### Checked and clean
+
+- **The three guard function bodies** call no function at all (`RAISE EXCEPTION`, `IS DISTINCT
+  FROM`, arithmetic). `proconfig IS NULL` is a shape refusal and stays correct: a `SET search_path`
+  on a guard function is refused, and the bodies need none.
+- **The module's eighteen write statements** remain unaffected: relation references come from
+  `VerifiedSchema.qualify`, as pass 2 recorded. The adapters' exposure is function names only
+  (`count`, `now`).
+- **`md5`** is not a surface here: the digests in `SchemaVerification.md5Prefix` and the hash chain
+  are computed in Java with `MessageDigest`, not in SQL. (This is where module B differs.)
+
+### Must-do for PR 13
+
+A correction, not a new mechanism: no new hook, lifecycle or data structure, and `VerifiedSchema`
+already carries the captured schema name that the first item needs. Not a design stop. All four
+items are one change and must land together; three of four alone leaves the verdict answerable.
+
+1. `SchemaVerification.verify` and `verifyInCallersTransaction`: capture the session facts with
+   `SELECT pg_catalog.current_schema(), current_user, pg_catalog.current_database()` as the first
+   statement, then **pin the path for the rest of the transaction** with
+   `SELECT pg_catalog.set_config('search_path', 'pg_catalog', true)` (`true` = local, so the
+   `restore()`/`rollback()` already in place undoes it, and `verifyInCallersTransaction` does not
+   leak it into the caller's script transaction). `current_user` is a keyword and not shadowable.
+2. Because the path is then pinned, every `current_schema()::regnamespace` in the eleven queries
+   must become a bound parameter `?::regnamespace` carrying the captured `VerifiedSchema.name()`,
+   or the queries will read `pg_catalog` instead of the application schema. This is the half of the
+   fix that is easy to forget and that turns every shape leg into a false pass if forgotten, so the
+   fix pass asserts the 47 `SchemaVerificationTest` cases and the 15 `CipherProbeNoDdlPr13*`
+   cases unchanged.
+3. Qualify every catalogue call and every catalogue relation in `SchemaVerification` to
+   `pg_catalog.` anyway - the twelve functions listed above, the eleven relations, and the
+   `'pg_class'::regclass` / `'pg_attrdef'::regclass` casts in the sequence leg. Belt and braces is
+   the point: item 1 is one statement away from being lost in a later edit, and a qualified call is
+   correct with or without it.
+4. The two paths that cannot pin the path, because they have to resolve the application's own
+   tables, are qualified only: `JdbcErasureStore`'s three blind-index read-backs become
+   `SELECT pg_catalog.count(*)` and its `shredding_erased_subject` insert `pg_catalog.now()`; the
+   bundled script's `to_regclass`, `quote_ident`, `pg_advisory_xact_lock`, `pg_attribute` and
+   `pg_trigger` become `pg_catalog.`-qualified.
+
+Then add a verification-time leg of the kind that cannot be shadowed, so a future unqualified call
+is caught by a test rather than by a reviewer: `SchemaVerificationTest` gets a case that installs
+the shadow set of this addendum and asserts the refusal, which is `CipherProbeNoDdlPr13cTest`
+promoted. The probe file is
+`gdpr-shredding-core/src/test/java/com/housedevinci/shredding/adapter/jdbc/CipherProbeNoDdlPr13cTest.java`,
+committed RED: 6 failures, 2 controls green, on 970e67b.
+
+### Numbers on this head
+
+| | |
+|---|---|
+| head | 970e67b, `feat/no-ddl-at-runtime` |
+| PostgreSQL | 16.14, `postgres:16-alpine@sha256:57c72fd2...c07777` |
+| `CipherProbeNoDdlPr13cTest` | 8 run, **6 failures**, 0 errors, 0 skipped |
+| `CipherProbeNoDdlPr13Test` | 5 run, 0 failures |
+| `CipherProbeNoDdlPr13bTest` | 10 run, 0 failures |
+| `CipherProbeJdbcTest` | 12 run, 0 failures |
+| `SchemaVerificationTest` | 47 run, 0 failures |
+| new findings | C-13-9 HIGH, C-13-10 HIGH, C-13-11 MEDIUM, C-13-12 MEDIUM |
+
+### Verdict on this addendum: NOT MERGEABLE
+
+Two HIGHs. 0.2.0 is not taggable with them open. Routing: the fix pass applies the four must-do
+items as corrections; C-13-9 and C-13-10 are inside the mechanism the builder wrote on this PR, so
+items 1 and 2 go to the builder, items 3 and 4 may go to the fix pass. The probe turning green is
+the only accepted evidence.
