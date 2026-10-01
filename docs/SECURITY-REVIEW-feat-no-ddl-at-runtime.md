@@ -659,3 +659,258 @@ Two HIGHs. 0.2.0 is not taggable with them open. Routing: the fix pass applies t
 items as corrections; C-13-9 and C-13-10 are inside the mechanism the builder wrote on this PR, so
 items 1 and 2 go to the builder, items 3 and 4 may go to the fix pass. The probe turning green is
 the only accepted evidence.
+
+## Addendum verification (2026-10-02)
+
+Head `d25f30a`, replayed as `b45555b` after the DCO correction below; branch
+`feat/no-ddl-at-runtime`; PostgreSQL 16.14 on the digest the module already pins.
+Scope: confirm C-13-9 to C-13-12 by their probes flipping, rule on the two disclosed
+deviations and the recorded residual, then attack the surfaces the fix created.
+
+### C-13-9 to C-13-12: all four CLOSED
+
+`CipherProbeNoDdlPr13cTest` reads **8 run, 0 failures** on this head, from 8 run / 6 failures
+on `970e67b`. Nothing in the fixture, the shadow set or the assertions changed, bar the one
+string ruled on below. The two controls that were green stayed green, so the flip is the fix
+and not a weakened probe. Re-run unchanged and also green: `CipherProbeNoDdlPr13Test` (5),
+`CipherProbeNoDdlPr13bTest` (10), `CipherProbeJdbcTest` (12). `SchemaVerificationTest` is 55,
+the 47 of pass 2 plus T50 to T57, 0 failures. Full `./mvnw -B clean verify`: 187 core, 217
+starter, 17 sample, 0 failures, 0 errors, 0 skipped, BUILD SUCCESS.
+
+The mechanism is the one prescribed and both halves are present. The session capture runs
+first through qualified names; `pg_catalog.set_config('search_path', 'pg_catalog', true)`
+pins the rest of the transaction; the pin is read back against the literal `pg_catalog` and a
+mismatch is `SHRED-SCHEMA-005`, which is right - `set_config` echoes its argument whether or
+not it took, and outside a transaction block a local one silently does nothing. Every
+catalogue function, catalogue relation and `regclass` cast in `SchemaVerification` now carries
+the prefix as well, so the eleven queries are correct with the pin and without it. On the
+paths that cannot pin because they address the application's own tables, the qualification
+is there: `JdbcErasureStore`'s read-backs, its tombstone insert, `JdbcSupport.lockSubject`,
+and the bundled script's `to_regclass`, `quote_ident`, `current_schema`,
+`pg_advisory_xact_lock`, `pg_attribute` and `pg_trigger`.
+
+### Deviation (a), the namespace oid: ACCEPTED, and better than what was prescribed
+
+The fix list said `?::regnamespace` carrying `VerifiedSchema.name()`. The builder bound an
+oid from an exact `nspname` match instead, because `regnamespacein` parses its argument as an
+SQL identifier and `VerifiedSchema` deliberately supports `My Shred`, `Public` and `s"q`.
+That is correct and the prescription was wrong: under the cast, every one of those schemas
+would have turned the whole gate into `SHRED-SCHEMA-005` - unverifiable, which this module
+treats as a refusal, so a deployment with a quoted schema name could not have booted at all.
+T55 is the right test for it and it passes. The reasoning is in the Javadoc on `session()`
+where the next reader will find it. Noted against my own fix list, not against the branch.
+
+The exact-match form does introduce a surface the cast did not have, which is C-13-13 below.
+That does not make the cast the better choice; it makes the capture statement need one more
+correction.
+
+### Deviation (b), the edited probe literal, and T57: ACCEPTED
+
+`probe_a_shadowed_count_cannot_hide_blind_index_residue_from_the_read_back` built a copy of
+the store's statement in the test, so it tracked the fix instead of proving it: adding
+`pg_catalog.` to the copy turns it green whatever production does. That is my defect, not the
+builder's, and the edit was disclosed in the commit body and in a comment at the line. One
+string changed, nothing else; I diffed it. Accepted.
+
+T57 is the mutation-sensitive form and I checked that it is, rather than taking the claim:
+it builds a real `JdbcErasureStore` over a real table whose `BEFORE UPDATE` trigger
+repopulates the blind-index column, stubs the independent read-back to zero so the same-text
+`count` is the only thing that can refuse, calls `store.erase(...)`, and asserts
+`SHRED-ERASURE-004` plus an empty `shredding_erasure`. Remove the prefix from the production
+statement and the shadowed aggregate answers zero and the erasure is recorded COMPLETE, so
+T57 goes red. The copy in the probe file is now redundant evidence; T57 is the control.
+
+### Recorded residual, Hibernate's independent read-back: ACCEPTED as a design stop
+
+`HibernateBlindIndexResidual` renders `count(*)` through HQL, which offers no way to qualify
+an aggregate, so that one leg still resolves through the caller's `search_path`. The builder
+named it rather than implying it, in the commit body, in SECURITY-NOTES and in the design page,
+and the same-text read-back over the same column is qualified and refuses on its own - so the
+control has a path that is not shadowable even when this one is. Closing the framework-rendered
+half needs a mechanism, not a prefix. Correct call, correct place. It is now subsumed by
+C-13-14, which is the general form of the same problem and which it must be designed with.
+
+### C-13-13 (HIGH) - the one statement that runs before the pin resolves an operator
+
+`CipherProbeNoDdlPr13dTest.probe_a_shadowed_equality_operator_cannot_redirect_the_captured_namespace_oid`.
+
+The pin cannot be statement 1, because after it `current_schema()` answers `pg_catalog` and
+the module's own schema would be unreadable. So the capture runs first and still resolves
+names in the role's path. Every function and relation in it is qualified. The `=` of
+`n.nspname = pg_catalog.current_schema()` is not, and an operator is resolved exactly the way
+a function is: `pg_operator` entries are looked up along `search_path`, and an operator with
+identical argument types in an earlier schema hides the one in `pg_catalog`. A role that owns
+one schema may `CREATE OPERATOR app.= (LEFTARG = name, RIGHTARG = name, ...)`.
+
+What it buys is the split the fix exists to prevent. The verdict's schema name comes from
+column 1 and the namespace oid every later leg reads comes from the subquery; separate them
+and the gate verifies one schema while `VerifiedSchema.qualify` sends every write to another.
+Measured at the SQL level first:
+
+```
+ current_schema | captured_oid | public_oid | app_oid
+----------------+--------------+------------+---------
+ app            |         2200 |       2200 |   16385
+```
+
+and then end to end in the probe, in a fixture that grants the role nothing the hardened
+posture refuses: the owner applies the script in `public` and issues the grant block; the role
+owns one schema `app`, applies the script there, and puts it first on its own default path.
+`JdbcSupport.verifySchema` returns a verdict, `runtimeRoleIsUnprivileged()` is `true`, the
+summary carries "owns none of the 9 objects" - it is reading the owner's install in `public` -
+and `verdict.schema().name()` is `app`, which is where every write goes. The same connection
+then runs `ALTER TABLE app.shredding_erasure DISABLE TRIGGER ALL` and `DELETE`, and empties
+the trail that was just certified. This is C-13-9's outcome restored, through the only name
+the fix could not pin.
+
+Control in the same class, `control_without_the_operator_the_role_owned_schema_is_refused_as_privileged`:
+same two installs, same path, no operator, the gate refuses. Green.
+
+**Fix (a correction, not a mechanism).** Split the capture in two and put the pin between them.
+Statement 1 goes back to `SELECT pg_catalog.current_schema(), current_user,
+pg_catalog.current_database()`, which contains no operator at all. Statement 2 is the pin.
+Statement 3, now running under `search_path = pg_catalog`, resolves the oid:
+`SELECT n.oid FROM pg_catalog.pg_namespace n WHERE n.nspname = ?` with the captured name bound.
+Write the comparison as `n.nspname OPERATOR(pg_catalog.=) ?` as well, for the same
+belt-and-braces reason the prefixes are there. `SchemaVerification.session` and
+`SchemaVerification.run`; the probe above is the test, promoted into `SchemaVerificationTest`.
+
+### C-13-14 (HIGH) - DESIGN STOP - the guard function bodies resolve their operators in the writer's session
+
+`CipherProbeNoDdlPr13dTest.probe_a_shadowed_operator_cannot_disarm_the_anchor_monotonic_guard`.
+
+Pass 3 recorded, under "Checked and clean": "the three guard function bodies call no function
+at all (`RAISE EXCEPTION`, `IS DISTINCT FROM`, arithmetic)". That is my error. `IS DISTINCT
+FROM` is resolved through the `=` operator for the type, and arithmetic and comparison are
+operators. `shredding_erasure_anchor_monotonic` is plain plpgsql, is not `SECURITY DEFINER`,
+and - because `SchemaExpectations` requires `proconfig IS NULL` - carries no `SET search_path`
+by design, so its body resolves in the session of whoever performs the write. Its whole guard
+is four operators: the `=(boolean, boolean)` behind `IS DISTINCT FROM`, the `<>(bigint,
+bigint)`, the `+` that makes the count monotonic, and the `=(bpchar, bpchar)` on `head_hash`.
+
+Three operators in a schema the role owns and the anchor takes any value the role likes:
+
+```
+=== honest attempt ===      ERROR:  keyed is immutable
+=== with shadowed operators ===   UPDATE 1
+ id | row_count | keyed | left
+----+-----------+-------+------
+  1 |         1 | f     | bbbb
+```
+
+The probe runs it through the shipped script in the documented two-role posture. The role is
+`NOSUPERUSER NOCREATEDB NOCREATEROLE`, owns none of the nine objects, holds exactly the grant
+block, and `JdbcSupport.verifySchema` passes **truthfully** - `SHRED-SCHEMA-004` has nothing to
+complain about and this is not a gate bypass. The role then rewrites `row_count` from 7 to 1,
+replaces `head_hash` and flips `keyed` from true to false, all three of which the schema
+comments call impossible, and `UPDATE` on the anchor is in the documented grant block. The
+anchor is the module's external record of the trail's length, head and keyed mode - the thing
+the design leans on precisely because the chain columns are what a table-owning attacker
+rewrites - and flipping `keyed` is the documented route to a trail that can be forged without
+the HMAC key. The append-only guards survive, their bodies being a bare `RAISE EXCEPTION` with
+no operator in them, so rows still cannot be deleted; the detector for everything else does not.
+
+Control `control_without_the_operators_the_anchor_guard_refuses_the_same_update`: green.
+
+Scope, stated rather than probed: the same mechanism reaches every unqualified operator in
+every statement the module runs on an application connection - `JdbcErasureStore`'s
+`WHERE tenant = ? AND subject = ?` predicates among them, where a false `=` makes the erasure
+clear nothing and the read-back see nothing and the outcome be recorded COMPLETE. I did not
+raise that as its own finding because I could not isolate the shadow to one statement without
+the fixture's other lookups failing first, and the repro attempt is recorded here rather than
+asserted. Hibernate's HQL `count(*)`, recorded by the builder as a residual, is the same
+problem seen from the framework side.
+
+**DESIGN STOP, not a fix list.** This needs a new mechanism and it must cover paths, not
+statements. The property that must hold: *no name in any statement this module's controls
+depend on - function, relation, aggregate, operator or cast - is resolvable by the role the
+control is about.* The paths it has to cover: (1) the three guard function bodies, invoked
+from any session that writes, including sessions this module never opens; (2) every statement
+`JdbcErasureStore`, `JdbcKeyProvider` and `JdbcSupport` issue on an application connection;
+(3) anything the application's own ORM renders against the shredding tables. Note the tension
+the design has to resolve rather than route around: the obvious hardening for (1) is
+`SET search_path = pg_catalog` on the three functions, and `SchemaExpectations`'s
+`proconfig IS NULL` leg currently **refuses** exactly that, so the shape rule has to invert
+from "must carry none" to "must carry this one" and the bundled script and the upgrade page
+move with it. One page from the builder, reviewed before any code.
+
+### C-13-15 (MEDIUM) - the bundled script's `||`, the half of C-13-12 that is still open
+
+`CipherProbeNoDdlPr13dTest.probe_a_shadowed_concatenation_operator_cannot_silence_the_keyed_from_birth_guard`.
+
+C-13-12 closed `to_regclass`. The string `to_regclass` is handed is still built with an
+unqualified `||`: `pg_catalog.quote_ident(pg_catalog.current_schema()) || '.shredding_erasure'`.
+An `app.||(text, text)` is enough:
+
+```
+NOTICE:  resolved oid = 1259, name = pg_class
+```
+
+and returning a name that resolves to nothing puts both oids back to NULL, which is the exact
+state C-13-12 described. In the probe, a pre-redesign `shredding_erasure` with no `key_id` is
+not refused by the keyed-from-birth guard; the script fails later and elsewhere, here
+`SHRED-KEY-UNAVAILABLE` with SQLState 42703 on a missing column, which is the "refusal with
+the wrong message" C-13-12 measured. The five trigger guards lose their `tgrelid` scoping
+(CIPHER-05) in the same move. Reachable on `initialize-schema=true`, where the runtime role
+runs the script itself. MEDIUM for the same reason C-13-12 was MEDIUM: every outcome measured
+is a refusal with the wrong message, not an accepted database.
+
+The fix belongs with C-13-14's design, not ahead of it: qualifying `||` as
+`OPERATOR(pg_catalog.||)` closes this one line, and the script contains other unqualified
+operators that the same page has to rule on in one pass rather than one finding at a time.
+
+### Housekeeping, mine
+
+**DCO.** `ad39c59` carried no `Signed-off-by`, which is my omission and the reason the DCO
+check was red. Amended in place with the review's own `Signed-off-by` trailer, and `d25f30a`
+replayed on top by cherry-pick so the builder's message, authorship and own sign-off are
+byte-identical. `git diff origin/feat/no-ddl-at-runtime` is empty against the
+replayed head. New heads: `d285374` (was `ad39c59`), `b45555b` (was `d25f30a`).
+
+**The release probe suite.** `CIPHER_PROBE_MAVEN=1 tools/cipher-probe-release-pipeline.sh`
+reads **67 fixed / 0 weak** on this head, measured, not inherited.
+`scripts/verify-reproducible.sh` was run in the foreground on the full tree and on a fresh
+clone: both builds green, every enforced artifact byte-identical, both sources jars and all
+three poms matching, and the third build the probe adds (`clean verify -Prelease`, tests
+running) reproduces both sources jars exactly. There is no reproducibility defect.
+
+The earlier reading of 66 fixed / 1 weak on `probe_sources_jar_differs_from_a_test_run` is the
+probe behaving as designed. Its body runs a full `clean verify` inside a clone and reports a
+weakness whenever that build fails for any reason - "unverifiable is not clean", applied to
+itself. On `ad39c59` the build failed because `CipherProbeNoDdlPr13cTest` was committed RED,
+which is this review's own doing. The same will be true while `CipherProbeNoDdlPr13dTest`
+sits RED on the branch, and it is not a pipeline finding either time; it clears when the
+probes flip. Worth one line in the release runbook so the next person does not chase it.
+
+### Numbers on this head
+
+| | |
+|---|---|
+| head | `b45555b` (tree-identical to `d25f30a`), `feat/no-ddl-at-runtime` |
+| full build | `./mvnw -B clean verify`, BUILD SUCCESS |
+| core / starter / sample | 187 / 217 / 17, 0 failures, 0 errors, 0 skipped |
+| `CipherProbeNoDdlPr13cTest` | 8 run, **0 failures** (was 6 failures on `970e67b`) |
+| `CipherProbeNoDdlPr13Test` / `b` / `CipherProbeJdbcTest` | 5 / 10 / 12, 0 failures, unchanged |
+| `SchemaVerificationTest` | 55 run, 0 failures (47 + T50 to T57) |
+| `CipherProbeNoDdlPr13dTest` | 5 run, **3 failures**, 2 controls green, committed RED |
+| release probe suite | 67 fixed / 0 weak (`CIPHER_PROBE_MAVEN=1`) |
+| reproducibility | reproducible, 9 artifacts, 3 builds |
+| findings closed | C-13-9, C-13-10, C-13-11, C-13-12 |
+| findings open | C-13-13 HIGH, C-13-14 HIGH (design stop), C-13-15 MEDIUM |
+
+### Verdict: NOT MERGEABLE
+
+Two HIGHs, and they are the same class as the two the fix closed rather than a new one: a
+control whose subject supplies the names it is resolved through. The fix was right and
+complete about function and relation names; operator names were not in its scope and nobody,
+me included, put them there. The branch does not become mergeable by pinning jackson-databind
+to 3.1.7 - that pin clears the Vulnerability scan check and nothing else, and the CVE gate is
+not the finding here.
+
+Routing. C-13-13 is a correction inside the mechanism the builder wrote on this PR, so it goes
+to the builder with the three-statement capture above. C-13-14 is a DESIGN STOP: one page,
+reviewed, then built, and C-13-15 lands inside it. Nothing here goes to a fix pass. The
+condition for MERGEABLE is the three probes in `CipherProbeNoDdlPr13dTest` flipping green with
+their two controls still green, the 55 of `SchemaVerificationTest` and the 8 of
+`CipherProbeNoDdlPr13cTest` unchanged, and the design page reviewed before the code that
+closes C-13-14.
