@@ -253,9 +253,14 @@ class CipherProbeNoDdlPr13cTest {
             + ".always_zero, stype = bigint, initcond = '0')");
     DataSource shadowed = shadowedPool();
 
-    // JdbcErasureStore, the "sameText" read-back, verbatim in shape.
+    // JdbcErasureStore, the "sameText" read-back, verbatim in shape. This is a *copy* of the
+    // production statement, so it tracks the fix rather than proving it: the mutation-sensitive
+    // version, which runs the store's own erasure against this same shadowed aggregate and asserts
+    // SHRED-ERASURE-004, is SchemaVerificationTest.t57. Only this one string was changed by the
+    // fix pass, to keep the copy a copy; the fixture, the shadow and the assertion are the
+    // review's.
     String readBack =
-        "SELECT count(*) FROM "
+        "SELECT pg_catalog.count(*) FROM "
             + OWN
             + ".invoice"
             + " WHERE tenant = ? AND subject = ? AND bi IS NOT NULL";

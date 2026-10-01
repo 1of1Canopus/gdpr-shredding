@@ -123,7 +123,8 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
 
   private ErasureRecord appendInTransaction(Connection c, ErasureRecord record)
       throws SQLException {
-    try (PreparedStatement lock = c.prepareStatement("SELECT pg_advisory_xact_lock(?)")) {
+    try (PreparedStatement lock =
+        c.prepareStatement("SELECT pg_catalog.pg_advisory_xact_lock(?)")) {
       lock.setLong(1, LOCK_KEY);
       lock.execute();
     }
@@ -220,7 +221,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
             "INSERT INTO "
                 + erasedSubjectTable
                 + " (tenant, subject, erased_at)"
-                + " VALUES (?,?,now()) ON CONFLICT (tenant, subject) DO NOTHING")) {
+                + " VALUES (?,?,pg_catalog.now()) ON CONFLICT (tenant, subject) DO NOTHING")) {
       ps.setString(1, tenant.value());
       ps.setString(2, subject.value());
       ps.executeUpdate();
@@ -349,7 +350,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
       }
       // Identifiers validated at startup (BlindIndexColumn); values are bind parameters.
       String sameText =
-          "SELECT count(*) FROM "
+          "SELECT pg_catalog.count(*) FROM "
               + column.table().sql()
               + " WHERE "
               + column.tenantColumn().sql()
@@ -380,7 +381,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
         }
       }
       String elsewhere =
-          "SELECT count(*) FROM "
+          "SELECT pg_catalog.count(*) FROM "
               + column.table().sql()
               + " WHERE "
               + column.subjectColumn().sql()

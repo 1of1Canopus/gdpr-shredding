@@ -863,6 +863,22 @@ Three things it does not prove, and they are named here rather than implied.
    expectation as well as the database. That, not "a guard body was rewritten", is what remains
    outside detection.
 
+**The check does not ask the role it is judging.** A function name resolves along `search_path`
+exactly as a relation name does, any role may run `ALTER ROLE <itself> SET search_path` (there is no
+privilege to revoke), and an application role normally owns a business schema it can define
+functions in. `pg_has_role`, `has_table_privilege`, `format_type` and `pg_get_constraintdef` written
+bare are therefore predicates the subject of the check supplies the answer to. Verification's
+transaction now pins its own `search_path` to `pg_catalog` for its own duration, reads the pin back
+and refuses with `SHRED-SCHEMA-005` if it did not take, and every catalogue function, catalogue
+relation and `regclass` cast carries a `pg_catalog.` prefix in any case - belt and braces, because
+the pin is one statement a later edit can lose and a prefix is visible in every diff. The bundled
+script and the erasure store's own `count(*)`, `now()` and `pg_advisory_xact_lock(...)` are
+qualified for the same reason. **One leg is not covered and is named rather than implied:** the
+Hibernate-rendered independent read-back is `count(*)` in HQL, which the framework renders
+unqualified, so a role that defines its own `count` aggregate can make that one leg answer zero.
+The erasure store's own same-text read-back runs over the same column in the same transaction, is
+qualified, and refuses on its own.
+
 ### The health endpoint publishes the posture
 
 `/actuator/health` gains two details from the gate's verdict rather than re-deriving them:

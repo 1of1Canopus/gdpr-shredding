@@ -25,10 +25,21 @@ import java.util.Set;
  * carries the guards this module's controls rest on, and whether the role that is about to write to
  * it is privileged enough to remove them.
  *
- * <p>Design §4 of {@code no-ddl-at-runtime-design.md}, version 2.2. One connection, one read-only
+ * <p>Design §4 of {@code no-ddl-at-runtime-design.md}, version 2.3. One connection, one read-only
  * REPEATABLE READ transaction, catalogue reads only, no DDL and no writes of any kind. Every leg
  * runs before anything is thrown, so a partial schema is reported in one message rather than one
  * object per restart.
+ *
+ * <p><b>Nothing this class asks is asked through a name the verified role can resolve</b> (design
+ * §4.9, findings C-13-9 and C-13-10). A function name resolves along {@code search_path} exactly as
+ * a relation name does, any role may {@code ALTER ROLE <itself> SET search_path}, and the ordinary
+ * runtime role owns a schema it may create functions in - so a {@code pg_has_role} or a {@code
+ * format_type} written bare is a predicate the subject of the check supplies the answer to. Two
+ * halves, neither sufficient alone: the transaction pins {@code search_path} to {@code pg_catalog}
+ * for its own duration and reads the pin back, and every catalogue function, catalogue relation and
+ * {@code regclass} cast is written with its {@code pg_catalog.} prefix anyway. Because the path is
+ * pinned, the module's own schema can no longer be named by {@code current_schema()}: it is
+ * captured once, before the pin, and bound into every later query as the namespace oid.
  *
  * <p>Two rules run through all of it. <b>Unverifiable is not clean</b>: any {@link SQLException}
  * from verification itself is {@code SHRED-SCHEMA-005}, never a pass and never a warning - {@code
@@ -46,6 +57,9 @@ final class SchemaVerification {
    * of the database, and nothing on the server side refuses a write from a connection whose whole
    * contract is "catalogue reads only" - the rule would be enforced by review alone. The connection
    * is rolled back and all three settings restored whatever happens.
+   *
+   * <p>The pin of §4.9 is transaction-local, so the {@code rollback()} in {@link #restore} undoes
+   * it and the connection goes back to the pool with the {@code search_path} it arrived with.
    *
    * @param allowPrivilegedRuntimeRole when true, the {@code 004} legs become the verdict's {@link
    *     SchemaVerdict#privilegeLegs()} for the caller to warn about, instead of a refusal. {@code
@@ -80,6 +94,12 @@ final class SchemaVerification {
    * creation path is the only caller: it has just run the bundled script in this very transaction,
    * under the script's advisory lock, so it is neither read-only nor a fresh snapshot and must not
    * be made either.
+   *
+   * <p>The §4.9 pin is issued here too, and is still transaction-local: the caller commits
+   * immediately after this returns, which ends the pin. {@code set_config} with {@code is_local =
+   * true} silently does nothing outside a transaction block, which is why the pin is read back - a
+   * caller that handed us an auto-commit connection gets {@code SHRED-SCHEMA-005} rather than
+   * eleven legs that are qualified in text and unqualified in substance.
    */
   static SchemaVerdict verifyInCallersTransaction(
       Connection connection, boolean allowPrivilegedRuntimeRole) {
@@ -104,10 +124,15 @@ final class SchemaVerification {
   }
 
   private static SchemaVerdict run(Connection c, boolean allowPrivileged) throws SQLException {
+    // §4.9, in this order and before any leg: capture the session facts through qualified names,
+    // pin the path so a name somebody forgets to prefix later still resolves in pg_catalog, and
+    // read the pin back because set_config echoes its own argument whether or not it took.
     Session session = session(c);
+    pinSearchPath(c);
     VerifiedSchema schema = session.schema();
+    long ns = session.schemaOid();
 
-    Map<String, Relation> relations = relations(c);
+    Map<String, Relation> relations = relations(c, ns);
     List<String> missing =
         SchemaExpectations.TABLES.stream().filter(t -> !relations.containsKey(t)).toList();
     if (missing.size() == SchemaExpectations.TABLES.size()) {
@@ -119,18 +144,18 @@ final class SchemaVerification {
     missing.forEach(t -> shape.add("table " + t + " does not exist"));
 
     checkRelationShape(relations, shape, guards);
-    checkColumns(c, relations, shape);
-    checkSequence(c, relations, shape);
-    checkConstraints(c, relations, shape);
+    checkColumns(c, ns, relations, shape);
+    checkSequence(c, ns, relations, shape);
+    checkConstraints(c, ns, relations, shape);
 
-    Map<String, Function> functions = functions(c);
+    Map<String, Function> functions = functions(c, ns);
     checkGuardFunctions(functions, guards);
-    checkTriggers(c, relations, functions, guards);
-    checkRulesAndPolicies(c, relations, guards);
-    checkInheritance(c, relations, guards);
+    checkTriggers(c, ns, relations, functions, guards);
+    checkRulesAndPolicies(c, ns, relations, guards);
+    checkInheritance(c, ns, relations, guards);
 
     List<String> indexWarnings = new ArrayList<>();
-    Map<String, Relation> indexes = indexes(c);
+    Map<String, Relation> indexes = indexes(c, ns);
     SchemaExpectations.INDEXES.stream()
         .filter(i -> !indexes.containsKey(i))
         .forEach(
@@ -189,11 +214,25 @@ final class SchemaVerification {
 
   // ---------------------------------------------------------------- session
 
-  private record Session(VerifiedSchema schema, String role, String database) {}
+  private record Session(VerifiedSchema schema, long schemaOid, String role, String database) {}
 
+  /**
+   * Statement 1 of the transaction, qualified and first (§4.9 rule 1 and rule 2). After the pin
+   * {@code current_schema()} answers {@code pg_catalog}, which is right for resolving catalogue
+   * names and wrong for naming this module's tables, so the schema is read exactly once, here, and
+   * carried as an oid afterwards. The oid comes from an exact {@code nspname} match rather than
+   * from {@code '<name>'::regnamespace}: {@code regnamespacein} parses its argument as an SQL
+   * identifier, so a schema called {@code my schema} or {@code Public} - which {@link
+   * VerifiedSchema} deliberately supports - would turn every leg into {@code SHRED-SCHEMA-005}.
+   * {@code current_user} is a keyword, not a function, and cannot be shadowed.
+   */
   private static Session session(Connection c) throws SQLException {
     try (PreparedStatement ps =
-            c.prepareStatement("SELECT current_schema(), current_user, current_database()");
+            c.prepareStatement(
+                "SELECT pg_catalog.current_schema(), current_user,"
+                    + " pg_catalog.current_database(),"
+                    + " (SELECT n.oid FROM pg_catalog.pg_namespace n"
+                    + "   WHERE n.nspname = pg_catalog.current_schema())");
         ResultSet rs = ps.executeQuery()) {
       if (!rs.next() || rs.getString(1) == null) {
         throw new ShreddingException(
@@ -204,7 +243,57 @@ final class SchemaVerification {
                 + " URL (currentSchema=...) or grant USAGE on the one that holds the shredding"
                 + " tables.");
       }
-      return new Session(new VerifiedSchema(rs.getString(1)), rs.getString(2), rs.getString(3));
+      long oid = rs.getLong(4);
+      if (rs.wasNull() || oid == 0) {
+        throw new ShreddingException(
+            ErrorCodes.SCHEMA_UNVERIFIABLE,
+            "current_schema() answered "
+                + rs.getString(1)
+                + " but no pg_namespace row carries that name, so the schema this module's"
+                + " statements resolve against cannot be identified and nothing about it can be"
+                + " verified. Unverifiable is not clean.");
+      }
+      return new Session(
+          new VerifiedSchema(rs.getString(1)), oid, rs.getString(2), rs.getString(3));
+    }
+  }
+
+  /**
+   * Statements 2 and 3 of the transaction. The pin is {@code is_local = true}, so it ends with the
+   * transaction and cannot follow a pooled connection out of verification. It is total over
+   * function, aggregate and operator names and it is <b>not</b> total over relation names - {@code
+   * pg_temp} precedes the path implicitly for references - which is why every relation here stays
+   * explicitly qualified as well.
+   *
+   * <p>The read-back is the pin's own backstop and is compared against the literal {@code
+   * pg_catalog}, never against the value just sent: {@code set_config} returns its own argument
+   * whether or not the setting took, and outside a transaction block a local {@code set_config}
+   * takes no effect, raises nothing, and leaves every later leg qualified in text and unqualified
+   * in substance.
+   */
+  private static void pinSearchPath(Connection c) throws SQLException {
+    try (PreparedStatement ps =
+            c.prepareStatement("SELECT pg_catalog.set_config('search_path', 'pg_catalog', true)");
+        ResultSet rs = ps.executeQuery()) {
+      rs.next();
+    }
+    try (PreparedStatement ps =
+            c.prepareStatement("SELECT pg_catalog.current_setting('search_path')");
+        ResultSet rs = ps.executeQuery()) {
+      String pinned = rs.next() ? rs.getString(1) : null;
+      if (!"pg_catalog".equals(pinned)) {
+        throw new ShreddingException(
+            ErrorCodes.SCHEMA_UNVERIFIABLE,
+            "shredding: the verification transaction could not pin its own search_path to"
+                + " pg_catalog (it reads back as "
+                + pinned
+                + "). Every catalogue function this check calls is also written with a pg_catalog."
+                + " prefix, but the pin is the backstop for the one call a later edit forgets, and"
+                + " a verification running without it is not the verification this module"
+                + " documents. The usual cause is a connection that is not inside a transaction"
+                + " block: a transaction-local set_config is silently ignored there. Unverifiable"
+                + " is not clean, so this is a refusal rather than a warning.");
+      }
     }
   }
 
@@ -223,32 +312,35 @@ final class SchemaVerification {
       boolean forceRowSecurity,
       boolean ownedByRole) {}
 
-  private static Map<String, Relation> relations(Connection c) throws SQLException {
+  private static Map<String, Relation> relations(Connection c, long ns) throws SQLException {
     return relations(
         c,
+        ns,
         "SELECT c.oid, c.relname, c.relkind, c.relpersistence, c.relhasrules, c.relrowsecurity,"
-            + " c.relforcerowsecurity, pg_has_role(current_user, c.relowner, 'MEMBER')"
-            + " FROM pg_class c"
-            + " WHERE c.relnamespace = current_schema()::regnamespace AND c.relname = ANY(?)",
+            + " c.relforcerowsecurity, pg_catalog.pg_has_role(current_user, c.relowner, 'MEMBER')"
+            + " FROM pg_catalog.pg_class c"
+            + " WHERE c.relnamespace = ? AND c.relname = ANY(?)",
         SchemaExpectations.TABLES);
   }
 
-  private static Map<String, Relation> indexes(Connection c) throws SQLException {
+  private static Map<String, Relation> indexes(Connection c, long ns) throws SQLException {
     return relations(
         c,
+        ns,
         "SELECT c.oid, c.relname, c.relkind, c.relpersistence, c.relhasrules, c.relrowsecurity,"
-            + " c.relforcerowsecurity, pg_has_role(current_user, c.relowner, 'MEMBER')"
-            + " FROM pg_class c"
-            + " WHERE c.relnamespace = current_schema()::regnamespace AND c.relkind = 'i'"
+            + " c.relforcerowsecurity, pg_catalog.pg_has_role(current_user, c.relowner, 'MEMBER')"
+            + " FROM pg_catalog.pg_class c"
+            + " WHERE c.relnamespace = ? AND c.relkind = 'i'"
             + " AND c.relname = ANY(?)",
         SchemaExpectations.INDEXES);
   }
 
-  private static Map<String, Relation> relations(Connection c, String sql, List<String> names)
-      throws SQLException {
+  private static Map<String, Relation> relations(
+      Connection c, long ns, String sql, List<String> names) throws SQLException {
     var found = new LinkedHashMap<String, Relation>();
     try (PreparedStatement ps = c.prepareStatement(sql)) {
-      ps.setArray(1, c.createArrayOf("text", names.toArray()));
+      ps.setLong(1, ns);
+      ps.setArray(2, c.createArrayOf("text", names.toArray()));
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           found.put(
@@ -290,16 +382,20 @@ final class SchemaVerification {
   }
 
   private static void checkColumns(
-      Connection c, Map<String, Relation> relations, List<String> shape) throws SQLException {
+      Connection c, long ns, Map<String, Relation> relations, List<String> shape)
+      throws SQLException {
     var actual = new LinkedHashMap<String, List<Column>>();
     try (PreparedStatement ps =
         c.prepareStatement(
-            "SELECT c.relname, a.attname, a.attnotnull, format_type(a.atttypid, a.atttypmod)"
-                + " FROM pg_class c JOIN pg_attribute a ON a.attrelid = c.oid"
-                + " WHERE c.relnamespace = current_schema()::regnamespace AND c.relname = ANY(?)"
+            "SELECT c.relname, a.attname, a.attnotnull,"
+                + " pg_catalog.format_type(a.atttypid, a.atttypmod)"
+                + " FROM pg_catalog.pg_class c"
+                + " JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid"
+                + " WHERE c.relnamespace = ? AND c.relname = ANY(?)"
                 + " AND a.attnum > 0 AND NOT a.attisdropped"
                 + " ORDER BY c.relname, a.attnum")) {
-      ps.setArray(1, c.createArrayOf("text", SchemaExpectations.TABLES.toArray()));
+      ps.setLong(1, ns);
+      ps.setArray(2, c.createArrayOf("text", SchemaExpectations.TABLES.toArray()));
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           actual
@@ -349,26 +445,29 @@ final class SchemaVerification {
   }
 
   private static void checkSequence(
-      Connection c, Map<String, Relation> relations, List<String> shape) throws SQLException {
+      Connection c, long ns, Map<String, Relation> relations, List<String> shape)
+      throws SQLException {
     if (!relations.containsKey(SchemaExpectations.ERASURE)) {
       return;
     }
     try (PreparedStatement ps =
         c.prepareStatement(
-            "SELECT s.relkind, (SELECT count(*) FROM pg_depend d"
-                + "   WHERE d.classid = 'pg_class'::regclass AND d.objid = s.oid"
-                + "     AND d.refclassid = 'pg_class'::regclass AND d.refobjid = t.oid"
+            "SELECT s.relkind, (SELECT pg_catalog.count(*) FROM pg_catalog.pg_depend d"
+                + "   WHERE d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = s.oid"
+                + "     AND d.refclassid = 'pg_catalog.pg_class'::regclass AND d.refobjid = t.oid"
                 + "     AND d.refobjsubid = a.attnum AND d.deptype = 'a'),"
-                + " (SELECT count(*) FROM pg_attrdef ad"
-                + "   JOIN pg_depend d2 ON d2.classid = 'pg_attrdef'::regclass AND d2.objid = ad.oid"
-                + "     AND d2.refclassid = 'pg_class'::regclass AND d2.refobjid = s.oid"
+                + " (SELECT pg_catalog.count(*) FROM pg_catalog.pg_attrdef ad"
+                + "   JOIN pg_catalog.pg_depend d2"
+                + "     ON d2.classid = 'pg_catalog.pg_attrdef'::regclass AND d2.objid = ad.oid"
+                + "     AND d2.refclassid = 'pg_catalog.pg_class'::regclass AND d2.refobjid = s.oid"
                 + "     AND d2.deptype = 'n'"
                 + "   WHERE ad.adrelid = t.oid AND ad.adnum = a.attnum)"
-                + " FROM pg_class s, pg_class t, pg_attribute a"
-                + " WHERE s.relnamespace = current_schema()::regnamespace AND s.relname = ?"
+                + " FROM pg_catalog.pg_class s, pg_catalog.pg_class t, pg_catalog.pg_attribute a"
+                + " WHERE s.relnamespace = ? AND s.relname = ?"
                 + "   AND t.oid = ? AND a.attrelid = t.oid AND a.attname = 'seq'")) {
-      ps.setString(1, SchemaExpectations.SEQUENCE);
-      ps.setLong(2, relations.get(SchemaExpectations.ERASURE).oid());
+      ps.setLong(1, ns);
+      ps.setString(2, SchemaExpectations.SEQUENCE);
+      ps.setLong(3, relations.get(SchemaExpectations.ERASURE).oid());
       try (ResultSet rs = ps.executeQuery()) {
         if (!rs.next()) {
           shape.add(
@@ -404,14 +503,18 @@ final class SchemaVerification {
   }
 
   private static void checkConstraints(
-      Connection c, Map<String, Relation> relations, List<String> shape) throws SQLException {
+      Connection c, long ns, Map<String, Relation> relations, List<String> shape)
+      throws SQLException {
     var actual = new LinkedHashMap<String, Constraint>();
     try (PreparedStatement ps =
         c.prepareStatement(
-            "SELECT c.relname, con.conname, con.contype, pg_get_constraintdef(con.oid)"
-                + " FROM pg_constraint con JOIN pg_class c ON c.oid = con.conrelid"
-                + " WHERE c.relnamespace = current_schema()::regnamespace AND c.relname = ANY(?)")) {
-      ps.setArray(1, c.createArrayOf("text", SchemaExpectations.TABLES.toArray()));
+            "SELECT c.relname, con.conname, con.contype,"
+                + " pg_catalog.pg_get_constraintdef(con.oid)"
+                + " FROM pg_catalog.pg_constraint con"
+                + " JOIN pg_catalog.pg_class c ON c.oid = con.conrelid"
+                + " WHERE c.relnamespace = ? AND c.relname = ANY(?)")) {
+      ps.setLong(1, ns);
+      ps.setArray(2, c.createArrayOf("text", SchemaExpectations.TABLES.toArray()));
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           actual.put(
@@ -480,16 +583,19 @@ final class SchemaVerification {
       String returns,
       boolean ownedByRole) {}
 
-  private static Map<String, Function> functions(Connection c) throws SQLException {
+  private static Map<String, Function> functions(Connection c, long ns) throws SQLException {
     var found = new LinkedHashMap<String, Function>();
     try (PreparedStatement ps =
         c.prepareStatement(
             "SELECT p.oid, p.proname, p.prosrc, p.prokind, p.pronargs, p.prosecdef,"
-                + " p.proconfig IS NULL, l.lanname, pg_get_function_result(p.oid),"
-                + " pg_has_role(current_user, p.proowner, 'MEMBER')"
-                + " FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang"
-                + " WHERE p.pronamespace = current_schema()::regnamespace AND p.proname = ANY(?)")) {
-      ps.setArray(1, c.createArrayOf("text", SchemaExpectations.GUARD_FUNCTIONS.toArray()));
+                + " p.proconfig IS NULL, l.lanname,"
+                + " pg_catalog.pg_get_function_result(p.oid),"
+                + " pg_catalog.pg_has_role(current_user, p.proowner, 'MEMBER')"
+                + " FROM pg_catalog.pg_proc p"
+                + " JOIN pg_catalog.pg_language l ON l.oid = p.prolang"
+                + " WHERE p.pronamespace = ? AND p.proname = ANY(?)")) {
+      ps.setLong(1, ns);
+      ps.setArray(2, c.createArrayOf("text", SchemaExpectations.GUARD_FUNCTIONS.toArray()));
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           found.put(
@@ -598,6 +704,7 @@ final class SchemaVerification {
 
   private static void checkTriggers(
       Connection c,
+      long ns,
       Map<String, Relation> relations,
       Map<String, Function> functions,
       List<String> guards)
@@ -620,13 +727,16 @@ final class SchemaVerification {
     try (PreparedStatement ps =
         c.prepareStatement(
             "SELECT t.tgname, c.relname, p.proname, t.tgtype, t.tgenabled,"
-                + " p.pronamespace = current_schema()::regnamespace,"
+                + " p.pronamespace = ?,"
                 + " t.tgqual IS NOT NULL, t.tgattr::text"
-                + " FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid"
-                + " JOIN pg_proc p ON p.oid = t.tgfoid"
-                + " WHERE c.relnamespace = current_schema()::regnamespace"
+                + " FROM pg_catalog.pg_trigger t"
+                + " JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid"
+                + " JOIN pg_catalog.pg_proc p ON p.oid = t.tgfoid"
+                + " WHERE c.relnamespace = ?"
                 + "   AND c.relname = ANY(?) AND NOT t.tgisinternal")) {
-      ps.setArray(1, c.createArrayOf("text", SchemaExpectations.TABLES.toArray()));
+      ps.setLong(1, ns);
+      ps.setLong(2, ns);
+      ps.setArray(3, c.createArrayOf("text", SchemaExpectations.TABLES.toArray()));
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           String attributes = rs.getString(8);
@@ -770,24 +880,28 @@ final class SchemaVerification {
    * the mirror case, costs one more row in the same query, and nothing legitimate produces it.
    */
   private static void checkInheritance(
-      Connection c, Map<String, Relation> relations, List<String> guards) throws SQLException {
+      Connection c, long ns, Map<String, Relation> relations, List<String> guards)
+      throws SQLException {
     if (relations.isEmpty()) {
       return;
     }
     try (PreparedStatement ps =
         c.prepareStatement(
             "SELECT parent.relname, child.relname,"
-                + " parent.relnamespace = current_schema()::regnamespace"
-                + " FROM pg_inherits i"
-                + " JOIN pg_class parent ON parent.oid = i.inhparent"
-                + " JOIN pg_class child ON child.oid = i.inhrelid"
-                + " WHERE (parent.relnamespace = current_schema()::regnamespace"
+                + " parent.relnamespace = ?"
+                + " FROM pg_catalog.pg_inherits i"
+                + " JOIN pg_catalog.pg_class parent ON parent.oid = i.inhparent"
+                + " JOIN pg_catalog.pg_class child ON child.oid = i.inhrelid"
+                + " WHERE (parent.relnamespace = ?"
                 + "        AND parent.relname = ANY(?))"
-                + "    OR (child.relnamespace = current_schema()::regnamespace"
+                + "    OR (child.relnamespace = ?"
                 + "        AND child.relname = ANY(?))")) {
       var names = c.createArrayOf("text", SchemaExpectations.TABLES.toArray());
-      ps.setArray(1, names);
-      ps.setArray(2, names);
+      ps.setLong(1, ns);
+      ps.setLong(2, ns);
+      ps.setArray(3, names);
+      ps.setLong(4, ns);
+      ps.setArray(5, names);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           String parent = rs.getString(1);
@@ -818,7 +932,8 @@ final class SchemaVerification {
   }
 
   private static void checkRulesAndPolicies(
-      Connection c, Map<String, Relation> relations, List<String> guards) throws SQLException {
+      Connection c, long ns, Map<String, Relation> relations, List<String> guards)
+      throws SQLException {
     for (Relation r : relations.values()) {
       if (r.hasRules()) {
         guards.add(
@@ -840,11 +955,12 @@ final class SchemaVerification {
     }
     try (PreparedStatement ps =
         c.prepareStatement(
-            "SELECT c.relname, count(pol.oid) FROM pg_class c"
-                + " LEFT JOIN pg_policy pol ON pol.polrelid = c.oid"
-                + " WHERE c.relnamespace = current_schema()::regnamespace AND c.relname = ANY(?)"
+            "SELECT c.relname, pg_catalog.count(pol.oid) FROM pg_catalog.pg_class c"
+                + " LEFT JOIN pg_catalog.pg_policy pol ON pol.polrelid = c.oid"
+                + " WHERE c.relnamespace = ? AND c.relname = ANY(?)"
                 + " GROUP BY c.relname")) {
-      ps.setArray(1, c.createArrayOf("text", SchemaExpectations.TABLES.toArray()));
+      ps.setLong(1, ns);
+      ps.setArray(2, c.createArrayOf("text", SchemaExpectations.TABLES.toArray()));
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           if (rs.getLong(2) > 0) {
@@ -862,11 +978,12 @@ final class SchemaVerification {
     }
     try (PreparedStatement ps =
         c.prepareStatement(
-            "SELECT c.relname, count(r.oid) FROM pg_class c"
-                + " LEFT JOIN pg_rewrite r ON r.ev_class = c.oid"
-                + " WHERE c.relnamespace = current_schema()::regnamespace AND c.relname = ANY(?)"
+            "SELECT c.relname, pg_catalog.count(r.oid) FROM pg_catalog.pg_class c"
+                + " LEFT JOIN pg_catalog.pg_rewrite r ON r.ev_class = c.oid"
+                + " WHERE c.relnamespace = ? AND c.relname = ANY(?)"
                 + " GROUP BY c.relname")) {
-      ps.setArray(1, c.createArrayOf("text", SchemaExpectations.TABLES.toArray()));
+      ps.setLong(1, ns);
+      ps.setArray(2, c.createArrayOf("text", SchemaExpectations.TABLES.toArray()));
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           if (rs.getLong(2) > 0 && !relations.get(rs.getString(1)).hasRules()) {
@@ -889,33 +1006,40 @@ final class SchemaVerification {
       List<String> missing)
       throws SQLException {
     try (PreparedStatement ps =
-            c.prepareStatement(
-                "SELECT current_setting('is_superuser'),"
-                    + " has_schema_privilege(current_user, current_schema(), 'CREATE'),"
-                    + " has_schema_privilege(current_user, current_schema(), 'USAGE'),"
-                    + " has_database_privilege(current_user, current_database(), 'TEMP'),"
-                    + " has_database_privilege(current_user, current_database(), 'CREATE'),"
-                    + " pg_has_role(current_user, (SELECT datdba FROM pg_database"
-                    + "   WHERE datname = current_database()), 'MEMBER')");
-        ResultSet rs = ps.executeQuery()) {
-      rs.next();
-      if ("on".equalsIgnoreCase(rs.getString(1))) {
-        excess.add("is a superuser");
-      }
-      if (rs.getBoolean(2)) {
-        excess.add("holds CREATE on schema " + session.schema());
-      }
-      if (!rs.getBoolean(3)) {
-        missing.add("USAGE on schema " + session.schema());
-      }
-      if (rs.getBoolean(4)) {
-        excess.add("holds TEMPORARY on database " + session.database());
-      }
-      if (rs.getBoolean(5)) {
-        excess.add("holds CREATE on database " + session.database());
-      }
-      if (rs.getBoolean(6)) {
-        excess.add("is, or is a member of, the owner of database " + session.database());
+        c.prepareStatement(
+            "SELECT pg_catalog.current_setting('is_superuser'),"
+                + " pg_catalog.has_schema_privilege(current_user, ?::oid, 'CREATE'),"
+                + " pg_catalog.has_schema_privilege(current_user, ?::oid, 'USAGE'),"
+                + " pg_catalog.has_database_privilege(current_user, ?, 'TEMP'),"
+                + " pg_catalog.has_database_privilege(current_user, ?, 'CREATE'),"
+                + " pg_catalog.pg_has_role(current_user,"
+                + "   (SELECT d.datdba FROM pg_catalog.pg_database d"
+                + "      WHERE d.datname = ?), 'MEMBER')")) {
+      ps.setLong(1, session.schemaOid());
+      ps.setLong(2, session.schemaOid());
+      ps.setString(3, session.database());
+      ps.setString(4, session.database());
+      ps.setString(5, session.database());
+      try (ResultSet rs = ps.executeQuery()) {
+        rs.next();
+        if ("on".equalsIgnoreCase(rs.getString(1))) {
+          excess.add("is a superuser");
+        }
+        if (rs.getBoolean(2)) {
+          excess.add("holds CREATE on schema " + session.schema());
+        }
+        if (!rs.getBoolean(3)) {
+          missing.add("USAGE on schema " + session.schema());
+        }
+        if (rs.getBoolean(4)) {
+          excess.add("holds TEMPORARY on database " + session.database());
+        }
+        if (rs.getBoolean(5)) {
+          excess.add("holds CREATE on database " + session.database());
+        }
+        if (rs.getBoolean(6)) {
+          excess.add("is, or is a member of, the owner of database " + session.database());
+        }
       }
     }
     relations.values().stream()
@@ -927,21 +1051,22 @@ final class SchemaVerification {
     functions.values().stream()
         .filter(Function::ownedByRole)
         .forEach(f -> excess.add("owns guard function " + f.name()));
-    checkSequenceOwnerAndPrivileges(c, excess, missing);
+    checkSequenceOwnerAndPrivileges(c, session.schemaOid(), excess, missing);
     checkTablePrivileges(c, relations, excess, missing);
   }
 
   private static void checkSequenceOwnerAndPrivileges(
-      Connection c, List<String> excess, List<String> missing) throws SQLException {
+      Connection c, long ns, List<String> excess, List<String> missing) throws SQLException {
     try (PreparedStatement ps =
         c.prepareStatement(
-            "SELECT pg_has_role(current_user, s.relowner, 'MEMBER'),"
-                + " has_sequence_privilege(current_user, s.oid, 'USAGE'),"
-                + " has_sequence_privilege(current_user, s.oid, 'SELECT'),"
-                + " has_sequence_privilege(current_user, s.oid, 'UPDATE')"
-                + " FROM pg_class s"
-                + " WHERE s.relnamespace = current_schema()::regnamespace AND s.relname = ?")) {
-      ps.setString(1, SchemaExpectations.SEQUENCE);
+            "SELECT pg_catalog.pg_has_role(current_user, s.relowner, 'MEMBER'),"
+                + " pg_catalog.has_sequence_privilege(current_user, s.oid, 'USAGE'),"
+                + " pg_catalog.has_sequence_privilege(current_user, s.oid, 'SELECT'),"
+                + " pg_catalog.has_sequence_privilege(current_user, s.oid, 'UPDATE')"
+                + " FROM pg_catalog.pg_class s"
+                + " WHERE s.relnamespace = ? AND s.relname = ?")) {
+      ps.setLong(1, ns);
+      ps.setString(2, SchemaExpectations.SEQUENCE);
       try (ResultSet rs = ps.executeQuery()) {
         if (!rs.next()) {
           return;
@@ -1004,8 +1129,9 @@ final class SchemaVerification {
     }
     try (PreparedStatement ps =
         c.prepareStatement(
-            "SELECT a.attname, has_column_privilege(current_user, a.attrelid, a.attnum, 'UPDATE')"
-                + " FROM pg_attribute a"
+            "SELECT a.attname,"
+                + " pg_catalog.has_column_privilege(current_user, a.attrelid, a.attnum, 'UPDATE')"
+                + " FROM pg_catalog.pg_attribute a"
                 + " WHERE a.attrelid = ? AND a.attnum > 0 AND NOT a.attisdropped")) {
       ps.setLong(1, relation.oid());
       try (ResultSet rs = ps.executeQuery()) {
@@ -1031,7 +1157,7 @@ final class SchemaVerification {
   private static boolean hasTablePrivilege(Connection c, long oid, String privilege)
       throws SQLException {
     try (PreparedStatement ps =
-        c.prepareStatement("SELECT has_table_privilege(current_user, ?::oid, ?)")) {
+        c.prepareStatement("SELECT pg_catalog.has_table_privilege(current_user, ?::oid, ?)")) {
       ps.setLong(1, oid);
       ps.setString(2, privilege);
       try (ResultSet rs = ps.executeQuery()) {

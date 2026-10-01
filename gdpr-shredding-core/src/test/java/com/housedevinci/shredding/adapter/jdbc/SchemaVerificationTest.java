@@ -886,6 +886,346 @@ class SchemaVerificationTest {
     assertThat(count("public.shredding_erasure")).isEqualTo(1);
   }
 
+  // ----------------------------------------------- T50 to T57: verification's own names (§4.9)
+
+  /**
+   * C-13-9, promoted from the review's probe. The role owns the four tables, the two indexes, the
+   * sequence and the three guard functions - the exact state {@code SHRED-SCHEMA-004} exists to
+   * refuse - and then answers every one of §4.6's legs itself: a function name resolves along
+   * {@code search_path} exactly as a relation name does, any role may {@code ALTER ROLE <itself>
+   * SET search_path} (no privilege, nothing to revoke), and an application role that owns its own
+   * business schema may define functions in it. Before the fix this booted clean and the §4.8 INFO
+   * line said "the role owns none of the 9 objects".
+   */
+  @Test
+  void t50_a_role_that_shadows_the_privilege_functions_is_still_refused_as_privileged() {
+    appOwnsEverything();
+    su("CREATE SCHEMA shadow AUTHORIZATION " + APP);
+    app(honestLookingShadow("shadow"));
+    su("ALTER ROLE " + APP + " SET search_path = public, shadow, pg_catalog");
+
+    assertThat(codeOf(() -> JdbcSupport.verifySchema(appDs)))
+        .describedAs("004's subject must not be 004's witness")
+        .isEqualTo(ErrorCodes.RUNTIME_ROLE_PRIVILEGED);
+  }
+
+  /**
+   * The same primitive, used the other way round: on the documented two-role posture the role
+   * shadows every catalogue call with one that answers <em>dangerously</em> - it owns everything,
+   * it is a superuser, every privilege is held, every type and every constraint definition is
+   * wrong. A clean verdict here is the proof that none of the twelve legs reads an answer the
+   * verified role wrote. Without it, a role could also force a false refusal and keep an
+   * application down.
+   */
+  @Test
+  void t51_a_shadow_cannot_force_a_false_refusal_on_the_honest_posture() {
+    su("CREATE SCHEMA shadow AUTHORIZATION " + APP);
+    app(alarmingShadow("shadow"));
+    su("ALTER ROLE " + APP + " SET search_path = public, shadow, pg_catalog");
+
+    assertThatCode(() -> JdbcSupport.verifySchema(appDs)).doesNotThrowAnyException();
+  }
+
+  /**
+   * C-13-10, first half. The constraint leg is deliberately on the definition and never on the
+   * name, because "a UNIQUE moved to another column keeps its name" - and {@code
+   * pg_get_constraintdef} is the whole of that leg. {@code CHECK ((id = 1))} is what keeps the
+   * anchor a single row; relaxed in place to {@code CHECK ((id >= 1))} the trail can carry a second
+   * head.
+   */
+  @Test
+  void t52_a_shadowed_pg_get_constraintdef_cannot_hide_a_relaxed_anchor_check() {
+    appOwnsEverything();
+    su("CREATE SCHEMA shadow AUTHORIZATION " + APP);
+    app(
+        "ALTER TABLE public.shredding_erasure_anchor"
+            + " DROP CONSTRAINT shredding_erasure_anchor_id_check",
+        "ALTER TABLE public.shredding_erasure_anchor"
+            + " ADD CONSTRAINT shredding_erasure_anchor_id_check CHECK (id >= 1)",
+        "CREATE FUNCTION shadow.pg_get_constraintdef(oid) RETURNS text AS $$"
+            + " SELECT CASE WHEN (SELECT conname FROM pg_catalog.pg_constraint WHERE oid = $1)"
+            + "   = 'shredding_erasure_anchor_id_check' THEN 'CHECK ((id = 1))'"
+            + "   ELSE pg_catalog.pg_get_constraintdef($1) END $$ LANGUAGE sql");
+    su("ALTER ROLE " + APP + " SET search_path = public, shadow, pg_catalog");
+
+    assertThat(refusal().getMessage()).contains("shredding_erasure_anchor_id_check");
+  }
+
+  /**
+   * C-13-10, second half. {@code format_type} is the whole of the column-type leg. {@code
+   * character(64)} is what makes the chain's hash column fixed width and blank-padded; widened to
+   * {@code varchar(100)} it accepts a longer hash and compares without padding. The shadow receives
+   * only the type oid and the modifier, so the lie has to be exact - no other column of the four
+   * tables is {@code varchar(100)} - and one {@code CASE} on that pair is exact.
+   */
+  @Test
+  void t53_a_shadowed_format_type_cannot_hide_a_widened_hash_column() {
+    appOwnsEverything();
+    su("CREATE SCHEMA shadow AUTHORIZATION " + APP);
+    app(
+        "ALTER TABLE public.shredding_erasure ALTER COLUMN hash TYPE varchar(100)",
+        "CREATE FUNCTION shadow.format_type(oid, integer) RETURNS text AS $$"
+            + " SELECT CASE WHEN $1 = 'character varying'::regtype AND $2 = 104"
+            + "   THEN 'character(64)'"
+            + "   ELSE pg_catalog.format_type($1, $2) END $$ LANGUAGE sql");
+    su("ALTER ROLE " + APP + " SET search_path = public, shadow, pg_catalog");
+
+    assertThat(refusal().getMessage()).contains("character varying(100)");
+  }
+
+  /**
+   * The pin's own backstop, §4.9 rule 3. {@code set_config} returns the value it was asked to set
+   * whether or not the setting took: with {@code is_local = true} outside a transaction block it
+   * does nothing at all, raises nothing, and leaves every later leg qualified in text and
+   * unqualified in substance. Only a read-back against the literal {@code pg_catalog} sees that,
+   * and it is {@code SHRED-SCHEMA-005} - the pin not taking is the one case where the failure
+   * itself is the finding.
+   */
+  @Test
+  void t54_a_pin_that_cannot_take_is_unverifiable_and_never_a_pass() {
+    try (Connection c = appDs.getConnection()) {
+      c.setAutoCommit(true);
+      var thrown =
+          org.assertj.core.api.Assertions.catchThrowableOfType(
+              ShreddingException.class,
+              () -> SchemaVerification.verifyInCallersTransaction(c, false));
+      assertThat(thrown.code()).isEqualTo(ErrorCodes.SCHEMA_UNVERIFIABLE);
+      assertThat(thrown).hasMessageContaining("pin its own search_path");
+    } catch (SQLException e) {
+      throw new IllegalStateException(e);
+    }
+  }
+
+  /**
+   * Why the captured schema is bound as a namespace oid rather than cast with {@code
+   * '<name>'::regnamespace}. {@code regnamespacein} parses its argument as an SQL identifier, so a
+   * schema whose name needs quoting - which {@link VerifiedSchema} deliberately supports, and which
+   * {@code qualify()} has always handled - would turn every leg into {@code SHRED-SCHEMA-005} under
+   * the cast. An exact {@code nspname} match has no parser in it.
+   */
+  @Test
+  void t55_a_schema_whose_name_needs_quoting_is_verified_not_unverifiable() {
+    try {
+      su("CREATE SCHEMA \"My Shred\" AUTHORIZATION " + OWNER);
+      su(
+          "ALTER ROLE " + OWNER + " SET search_path = \"My Shred\"",
+          "ALTER ROLE " + APP + " SET search_path = \"My Shred\"");
+      JdbcSupport.initializeSchema(ownerDs);
+      owner("GRANT USAGE ON SCHEMA \"My Shred\" TO " + APP);
+      owner(GRANT_BLOCK.toArray(String[]::new));
+
+      SchemaVerdict verdict = JdbcSupport.verifySchema(appDs);
+      assertThat(verdict.schema().name()).isEqualTo("My Shred");
+      assertThat(verdict.runtimeRoleIsUnprivileged()).isTrue();
+      store(verdict.schema()).append(record("quoted-schema"));
+      assertThat(count("\"My Shred\".shredding_erasure")).isEqualTo(1);
+    } finally {
+      su(
+          "ALTER ROLE " + OWNER + " RESET search_path",
+          "ALTER ROLE " + APP + " RESET search_path",
+          "DROP SCHEMA IF EXISTS \"My Shred\" CASCADE");
+    }
+  }
+
+  /**
+   * C-13-12. The bundled script's first guard refuses a database written before keyed-from-birth,
+   * and resolved both oids through an unqualified {@code to_regclass} inside a {@code DO} block -
+   * which resolves function names against the session {@code search_path} like anything else. On
+   * the {@code initialize-schema=true} path the runtime role runs that script itself, so the role
+   * the guard is about could make both oids NULL, both arms of the {@code IF} false, and the {@code
+   * RAISE} unreachable.
+   */
+  @Test
+  void t56_a_shadowed_to_regclass_cannot_silence_the_scripts_keyed_from_birth_guard() {
+    su("DROP SCHEMA public CASCADE", "CREATE SCHEMA public", "ALTER SCHEMA public OWNER TO " + APP);
+    su("CREATE SCHEMA shadow AUTHORIZATION " + APP);
+    app(
+        "CREATE TABLE public.shredding_erasure (seq bigserial PRIMARY KEY, ts timestamptz NOT NULL)",
+        "CREATE FUNCTION shadow.to_regclass(text) RETURNS regclass AS $$"
+            + " SELECT NULL::regclass $$ LANGUAGE sql");
+    su("ALTER ROLE " + APP + " SET search_path = public, shadow, pg_catalog");
+
+    assertThatThrownBy(() -> JdbcSupport.initializeSchema(appDs))
+        .hasStackTraceContaining("predates keyed-from-birth");
+  }
+
+  /**
+   * C-13-11, and the one leg of the addendum that is not the gate: {@link JdbcErasureStore}'s
+   * same-text blind-index read-back, the control that refuses an erasure which left an HMAC of the
+   * erased plaintext behind. {@code count} is an unqualified aggregate name and resolves through
+   * the same {@code search_path}, so an aggregate that returns its state unchanged makes the
+   * read-back answer zero over a table that still holds the index, and the erasure is recorded
+   * {@code COMPLETE}.
+   *
+   * <p>The residue is produced the way the control's own javadoc says it is produced: a {@code
+   * BEFORE UPDATE} trigger on the application's table repopulates the column the erasure just
+   * cleared. The independent read-back is stubbed to zero here on purpose, so the only thing that
+   * can refuse this erasure is the same-text count.
+   */
+  @Test
+  void t57_a_shadowed_count_cannot_hide_blind_index_residue_from_the_read_back() {
+    SchemaVerdict verdict = JdbcSupport.verifySchema(appDs);
+    owner(
+        "CREATE TABLE public.invoice (tenant varchar(255), subject varchar(255), bi bytea)",
+        "INSERT INTO public.invoice VALUES ('t1', 's1', '\\x01')",
+        "CREATE FUNCTION public.invoice_keep_bi() RETURNS trigger AS $$"
+            + " BEGIN NEW.bi := '\\x01'::bytea; RETURN NEW; END; $$ LANGUAGE plpgsql",
+        "CREATE TRIGGER invoice_keep_bi BEFORE UPDATE ON public.invoice"
+            + " FOR EACH ROW EXECUTE FUNCTION public.invoice_keep_bi()",
+        "GRANT SELECT, UPDATE ON public.invoice TO " + APP);
+    su("CREATE SCHEMA shadow AUTHORIZATION " + APP);
+    app(
+        "CREATE FUNCTION shadow.always_zero(bigint) RETURNS bigint AS $$"
+            + " SELECT 0::bigint $$ LANGUAGE sql",
+        "CREATE AGGREGATE shadow.count(*)"
+            + " (sfunc = shadow.always_zero, stype = bigint, initcond = '0')");
+    su("ALTER ROLE " + APP + " SET search_path = public, shadow, pg_catalog");
+
+    var store =
+        new JdbcErasureStore(
+            appDs,
+            verdict.schema(),
+            ErasureChain.unkeyed(),
+            List.of(
+                new com.housedevinci.shredding.domain.BlindIndexColumn(
+                    com.housedevinci.shredding.domain.TableRef.of("invoice"),
+                    com.housedevinci.shredding.domain.ColumnRef.unquoted("bi"),
+                    com.housedevinci.shredding.domain.ColumnRef.unquoted("subject"),
+                    com.housedevinci.shredding.domain.ColumnRef.unquoted("tenant"),
+                    java.util.Optional.of("tenant"),
+                    java.util.Optional.of("subject"))),
+            (c, column, tenant, subject) -> 0L);
+
+    var thrown =
+        org.assertj.core.api.Assertions.catchThrowableOfType(
+            ShreddingException.class,
+            () ->
+                store.erase(
+                    TenantId.of("t1"),
+                    SubjectId.of("s1"),
+                    (destroyed, cleared) -> record("residue")));
+    assertThat(thrown.code()).isEqualTo(ErrorCodes.ERASURE_INDEX_RESIDUAL);
+    assertThat(count("public.shredding_erasure"))
+        .describedAs("the whole transaction is rolled back, so nothing claims a completion")
+        .isZero();
+  }
+
+  /** The 0.1.x-shaped install: the application role applied the script and owns everything. */
+  private void appOwnsEverything() {
+    su("DROP SCHEMA public CASCADE", "CREATE SCHEMA public", "ALTER SCHEMA public OWNER TO " + APP);
+    JdbcSupport.initializeSchema(appDs);
+  }
+
+  /**
+   * The shadow that answers every §4.6 leg the way a hardened deployment would: it needs no
+   * privilege the design refuses to grant, because the role owns the schema it writes them into.
+   */
+  private static String[] honestLookingShadow(String schema) {
+    return new String[] {
+      "CREATE FUNCTION "
+          + schema
+          + ".pg_has_role(name, oid, text) RETURNS boolean"
+          + " AS $$ SELECT false $$ LANGUAGE sql",
+      "CREATE FUNCTION "
+          + schema
+          + ".current_setting(text) RETURNS text"
+          + " AS $$ SELECT CASE WHEN $1 = 'is_superuser' THEN 'off'"
+          + "   ELSE pg_catalog.current_setting($1) END $$ LANGUAGE sql",
+      "CREATE FUNCTION "
+          + schema
+          + ".has_schema_privilege(name, oid, text) RETURNS boolean"
+          + " AS $$ SELECT $3 = 'USAGE' $$ LANGUAGE sql",
+      "CREATE FUNCTION "
+          + schema
+          + ".has_database_privilege(name, text, text) RETURNS boolean"
+          + " AS $$ SELECT false $$ LANGUAGE sql",
+      "CREATE FUNCTION "
+          + schema
+          + ".has_sequence_privilege(name, oid, text) RETURNS boolean"
+          + " AS $$ SELECT $3 = 'USAGE' $$ LANGUAGE sql",
+      "CREATE FUNCTION "
+          + schema
+          + ".has_table_privilege(name, oid, text) RETURNS boolean AS $$"
+          + " SELECT CASE (SELECT relname FROM pg_catalog.pg_class WHERE oid = $2)"
+          + "   WHEN 'shredding_data_key' THEN $3 IN ('SELECT','INSERT','DELETE')"
+          + "   WHEN 'shredding_erased_subject' THEN $3 IN ('SELECT','INSERT')"
+          + "   WHEN 'shredding_erasure' THEN $3 IN ('SELECT','INSERT')"
+          + "   WHEN 'shredding_erasure_anchor' THEN $3 IN ('SELECT','INSERT','UPDATE')"
+          + "   ELSE false END $$ LANGUAGE sql",
+      "CREATE FUNCTION "
+          + schema
+          + ".has_column_privilege(name, oid, smallint, text)"
+          + " RETURNS boolean AS $$"
+          + " SELECT (SELECT c.relname || '.' || a.attname FROM pg_catalog.pg_class c"
+          + "   JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid"
+          + "   WHERE c.oid = $2 AND a.attnum = $3)"
+          + " IN ('shredding_data_key.encryption_count',"
+          + "     'shredding_erased_subject.erased_at') $$ LANGUAGE sql"
+    };
+  }
+
+  /**
+   * The mirror: every leg answered the most alarming way, to prove a shadow cannot refuse either.
+   */
+  private static String[] alarmingShadow(String schema) {
+    return new String[] {
+      "CREATE FUNCTION "
+          + schema
+          + ".pg_has_role(name, oid, text) RETURNS boolean"
+          + " AS $$ SELECT true $$ LANGUAGE sql",
+      "CREATE FUNCTION "
+          + schema
+          + ".current_setting(text) RETURNS text"
+          + " AS $$ SELECT 'on'::text $$ LANGUAGE sql",
+      "CREATE FUNCTION "
+          + schema
+          + ".has_schema_privilege(name, oid, text) RETURNS boolean"
+          + " AS $$ SELECT $3 <> 'USAGE' $$ LANGUAGE sql",
+      "CREATE FUNCTION "
+          + schema
+          + ".has_database_privilege(name, text, text) RETURNS boolean"
+          + " AS $$ SELECT true $$ LANGUAGE sql",
+      "CREATE FUNCTION "
+          + schema
+          + ".has_sequence_privilege(name, oid, text) RETURNS boolean"
+          + " AS $$ SELECT true $$ LANGUAGE sql",
+      "CREATE FUNCTION "
+          + schema
+          + ".has_table_privilege(name, oid, text) RETURNS boolean"
+          + " AS $$ SELECT true $$ LANGUAGE sql",
+      "CREATE FUNCTION "
+          + schema
+          + ".has_column_privilege(name, oid, smallint, text)"
+          + " RETURNS boolean AS $$ SELECT true $$ LANGUAGE sql",
+      "CREATE FUNCTION "
+          + schema
+          + ".format_type(oid, integer) RETURNS text"
+          + " AS $$ SELECT 'not the type you expected'::text $$ LANGUAGE sql",
+      "CREATE FUNCTION "
+          + schema
+          + ".pg_get_constraintdef(oid) RETURNS text"
+          + " AS $$ SELECT 'CHECK (true)'::text $$ LANGUAGE sql",
+      "CREATE FUNCTION "
+          + schema
+          + ".pg_get_function_result(oid) RETURNS text"
+          + " AS $$ SELECT 'void'::text $$ LANGUAGE sql",
+      "CREATE FUNCTION "
+          + schema
+          + ".current_schema() RETURNS name"
+          + " AS $$ SELECT 'shadow'::name $$ LANGUAGE sql",
+      "CREATE FUNCTION "
+          + schema
+          + ".always_thousand(bigint) RETURNS bigint AS $$"
+          + " SELECT $1 + 1000 $$ LANGUAGE sql",
+      "CREATE AGGREGATE "
+          + schema
+          + ".count(*)"
+          + " (sfunc = "
+          + schema
+          + ".always_thousand, stype = bigint, initcond = '0')"
+    };
+  }
+
   // ------------------------------------------------------------------ helpers
 
   private JdbcErasureStore store(VerifiedSchema schema) {

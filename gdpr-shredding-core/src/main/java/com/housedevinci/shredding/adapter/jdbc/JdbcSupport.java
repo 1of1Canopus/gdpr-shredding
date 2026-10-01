@@ -87,7 +87,7 @@ public final class JdbcSupport {
   public static void lockSubject(Connection c, TenantId tenant, SubjectId subject)
       throws SQLException {
     try (PreparedStatement ps =
-        c.prepareStatement("SELECT pg_advisory_xact_lock(?, hashtext(?))")) {
+        c.prepareStatement("SELECT pg_catalog.pg_advisory_xact_lock(?, pg_catalog.hashtext(?))")) {
       ps.setInt(1, SUBJECT_LOCK_CLASS);
       // L11: length-prefixed, the same canonical form as Pseudonymiser.append and ErasureChain,
       // rather than a "|"-joined string - "a|b" + "c" and "a" + "b|c" hash the same joined string

@@ -46,6 +46,24 @@ All notable changes to this project. The format follows
   calls on a pooled connection. Qualification closes all three in this module's own SQL. The
   application's own tables, reached through the entity mapping by the blind-index clear and the
   Hibernate-rendered read-back, are deliberately left where the mapping puts them.
+- **Startup verification no longer asks the role it is judging.** A function name resolves along
+  `search_path` exactly as a relation name does, any role may `ALTER ROLE <itself> SET search_path`,
+  and an application role normally owns a schema it can define functions in - so `pg_has_role`,
+  `has_table_privilege`, `has_column_privilege`, `has_schema_privilege`, `has_database_privilege`,
+  `has_sequence_privilege`, `current_setting`, `current_schema`, `current_database`, `format_type`,
+  `pg_get_constraintdef`, `pg_get_function_result` and `count(*)` written bare were predicates the
+  subject of the check supplied the answers to. Reproduced: a role owning all nine objects and
+  holding every privilege on them booted clean, the INFO line read "owns none of the 9 objects",
+  and the same session then disabled the append-only triggers and emptied the trail; a relaxed
+  anchor `CHECK` and a widened `hash` column were hidden the same way. Verification's transaction
+  now pins its `search_path` to `pg_catalog` for its own duration and **reads the pin back**,
+  refusing with `SHRED-SCHEMA-005` when it did not take; the verified schema is captured once,
+  before the pin, and bound into every later query; and every catalogue function, catalogue
+  relation and `regclass` cast carries a `pg_catalog.` prefix regardless. The bundled script's
+  `to_regclass`, `quote_ident`, `current_schema`, `pg_advisory_xact_lock`, `pg_attribute` and
+  `pg_trigger`, and the erasure store's `count(*)`, `now()` and `pg_advisory_xact_lock(...)`, are
+  qualified for the same reason. The Hibernate-rendered independent read-back remains `count(*)` as
+  HQL renders it; it is named in SECURITY-NOTES rather than left implied.
 - `schema-postgresql.sql` sets all seven guard triggers to `ENABLE ALWAYS`, unconditionally and
   idempotently, every time it runs. `CREATE TRIGGER` leaves a trigger at `O`, which does not fire
   for a replication apply worker, for a superuser session in `session_replication_role = replica`,
