@@ -97,16 +97,19 @@
     <tomcat.version>11.0.25</tomcat.version>
     <!--
       Overrides the Jackson 3 BOM Spring Boot 4.1.1 manages (jackson-bom.version 3.1.5), which
-      carries GHSA-q4xh-88c3-wmh7 (HIGH, CVSS 7.5, denial of service) in tools.jackson.core:
-      jackson-databind for versions >= 3.0.0 < 3.1.6. Fixed upstream in 3.1.6. Spring Boot
-      4.1.1 is the latest 4.1.x patch and does not yet ship the fix; pinned here rather than
-      waiting on a BOM bump so the fix does not depend on Spring Boot's release cadence.
-      gdpr-shredding-sample brings jackson-databind in transitively through
+      carries three HIGH advisories in tools.jackson.core:jackson-databind: GHSA-q4xh-88c3-wmh7
+      (CVSS 7.5, denial of service, versions >= 3.0.0 < 3.1.6), GHSA-cxp5-3px4-pw24 (quadratic
+      forward-reference completion, versions <= 3.1.6) and GHSA-wv8q-qhhj-9h54 (retains every
+      unknown raw type ID, versions <= 3.1.6). All three are fixed in 3.1.7. Spring Boot 4.1.1
+      is the latest 4.1.x patch and does not yet ship the fix; pinned here rather than waiting
+      on a BOM bump so the fix does not depend on Spring Boot's release cadence. The 3.1.6 pin
+      from two days ago is itself affected by the second and third advisories, published after
+      that pin landed. gdpr-shredding-sample brings jackson-databind in transitively through
       spring-boot-starter-webmvc -> spring-boot-starter-jackson -> spring-boot-jackson; the
       core and starter modules do not depend on it directly. Remove this line once the managed
-      version is >= 3.1.6.
+      version is >= 3.1.7.
     -->
-    <jackson-bom.version>3.1.6</jackson-bom.version>
+    <jackson-bom.version>3.1.7</jackson-bom.version>
     <archunit.version>1.5.0</archunit.version>
     <errorprone.version>2.50.0</errorprone.version>
     <spotless.version>3.10.2</spotless.version>
