@@ -273,6 +273,49 @@ class SchemaVerificationTest {
   }
 
   /**
+   * N24 of the name-resolution design, measured as E6b. A {@code CHECK (id = 1)} created while an
+   * {@code =(smallint, integer)} of the role's own is on the applying session's path <b>binds the
+   * shadow</b>: the constraint then accepts {@code id = 2}, so the anchor can hold a second head
+   * row. The constraint-definition leg catches it, and it catches it <em>because</em> of the
+   * verification pin: read with {@code search_path} pinned, {@code pg_get_constraintdef} renders
+   * the shadowed operator with its schema, and read on the role's own path both render {@code CHECK
+   * ((id = 1))} and the leg is blind. This is the pin covering a path nothing else does.
+   */
+  @Test
+  void t36d_an_anchor_check_bound_to_a_shadowed_operator_is_refused_and_quoted() {
+    owner(
+        "CREATE FUNCTION public.yes(pg_catalog.int2, pg_catalog.int4) RETURNS boolean"
+            + " AS $$ SELECT true $$ LANGUAGE sql",
+        "CREATE OPERATOR public.= (LEFTARG = pg_catalog.int2,"
+            + " RIGHTARG = pg_catalog.int4, FUNCTION = public.yes)",
+        "ALTER TABLE shredding_erasure_anchor DROP CONSTRAINT shredding_erasure_anchor_id_check",
+        "ALTER TABLE shredding_erasure_anchor ADD CONSTRAINT shredding_erasure_anchor_id_check"
+            + " CHECK (id OPERATOR(public.=) 1)");
+
+    // The constraint now accepts a second head row, which is the C-13-10 outcome reached at
+    // creation time instead of at verification time.
+    assertThatCode(
+            () ->
+                exec(
+                    ownerDs,
+                    "INSERT INTO shredding_erasure_anchor"
+                        + " VALUES (2, "
+                        + "'"
+                        + "b".repeat(64)
+                        + "'"
+                        + ", 1,"
+                        + " pg_catalog.now(), true)"))
+        .describedAs("the shadow is bound into the constraint, so it is not a check any more")
+        .doesNotThrowAnyException();
+
+    var thrown = refusal();
+    assertThat(thrown.code()).isEqualTo(ErrorCodes.SCHEMA_INCOMPLETE);
+    assertThat(thrown)
+        .hasMessageContaining("shredding_erasure_anchor_id_check")
+        .hasMessageContaining("OPERATOR(public.=)");
+  }
+
+  /**
    * N3 and N4 of the name-resolution design: the leg accepts exactly one array, so a hostile value,
    * an extra setting and a spelling that means the same thing to the server but stores different
    * bytes are all refused. The last one is a documented fail-closed false refusal: the bundled

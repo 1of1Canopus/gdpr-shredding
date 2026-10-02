@@ -20,19 +20,27 @@ SELECT pg_catalog.pg_advisory_xact_lock(6072873668427846209);
 -- tgrelid scoping out of all five trigger guards (CIPHER-05) below.
 DO $$
 DECLARE
-  e oid := pg_catalog.to_regclass(
-    pg_catalog.quote_ident(pg_catalog.current_schema()) || '.shredding_erasure');
-  n oid := pg_catalog.to_regclass(
-    pg_catalog.quote_ident(pg_catalog.current_schema()) || '.shredding_erasure_anchor');
+  e pg_catalog.oid := pg_catalog.to_regclass(
+    pg_catalog.quote_ident(pg_catalog.current_schema())
+      OPERATOR(pg_catalog.||) '.shredding_erasure');
+  n pg_catalog.oid := pg_catalog.to_regclass(
+    pg_catalog.quote_ident(pg_catalog.current_schema())
+      OPERATOR(pg_catalog.||) '.shredding_erasure_anchor');
 BEGIN
   IF (e IS NOT NULL
       AND NOT EXISTS (
         SELECT 1 FROM pg_catalog.pg_attribute
-        WHERE attrelid = e AND attname = 'key_id' AND attnum > 0 AND NOT attisdropped))
+        WHERE (attrelid OPERATOR(pg_catalog.=) e)
+          AND (attname OPERATOR(pg_catalog.=) 'key_id')
+          AND (attnum OPERATOR(pg_catalog.>) 0)
+          AND NOT attisdropped))
      OR (n IS NOT NULL
       AND NOT EXISTS (
         SELECT 1 FROM pg_catalog.pg_attribute
-        WHERE attrelid = n AND attname = 'keyed' AND attnum > 0 AND NOT attisdropped)) THEN
+        WHERE (attrelid OPERATOR(pg_catalog.=) n)
+          AND (attname OPERATOR(pg_catalog.=) 'keyed')
+          AND (attnum OPERATOR(pg_catalog.>) 0)
+          AND NOT attisdropped)) THEN
     RAISE EXCEPTION
       'erasure log predates keyed-from-birth; archive the table and start a new trail (see SECURITY-NOTES)';
   END IF;
@@ -43,13 +51,13 @@ END $$;
 -- wrapped_key holds nonce || ciphertext || tag, sealed under the master key with
 -- AAD tenant|subject|version, so a row cannot be swapped between subjects (control 5).
 CREATE TABLE IF NOT EXISTS shredding_data_key (
-  tenant           varchar(255) NOT NULL,
-  subject          varchar(255) NOT NULL,
-  version          integer      NOT NULL,
-  wrapped_key      bytea        NOT NULL,
-  state            varchar(16)  NOT NULL,
-  encryption_count bigint       NOT NULL DEFAULT 0,
-  created_at       timestamptz  NOT NULL,
+  tenant           varchar(255)           NOT NULL,
+  subject          varchar(255)           NOT NULL,
+  version          integer                NOT NULL,
+  wrapped_key      pg_catalog.bytea       NOT NULL,
+  state            varchar(16)            NOT NULL,
+  encryption_count bigint                 NOT NULL DEFAULT 0,
+  created_at       pg_catalog.timestamptz NOT NULL,
   PRIMARY KEY (tenant, subject, version)
 );
 CREATE INDEX IF NOT EXISTS shredding_data_key_subject
@@ -60,32 +68,32 @@ CREATE INDEX IF NOT EXISTS shredding_data_key_subject
 -- (control 11). It holds no key material at all, which is what separates it from the
 -- "overwrite then delete" theatre control 6 rejects.
 CREATE TABLE IF NOT EXISTS shredding_erased_subject (
-  tenant    varchar(255) NOT NULL,
-  subject   varchar(255) NOT NULL,
-  erased_at timestamptz  NOT NULL,
+  tenant    varchar(255)           NOT NULL,
+  subject   varchar(255)           NOT NULL,
+  erased_at pg_catalog.timestamptz NOT NULL,
   PRIMARY KEY (tenant, subject)
 );
 
 -- The erasure log: the proof that a key was destroyed, and the one table that must outlive the
 -- data it is about. The subject appears only as a keyed pseudonym (control 9).
 CREATE TABLE IF NOT EXISTS shredding_erasure (
-  seq                 bigserial PRIMARY KEY,
-  ts                  timestamptz  NOT NULL,
-  tenant              varchar(255) NOT NULL,
-  subject_pseudonym   char(64)     NOT NULL,
-  requested_by        varchar(1000) NOT NULL DEFAULT '',
-  reason              varchar(1000) NOT NULL DEFAULT '',
-  keys_destroyed      integer      NOT NULL DEFAULT 0,
-  entity_count        integer      NOT NULL DEFAULT 0,
-  field_count         integer      NOT NULL DEFAULT 0,
-  blind_index_cleared integer      NOT NULL DEFAULT 0,
-  outcome             varchar(16)  NOT NULL,
-  hook_outcomes       text         NOT NULL DEFAULT '',
-  backup_clear_at     timestamptz  NOT NULL,
-  chain_version       varchar(8)   NOT NULL,
-  key_id              varchar(64)  NOT NULL,
-  prev_hash           char(64)     NOT NULL,
-  hash                char(64)     NOT NULL UNIQUE
+  seq                 bigserial              PRIMARY KEY,
+  ts                  pg_catalog.timestamptz NOT NULL,
+  tenant              varchar(255)           NOT NULL,
+  subject_pseudonym   char(64)               NOT NULL,
+  requested_by        varchar(1000)          NOT NULL DEFAULT '',
+  reason              varchar(1000)          NOT NULL DEFAULT '',
+  keys_destroyed      integer                NOT NULL DEFAULT 0,
+  entity_count        integer                NOT NULL DEFAULT 0,
+  field_count         integer                NOT NULL DEFAULT 0,
+  blind_index_cleared integer                NOT NULL DEFAULT 0,
+  outcome             varchar(16)            NOT NULL,
+  hook_outcomes       pg_catalog.text        NOT NULL DEFAULT '',
+  backup_clear_at     pg_catalog.timestamptz NOT NULL,
+  chain_version       varchar(8)             NOT NULL,
+  key_id              varchar(64)            NOT NULL,
+  prev_hash           char(64)               NOT NULL,
+  hash                char(64)               NOT NULL UNIQUE
 );
 CREATE INDEX IF NOT EXISTS shredding_erasure_subject
   ON shredding_erasure (tenant, subject_pseudonym, ts);
@@ -106,9 +114,10 @@ $$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 DO $$ BEGIN
   IF NOT EXISTS (
       SELECT 1 FROM pg_catalog.pg_trigger
-      WHERE tgname = 'shredding_erasure_append_only'
-        AND tgrelid = pg_catalog.to_regclass(
-          pg_catalog.quote_ident(pg_catalog.current_schema()) || '.shredding_erasure')) THEN
+      WHERE (tgname OPERATOR(pg_catalog.=) 'shredding_erasure_append_only')
+        AND (tgrelid OPERATOR(pg_catalog.=) pg_catalog.to_regclass(
+          pg_catalog.quote_ident(pg_catalog.current_schema())
+            OPERATOR(pg_catalog.||) '.shredding_erasure'))) THEN
     CREATE TRIGGER shredding_erasure_append_only
       BEFORE UPDATE OR DELETE ON shredding_erasure
       FOR EACH ROW EXECUTE FUNCTION shredding_erasure_append_only();
@@ -117,9 +126,10 @@ END $$;
 DO $$ BEGIN
   IF NOT EXISTS (
       SELECT 1 FROM pg_catalog.pg_trigger
-      WHERE tgname = 'shredding_erasure_no_truncate'
-        AND tgrelid = pg_catalog.to_regclass(
-          pg_catalog.quote_ident(pg_catalog.current_schema()) || '.shredding_erasure')) THEN
+      WHERE (tgname OPERATOR(pg_catalog.=) 'shredding_erasure_no_truncate')
+        AND (tgrelid OPERATOR(pg_catalog.=) pg_catalog.to_regclass(
+          pg_catalog.quote_ident(pg_catalog.current_schema())
+            OPERATOR(pg_catalog.||) '.shredding_erasure'))) THEN
     CREATE TRIGGER shredding_erasure_no_truncate
       BEFORE TRUNCATE ON shredding_erasure
       FOR EACH STATEMENT EXECUTE FUNCTION shredding_erasure_append_only();
@@ -135,9 +145,10 @@ END $$;
 DO $$ BEGIN
   IF NOT EXISTS (
       SELECT 1 FROM pg_catalog.pg_trigger
-      WHERE tgname = 'shredding_erased_subject_append_only'
-        AND tgrelid = pg_catalog.to_regclass(
-          pg_catalog.quote_ident(pg_catalog.current_schema()) || '.shredding_erased_subject')) THEN
+      WHERE (tgname OPERATOR(pg_catalog.=) 'shredding_erased_subject_append_only')
+        AND (tgrelid OPERATOR(pg_catalog.=) pg_catalog.to_regclass(
+          pg_catalog.quote_ident(pg_catalog.current_schema())
+            OPERATOR(pg_catalog.||) '.shredding_erased_subject'))) THEN
     CREATE TRIGGER shredding_erased_subject_append_only
       BEFORE UPDATE OR DELETE ON shredding_erased_subject
       FOR EACH ROW EXECUTE FUNCTION shredding_erasure_append_only();
@@ -146,9 +157,10 @@ END $$;
 DO $$ BEGIN
   IF NOT EXISTS (
       SELECT 1 FROM pg_catalog.pg_trigger
-      WHERE tgname = 'shredding_erased_subject_no_truncate'
-        AND tgrelid = pg_catalog.to_regclass(
-          pg_catalog.quote_ident(pg_catalog.current_schema()) || '.shredding_erased_subject')) THEN
+      WHERE (tgname OPERATOR(pg_catalog.=) 'shredding_erased_subject_no_truncate')
+        AND (tgrelid OPERATOR(pg_catalog.=) pg_catalog.to_regclass(
+          pg_catalog.quote_ident(pg_catalog.current_schema())
+            OPERATOR(pg_catalog.||) '.shredding_erased_subject'))) THEN
     CREATE TRIGGER shredding_erased_subject_no_truncate
       BEFORE TRUNCATE ON shredding_erased_subject
       FOR EACH STATEMENT EXECUTE FUNCTION shredding_erasure_append_only();
@@ -160,11 +172,11 @@ END $$;
 -- afterwards: it is the external, attacker-unwritable record of what every row's chain_version
 -- ought to be, because that column is itself part of what a table-owning attacker rewrites.
 CREATE TABLE IF NOT EXISTS shredding_erasure_anchor (
-  id         smallint PRIMARY KEY CHECK (id = 1),
-  head_hash  char(64) NOT NULL,
-  row_count  bigint NOT NULL,
-  updated_at timestamptz NOT NULL,
-  keyed      boolean NOT NULL
+  id         smallint               PRIMARY KEY CHECK (id OPERATOR(pg_catalog.=) 1),
+  head_hash  char(64)               NOT NULL,
+  row_count  bigint                 NOT NULL,
+  updated_at pg_catalog.timestamptz NOT NULL,
+  keyed      boolean                NOT NULL
 );
 
 CREATE OR REPLACE FUNCTION shredding_erasure_anchor_monotonic() RETURNS trigger AS $$
@@ -197,9 +209,10 @@ $$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 DO $$ BEGIN
   IF NOT EXISTS (
       SELECT 1 FROM pg_catalog.pg_trigger
-      WHERE tgname = 'shredding_erasure_anchor_monotonic'
-        AND tgrelid = pg_catalog.to_regclass(
-          pg_catalog.quote_ident(pg_catalog.current_schema()) || '.shredding_erasure_anchor')) THEN
+      WHERE (tgname OPERATOR(pg_catalog.=) 'shredding_erasure_anchor_monotonic')
+        AND (tgrelid OPERATOR(pg_catalog.=) pg_catalog.to_regclass(
+          pg_catalog.quote_ident(pg_catalog.current_schema())
+            OPERATOR(pg_catalog.||) '.shredding_erasure_anchor'))) THEN
     CREATE TRIGGER shredding_erasure_anchor_monotonic
       BEFORE UPDATE ON shredding_erasure_anchor
       FOR EACH ROW EXECUTE FUNCTION shredding_erasure_anchor_monotonic();
@@ -214,9 +227,10 @@ $$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 DO $$ BEGIN
   IF NOT EXISTS (
       SELECT 1 FROM pg_catalog.pg_trigger
-      WHERE tgname = 'shredding_erasure_anchor_no_delete'
-        AND tgrelid = pg_catalog.to_regclass(
-          pg_catalog.quote_ident(pg_catalog.current_schema()) || '.shredding_erasure_anchor')) THEN
+      WHERE (tgname OPERATOR(pg_catalog.=) 'shredding_erasure_anchor_no_delete')
+        AND (tgrelid OPERATOR(pg_catalog.=) pg_catalog.to_regclass(
+          pg_catalog.quote_ident(pg_catalog.current_schema())
+            OPERATOR(pg_catalog.||) '.shredding_erasure_anchor'))) THEN
     CREATE TRIGGER shredding_erasure_anchor_no_delete
       BEFORE DELETE ON shredding_erasure_anchor
       FOR EACH ROW EXECUTE FUNCTION shredding_erasure_anchor_append_only();
@@ -225,9 +239,10 @@ END $$;
 DO $$ BEGIN
   IF NOT EXISTS (
       SELECT 1 FROM pg_catalog.pg_trigger
-      WHERE tgname = 'shredding_erasure_anchor_no_truncate'
-        AND tgrelid = pg_catalog.to_regclass(
-          pg_catalog.quote_ident(pg_catalog.current_schema()) || '.shredding_erasure_anchor')) THEN
+      WHERE (tgname OPERATOR(pg_catalog.=) 'shredding_erasure_anchor_no_truncate')
+        AND (tgrelid OPERATOR(pg_catalog.=) pg_catalog.to_regclass(
+          pg_catalog.quote_ident(pg_catalog.current_schema())
+            OPERATOR(pg_catalog.||) '.shredding_erasure_anchor'))) THEN
     CREATE TRIGGER shredding_erasure_anchor_no_truncate
       BEFORE TRUNCATE ON shredding_erasure_anchor
       FOR EACH STATEMENT EXECUTE FUNCTION shredding_erasure_anchor_append_only();
