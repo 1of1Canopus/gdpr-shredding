@@ -196,6 +196,112 @@ class CipherProbeNamePr13eTest {
         .doesNotThrowAnyException();
   }
 
+  /**
+   * N8, N9 and N10 of the design's test list, in one pass: every statement this module builds, on a
+   * path carrying a shadow for every name class the module resolves, with <b>no pin and no
+   * bracket</b>. Qualification alone has to be enough here, because nothing in this module can
+   * re-point the session for the statements it issues on its own connection.
+   *
+   * <p>Installed, all of them by a role that owns one schema and sets its own path: {@code
+   * =(varchar,varchar) -> false} (the exact-type shadow of N-1), {@code =(int8,int8) -> true},
+   * {@code =(int2,int4) -> false} (the anchor's {@code id = 1}), {@code >(int8,int8) -> true} (the
+   * DPO export's {@code seq > ?}), an {@code app.count(*)} that always answers 0, a domain {@code
+   * app.oid} and a domain {@code app.text} for the casts, and a {@code ~~} for completeness.
+   */
+  @Test
+  void probe_every_module_statement_answers_truthfully_on_a_hostile_path() {
+    ownerInstallsInPublicAndGrantsTheBlock();
+    HikariDataSource owner = freshPool(OWNER);
+    exec(
+        owner,
+        "CREATE TABLE public.customer (id bigserial PRIMARY KEY,"
+            + " tenant_id varchar(255) NOT NULL, customer_id varchar(255) NOT NULL,"
+            + " email_bidx varchar(255))",
+        "GRANT SELECT, INSERT, UPDATE ON public.customer TO " + APP,
+        "GRANT USAGE ON SEQUENCE public.customer_id_seq TO " + APP);
+    DataSource clean = freshPool(APP);
+    var schema = JdbcSupport.verifySchema(clean, false).schema();
+    SubjectId subject = SubjectId.of("s1");
+    keyProvider(clean, schema).currentForWrite(TENANT, subject);
+    exec(
+        clean,
+        "INSERT INTO public.customer (tenant_id, customer_id, email_bidx)"
+            + " VALUES ('t1', 's1', 'residue')");
+
+    installEveryShadow(clean);
+    DataSource shadowed = hostilePath();
+
+    assertThatCode(() -> JdbcSupport.verifySchema(shadowed, false))
+        .describedAs("N9: the verdict is the same on the hostile path as on a clean one")
+        .doesNotThrowAnyException();
+
+    var keys = keyProvider(shadowed, schema);
+    assertThat(keys.healthy()).isTrue();
+    assertThat(keys.forRead(TENANT, subject, 1)).isPresent();
+    assertThat(keys.recordEncryptions(TENANT, subject, 1, 2)).isEqualTo(2L);
+    assertThat(keys.rotate(TENANT, subject).version()).isEqualTo(2);
+    assertThat(keys.currentForWrite(TENANT, subject).version()).isEqualTo(2);
+
+    var store =
+        new JdbcErasureStore(
+            shadowed,
+            schema,
+            ErasureChain.keyed(SECRET, "k1"),
+            List.of(
+                new com.housedevinci.shredding.domain.BlindIndexColumn(
+                    com.housedevinci.shredding.domain.TableRef.parse("public.customer"),
+                    com.housedevinci.shredding.domain.ColumnRef.unquoted("email_bidx"),
+                    com.housedevinci.shredding.domain.ColumnRef.unquoted("customer_id"),
+                    com.housedevinci.shredding.domain.ColumnRef.unquoted("tenant_id"),
+                    java.util.Optional.of("tenantId"),
+                    java.util.Optional.of("customerId"))),
+            (connection, column, tenant, erased) -> 0L);
+
+    var outcome =
+        store.erase(TENANT, subject, (destroyed, cleared) -> record(subject, destroyed, cleared));
+    assertThat(outcome.keysDestroyed()).describedAs("both key versions").isEqualTo(2);
+    assertThat(outcome.blindIndexColumnsCleared()).isEqualTo(1);
+    assertThat(keyRows()).isZero();
+    assertThat(text(superuserDs, "SELECT email_bidx FROM public.customer")).isNull();
+
+    store.append(record(SubjectId.of("s2"), 0, 0));
+    assertThat(anchorRowCount()).describedAs("the anchor advanced once per append").isEqualTo(2L);
+    assertThat(store.anchor()).isPresent();
+    assertThat(store.readAfter(1, 10))
+        .describedAs("seq > 1 must not return the row whose seq is 1")
+        .hasSize(1);
+    assertThat(store.latestForSubject(TENANT, new Pseudonymiser(SECRET).pseudonym(TENANT, subject)))
+        .isPresent();
+  }
+
+  /**
+   * N10: a decoy copy of a module table, owned by the role and first on its own path, is never the
+   * one a module statement addresses. {@link VerifiedSchema#qualify} is what does it - the relation
+   * names are data, read from the schema the gate verified, not text resolved at run time.
+   */
+  @Test
+  void probe_a_decoy_copy_of_a_module_table_first_on_the_path_is_never_written() {
+    ownerInstallsInPublicAndGrantsTheBlock();
+    DataSource clean = freshPool(APP);
+    var schema = JdbcSupport.verifySchema(clean, false).schema();
+    exec(
+        clean,
+        "CREATE TABLE "
+            + OWN
+            + ".shredding_erasure_anchor ("
+            + " id smallint PRIMARY KEY, head_hash char(64) NOT NULL,"
+            + " row_count bigint NOT NULL, updated_at pg_catalog.timestamptz NOT NULL,"
+            + " keyed boolean NOT NULL)");
+    DataSource shadowed = hostilePath();
+
+    erasureStore(shadowed, schema).append(record(SubjectId.of("s1"), 1, 0));
+
+    assertThat(anchorRowCount()).describedAs("the verified schema's anchor").isEqualTo(1L);
+    assertThat(text(superuserDs, "SELECT count(*)::text FROM " + OWN + ".shredding_erasure_anchor"))
+        .describedAs("the role's own decoy, first on its path")
+        .isEqualTo("0");
+  }
+
   // --------------------------------------------------- M5: the keyword operators
 
   /**
@@ -380,6 +486,70 @@ class CipherProbeNamePr13eTest {
             + " RIGHTARG = pg_catalog.varchar, FUNCTION = "
             + OWN
             + ".vc)");
+  }
+
+  /** Every name class the module's own statements resolve, shadowed at once. */
+  private void installEveryShadow(DataSource own) {
+    exec(
+        own,
+        "CREATE FUNCTION "
+            + OWN
+            + ".vc(pg_catalog.varchar, pg_catalog.varchar)"
+            + " RETURNS boolean AS $$ SELECT false $$ LANGUAGE sql",
+        "CREATE OPERATOR "
+            + OWN
+            + ".= (LEFTARG = pg_catalog.varchar,"
+            + " RIGHTARG = pg_catalog.varchar, FUNCTION = "
+            + OWN
+            + ".vc)",
+        "CREATE FUNCTION "
+            + OWN
+            + ".i8(pg_catalog.int8, pg_catalog.int8)"
+            + " RETURNS boolean AS $$ SELECT true $$ LANGUAGE sql",
+        "CREATE OPERATOR "
+            + OWN
+            + ".= (LEFTARG = pg_catalog.int8,"
+            + " RIGHTARG = pg_catalog.int8, FUNCTION = "
+            + OWN
+            + ".i8)",
+        "CREATE OPERATOR "
+            + OWN
+            + ".> (LEFTARG = pg_catalog.int8,"
+            + " RIGHTARG = pg_catalog.int8, FUNCTION = "
+            + OWN
+            + ".i8)",
+        "CREATE FUNCTION "
+            + OWN
+            + ".i2(pg_catalog.int2, pg_catalog.int4)"
+            + " RETURNS boolean AS $$ SELECT false $$ LANGUAGE sql",
+        "CREATE OPERATOR "
+            + OWN
+            + ".= (LEFTARG = pg_catalog.int2,"
+            + " RIGHTARG = pg_catalog.int4, FUNCTION = "
+            + OWN
+            + ".i2)",
+        "CREATE FUNCTION "
+            + OWN
+            + ".lk(pg_catalog.varchar, pg_catalog.varchar)"
+            + " RETURNS boolean AS $$ SELECT false $$ LANGUAGE sql",
+        "CREATE OPERATOR "
+            + OWN
+            + ".~~ (LEFTARG = pg_catalog.varchar,"
+            + " RIGHTARG = pg_catalog.varchar, FUNCTION = "
+            + OWN
+            + ".lk)",
+        "CREATE FUNCTION "
+            + OWN
+            + ".zero(pg_catalog.int8) RETURNS pg_catalog.int8"
+            + " AS $$ SELECT 0::pg_catalog.int8 $$ LANGUAGE sql",
+        "CREATE AGGREGATE "
+            + OWN
+            + ".count(*) (SFUNC = "
+            + OWN
+            + ".zero,"
+            + " STYPE = pg_catalog.int8, INITCOND = '0')",
+        "CREATE DOMAIN " + OWN + ".oid AS pg_catalog.int8",
+        "CREATE DOMAIN " + OWN + ".text AS pg_catalog.varchar");
   }
 
   private DataSource hostilePath() {

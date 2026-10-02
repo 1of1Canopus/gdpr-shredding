@@ -95,7 +95,9 @@ public final class JdbcKeyProvider implements KeyProvider {
               c.prepareStatement(
                   "SELECT version, wrapped_key, state, encryption_count, created_at FROM "
                       + dataKeyTable
-                      + " WHERE tenant = ? AND subject = ? AND version = ?")) {
+                      + " WHERE (tenant OPERATOR(pg_catalog.=) ?)"
+                      + " AND (subject OPERATOR(pg_catalog.=) ?)"
+                      + " AND (version OPERATOR(pg_catalog.=) ?)")) {
             ps.setString(1, tenant.value());
             ps.setString(2, subject.value());
             ps.setInt(3, version);
@@ -121,8 +123,10 @@ public final class JdbcKeyProvider implements KeyProvider {
               c.prepareStatement(
                   "UPDATE "
                       + dataKeyTable
-                      + " SET encryption_count = encryption_count + ?"
-                      + " WHERE tenant = ? AND subject = ? AND version = ?"
+                      + " SET encryption_count = (encryption_count OPERATOR(pg_catalog.+) ?)"
+                      + " WHERE (tenant OPERATOR(pg_catalog.=) ?)"
+                      + " AND (subject OPERATOR(pg_catalog.=) ?)"
+                      + " AND (version OPERATOR(pg_catalog.=) ?)"
                       + " RETURNING encryption_count")) {
             ps.setInt(1, count);
             ps.setString(2, tenant.value());
@@ -180,7 +184,8 @@ public final class JdbcKeyProvider implements KeyProvider {
         c.prepareStatement(
             "SELECT 1 FROM "
                 + erasedSubjectTable
-                + " WHERE tenant = ? AND subject = ? FOR SHARE")) {
+                + " WHERE (tenant OPERATOR(pg_catalog.=) ?)"
+                + " AND (subject OPERATOR(pg_catalog.=) ?) FOR SHARE")) {
       ps.setString(1, tenant.value());
       ps.setString(2, subject.value());
       try (ResultSet rs = ps.executeQuery()) {
@@ -236,7 +241,9 @@ public final class JdbcKeyProvider implements KeyProvider {
     String sql =
         "SELECT version, wrapped_key, state, encryption_count, created_at FROM "
             + dataKeyTable
-            + " WHERE tenant = ? AND subject = ? ORDER BY version DESC LIMIT 1"
+            + " WHERE (tenant OPERATOR(pg_catalog.=) ?)"
+            + " AND (subject OPERATOR(pg_catalog.=) ?)"
+            + " ORDER BY version DESC LIMIT 1"
             + (forUpdate ? " FOR UPDATE" : "");
     try (PreparedStatement ps = c.prepareStatement(sql)) {
       ps.setString(1, tenant.value());

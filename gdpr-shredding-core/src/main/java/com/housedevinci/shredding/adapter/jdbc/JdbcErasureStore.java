@@ -133,7 +133,9 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
     boolean anchored = false;
     try (PreparedStatement ps =
             c.prepareStatement(
-                "SELECT head_hash, row_count, keyed FROM " + anchorTable + " WHERE id = 1");
+                "SELECT head_hash, row_count, keyed FROM "
+                    + anchorTable
+                    + " WHERE (id OPERATOR(pg_catalog.=) 1)");
         ResultSet rs = ps.executeQuery()) {
       if (rs.next()) {
         prev = rs.getString(1);
@@ -199,7 +201,9 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
         c.prepareStatement(
             "SELECT version FROM "
                 + dataKeyTable
-                + " WHERE tenant = ? AND subject = ? ORDER BY version FOR UPDATE")) {
+                + " WHERE (tenant OPERATOR(pg_catalog.=) ?)"
+                + " AND (subject OPERATOR(pg_catalog.=) ?)"
+                + " ORDER BY version FOR UPDATE")) {
       ps.setString(1, tenant.value());
       ps.setString(2, subject.value());
       try (ResultSet rs = ps.executeQuery()) {
@@ -232,7 +236,10 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
       throws SQLException {
     try (PreparedStatement ps =
         c.prepareStatement(
-            "SELECT 1 FROM " + erasedSubjectTable + " WHERE tenant = ? AND subject = ?")) {
+            "SELECT 1 FROM "
+                + erasedSubjectTable
+                + " WHERE (tenant OPERATOR(pg_catalog.=) ?)"
+                + " AND (subject OPERATOR(pg_catalog.=) ?)")) {
       ps.setString(1, tenant.value());
       ps.setString(2, subject.value());
       try (ResultSet rs = ps.executeQuery()) {
@@ -245,7 +252,11 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
     // A DELETE, not an overwrite followed by a delete: under MVCC an overwrite only writes a
     // second heap tuple that still holds the same key, so the assurance it implies is false.
     try (PreparedStatement ps =
-        c.prepareStatement("DELETE FROM " + dataKeyTable + " WHERE tenant = ? AND subject = ?")) {
+        c.prepareStatement(
+            "DELETE FROM "
+                + dataKeyTable
+                + " WHERE (tenant OPERATOR(pg_catalog.=) ?)"
+                + " AND (subject OPERATOR(pg_catalog.=) ?)")) {
       ps.setString(1, tenant.value());
       ps.setString(2, subject.value());
       return ps.executeUpdate();
@@ -267,11 +278,11 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
               + column.table().sql()
               + " SET "
               + column.column().sql()
-              + " = NULL WHERE "
+              + " = NULL WHERE ("
               + column.tenantColumn().sql()
-              + " = ? AND "
+              + " OPERATOR(pg_catalog.=) ?) AND ("
               + column.subjectColumn().sql()
-              + " = ? AND "
+              + " OPERATOR(pg_catalog.=) ?) AND "
               + column.column().sql()
               + " IS NOT NULL";
       try (PreparedStatement ps = c.prepareStatement(sql)) {
@@ -352,11 +363,11 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
       String sameText =
           "SELECT pg_catalog.count(*) FROM "
               + column.table().sql()
-              + " WHERE "
+              + " WHERE ("
               + column.tenantColumn().sql()
-              + " = ? AND "
+              + " OPERATOR(pg_catalog.=) ?) AND ("
               + column.subjectColumn().sql()
-              + " = ? AND "
+              + " OPERATOR(pg_catalog.=) ?) AND "
               + column.column().sql()
               + " IS NOT NULL";
       try (PreparedStatement ps = c.prepareStatement(sameText)) {
@@ -383,9 +394,9 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
       String elsewhere =
           "SELECT pg_catalog.count(*) FROM "
               + column.table().sql()
-              + " WHERE "
+              + " WHERE ("
               + column.subjectColumn().sql()
-              + " = ? AND "
+              + " OPERATOR(pg_catalog.=) ?) AND "
               + column.tenantColumn().sql()
               + " IS DISTINCT FROM ? AND "
               + column.column().sql()
@@ -423,7 +434,8 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
                       + COLUMNS
                       + " FROM "
                       + erasureTable
-                      + " WHERE tenant = ? AND subject_pseudonym = ?"
+                      + " WHERE (tenant OPERATOR(pg_catalog.=) ?)"
+                      + " AND (subject_pseudonym OPERATOR(pg_catalog.=) ?)"
                       // CIPHER-15: the log is append-only and seq is its own monotonic bigserial;
                       // ts is clock.instant() from the application and a backwards clock step
                       // (NTP, a container resume, two nodes disagreeing) between two appends could
@@ -447,7 +459,9 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
         c -> {
           try (PreparedStatement ps =
                   c.prepareStatement(
-                      "SELECT head_hash, row_count, keyed FROM " + anchorTable + " WHERE id = 1");
+                      "SELECT head_hash, row_count, keyed FROM "
+                          + anchorTable
+                          + " WHERE (id OPERATOR(pg_catalog.=) 1)");
               ResultSet rs = ps.executeQuery()) {
             return rs.next()
                 ? Optional.of(new Anchor(rs.getString(1), rs.getLong(2), rs.getBoolean(3)))
@@ -468,7 +482,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
                       + COLUMNS
                       + " FROM "
                       + erasureTable
-                      + " WHERE seq > ? ORDER BY seq ASC LIMIT ?")) {
+                      + " WHERE (seq OPERATOR(pg_catalog.>) ?) ORDER BY seq ASC LIMIT ?")) {
             ps.setLong(1, afterSequence);
             ps.setInt(2, capped);
             try (ResultSet rs = ps.executeQuery()) {
@@ -486,7 +500,8 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
 
   private TrailState trailState(Connection c) throws SQLException {
     try (PreparedStatement ps =
-            c.prepareStatement("SELECT keyed FROM " + anchorTable + " WHERE id = 1");
+            c.prepareStatement(
+                "SELECT keyed FROM " + anchorTable + " WHERE (id OPERATOR(pg_catalog.=) 1)");
         ResultSet rs = ps.executeQuery()) {
       if (rs.next()) {
         return new TrailState(true, rs.getBoolean(1), true);

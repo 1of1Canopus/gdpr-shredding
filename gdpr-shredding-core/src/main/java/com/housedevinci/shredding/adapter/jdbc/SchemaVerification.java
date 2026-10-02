@@ -354,49 +354,59 @@ final class SchemaVerification {
       boolean forceRowSecurity,
       boolean ownedByRole) {}
 
+  /**
+   * The two relation statements are constants, one per call site, rather than a {@code String}
+   * parameter of the shared reader. Design §3.5.1, as the security review ruled it: a gate that
+   * resolves a statement built in another method needs a parameter hop, a hop that exists grows to
+   * two, and two constants in the source are less untested code inside a control than a resolver
+   * is. The shared reader takes the {@link PreparedStatement}, so the statement text is a literal
+   * at the call that prepares it.
+   */
+  private static final String RELATIONS_SQL =
+      "SELECT c.oid, c.relname, c.relkind, c.relpersistence, c.relhasrules, c.relrowsecurity,"
+          + " c.relforcerowsecurity, pg_catalog.pg_has_role(current_user, c.relowner, 'MEMBER')"
+          + " FROM pg_catalog.pg_class c"
+          + " WHERE (c.relnamespace OPERATOR(pg_catalog.=) ?)"
+          + " AND (c.relname OPERATOR(pg_catalog.=) ANY(?))";
+
+  private static final String INDEXES_SQL =
+      "SELECT c.oid, c.relname, c.relkind, c.relpersistence, c.relhasrules, c.relrowsecurity,"
+          + " c.relforcerowsecurity, pg_catalog.pg_has_role(current_user, c.relowner, 'MEMBER')"
+          + " FROM pg_catalog.pg_class c"
+          + " WHERE (c.relnamespace OPERATOR(pg_catalog.=) ?)"
+          + " AND (c.relkind OPERATOR(pg_catalog.=) 'i')"
+          + " AND (c.relname OPERATOR(pg_catalog.=) ANY(?))";
+
   private static Map<String, Relation> relations(Connection c, long ns) throws SQLException {
-    return relations(
-        c,
-        ns,
-        "SELECT c.oid, c.relname, c.relkind, c.relpersistence, c.relhasrules, c.relrowsecurity,"
-            + " c.relforcerowsecurity, pg_catalog.pg_has_role(current_user, c.relowner, 'MEMBER')"
-            + " FROM pg_catalog.pg_class c"
-            + " WHERE c.relnamespace = ? AND c.relname = ANY(?)",
-        SchemaExpectations.TABLES);
+    try (PreparedStatement ps = c.prepareStatement(RELATIONS_SQL)) {
+      return relations(c, ps, ns, SchemaExpectations.TABLES);
+    }
   }
 
   private static Map<String, Relation> indexes(Connection c, long ns) throws SQLException {
-    return relations(
-        c,
-        ns,
-        "SELECT c.oid, c.relname, c.relkind, c.relpersistence, c.relhasrules, c.relrowsecurity,"
-            + " c.relforcerowsecurity, pg_catalog.pg_has_role(current_user, c.relowner, 'MEMBER')"
-            + " FROM pg_catalog.pg_class c"
-            + " WHERE c.relnamespace = ? AND c.relkind = 'i'"
-            + " AND c.relname = ANY(?)",
-        SchemaExpectations.INDEXES);
+    try (PreparedStatement ps = c.prepareStatement(INDEXES_SQL)) {
+      return relations(c, ps, ns, SchemaExpectations.INDEXES);
+    }
   }
 
   private static Map<String, Relation> relations(
-      Connection c, long ns, String sql, List<String> names) throws SQLException {
+      Connection c, PreparedStatement ps, long ns, List<String> names) throws SQLException {
     var found = new LinkedHashMap<String, Relation>();
-    try (PreparedStatement ps = c.prepareStatement(sql)) {
-      ps.setLong(1, ns);
-      ps.setArray(2, c.createArrayOf("text", names.toArray()));
-      try (ResultSet rs = ps.executeQuery()) {
-        while (rs.next()) {
-          found.put(
-              rs.getString(2),
-              new Relation(
-                  rs.getLong(1),
-                  rs.getString(2),
-                  rs.getString(3),
-                  rs.getString(4),
-                  rs.getBoolean(5),
-                  rs.getBoolean(6),
-                  rs.getBoolean(7),
-                  rs.getBoolean(8)));
-        }
+    ps.setLong(1, ns);
+    ps.setArray(2, c.createArrayOf("text", names.toArray()));
+    try (ResultSet rs = ps.executeQuery()) {
+      while (rs.next()) {
+        found.put(
+            rs.getString(2),
+            new Relation(
+                rs.getLong(1),
+                rs.getString(2),
+                rs.getString(3),
+                rs.getString(4),
+                rs.getBoolean(5),
+                rs.getBoolean(6),
+                rs.getBoolean(7),
+                rs.getBoolean(8)));
       }
     }
     return found;
@@ -432,9 +442,11 @@ final class SchemaVerification {
             "SELECT c.relname, a.attname, a.attnotnull,"
                 + " pg_catalog.format_type(a.atttypid, a.atttypmod)"
                 + " FROM pg_catalog.pg_class c"
-                + " JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid"
-                + " WHERE c.relnamespace = ? AND c.relname = ANY(?)"
-                + " AND a.attnum > 0 AND NOT a.attisdropped"
+                + " JOIN pg_catalog.pg_attribute a"
+                + "   ON (a.attrelid OPERATOR(pg_catalog.=) c.oid)"
+                + " WHERE (c.relnamespace OPERATOR(pg_catalog.=) ?)"
+                + " AND (c.relname OPERATOR(pg_catalog.=) ANY(?))"
+                + " AND (a.attnum OPERATOR(pg_catalog.>) 0) AND NOT a.attisdropped"
                 + " ORDER BY c.relname, a.attnum")) {
       ps.setLong(1, ns);
       ps.setArray(2, c.createArrayOf("text", SchemaExpectations.TABLES.toArray()));
@@ -495,18 +507,31 @@ final class SchemaVerification {
     try (PreparedStatement ps =
         c.prepareStatement(
             "SELECT s.relkind, (SELECT pg_catalog.count(*) FROM pg_catalog.pg_depend d"
-                + "   WHERE d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = s.oid"
-                + "     AND d.refclassid = 'pg_catalog.pg_class'::regclass AND d.refobjid = t.oid"
-                + "     AND d.refobjsubid = a.attnum AND d.deptype = 'a'),"
+                + "   WHERE (d.classid OPERATOR(pg_catalog.=)"
+                + "            'pg_catalog.pg_class'::pg_catalog.regclass)"
+                + "     AND (d.objid OPERATOR(pg_catalog.=) s.oid)"
+                + "     AND (d.refclassid OPERATOR(pg_catalog.=)"
+                + "            'pg_catalog.pg_class'::pg_catalog.regclass)"
+                + "     AND (d.refobjid OPERATOR(pg_catalog.=) t.oid)"
+                + "     AND (d.refobjsubid OPERATOR(pg_catalog.=) a.attnum)"
+                + "     AND (d.deptype OPERATOR(pg_catalog.=) 'a')),"
                 + " (SELECT pg_catalog.count(*) FROM pg_catalog.pg_attrdef ad"
                 + "   JOIN pg_catalog.pg_depend d2"
-                + "     ON d2.classid = 'pg_catalog.pg_attrdef'::regclass AND d2.objid = ad.oid"
-                + "     AND d2.refclassid = 'pg_catalog.pg_class'::regclass AND d2.refobjid = s.oid"
-                + "     AND d2.deptype = 'n'"
-                + "   WHERE ad.adrelid = t.oid AND ad.adnum = a.attnum)"
+                + "     ON (d2.classid OPERATOR(pg_catalog.=)"
+                + "           'pg_catalog.pg_attrdef'::pg_catalog.regclass)"
+                + "     AND (d2.objid OPERATOR(pg_catalog.=) ad.oid)"
+                + "     AND (d2.refclassid OPERATOR(pg_catalog.=)"
+                + "            'pg_catalog.pg_class'::pg_catalog.regclass)"
+                + "     AND (d2.refobjid OPERATOR(pg_catalog.=) s.oid)"
+                + "     AND (d2.deptype OPERATOR(pg_catalog.=) 'n')"
+                + "   WHERE (ad.adrelid OPERATOR(pg_catalog.=) t.oid)"
+                + "     AND (ad.adnum OPERATOR(pg_catalog.=) a.attnum))"
                 + " FROM pg_catalog.pg_class s, pg_catalog.pg_class t, pg_catalog.pg_attribute a"
-                + " WHERE s.relnamespace = ? AND s.relname = ?"
-                + "   AND t.oid = ? AND a.attrelid = t.oid AND a.attname = 'seq'")) {
+                + " WHERE (s.relnamespace OPERATOR(pg_catalog.=) ?)"
+                + "   AND (s.relname OPERATOR(pg_catalog.=) ?)"
+                + "   AND (t.oid OPERATOR(pg_catalog.=) ?)"
+                + "   AND (a.attrelid OPERATOR(pg_catalog.=) t.oid)"
+                + "   AND (a.attname OPERATOR(pg_catalog.=) 'seq')")) {
       ps.setLong(1, ns);
       ps.setString(2, SchemaExpectations.SEQUENCE);
       ps.setLong(3, relations.get(SchemaExpectations.ERASURE).oid());
@@ -553,8 +578,10 @@ final class SchemaVerification {
             "SELECT c.relname, con.conname, con.contype,"
                 + " pg_catalog.pg_get_constraintdef(con.oid)"
                 + " FROM pg_catalog.pg_constraint con"
-                + " JOIN pg_catalog.pg_class c ON c.oid = con.conrelid"
-                + " WHERE c.relnamespace = ? AND c.relname = ANY(?)")) {
+                + " JOIN pg_catalog.pg_class c"
+                + "   ON (c.oid OPERATOR(pg_catalog.=) con.conrelid)"
+                + " WHERE (c.relnamespace OPERATOR(pg_catalog.=) ?)"
+                + " AND (c.relname OPERATOR(pg_catalog.=) ANY(?))")) {
       ps.setLong(1, ns);
       ps.setArray(2, c.createArrayOf("text", SchemaExpectations.TABLES.toArray()));
       try (ResultSet rs = ps.executeQuery()) {
@@ -641,8 +668,10 @@ final class SchemaVerification {
                 + " pg_catalog.pg_get_function_result(p.oid),"
                 + " pg_catalog.pg_has_role(current_user, p.proowner, 'MEMBER')"
                 + " FROM pg_catalog.pg_proc p"
-                + " JOIN pg_catalog.pg_language l ON l.oid = p.prolang"
-                + " WHERE p.pronamespace = ? AND p.proname = ANY(?)")) {
+                + " JOIN pg_catalog.pg_language l"
+                + "   ON (l.oid OPERATOR(pg_catalog.=) p.prolang)"
+                + " WHERE (p.pronamespace OPERATOR(pg_catalog.=) ?)"
+                + " AND (p.proname OPERATOR(pg_catalog.=) ANY(?))")) {
       ps.setLong(1, ns);
       ps.setArray(2, c.createArrayOf("text", SchemaExpectations.GUARD_FUNCTIONS.toArray()));
       try (ResultSet rs = ps.executeQuery()) {
@@ -820,13 +849,16 @@ final class SchemaVerification {
     try (PreparedStatement ps =
         c.prepareStatement(
             "SELECT t.tgname, c.relname, p.proname, t.tgtype, t.tgenabled,"
-                + " p.pronamespace = ?,"
-                + " t.tgqual IS NOT NULL, t.tgattr::text"
+                + " (p.pronamespace OPERATOR(pg_catalog.=) ?),"
+                + " t.tgqual IS NOT NULL, t.tgattr::pg_catalog.text"
                 + " FROM pg_catalog.pg_trigger t"
-                + " JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid"
-                + " JOIN pg_catalog.pg_proc p ON p.oid = t.tgfoid"
-                + " WHERE c.relnamespace = ?"
-                + "   AND c.relname = ANY(?) AND NOT t.tgisinternal")) {
+                + " JOIN pg_catalog.pg_class c"
+                + "   ON (c.oid OPERATOR(pg_catalog.=) t.tgrelid)"
+                + " JOIN pg_catalog.pg_proc p"
+                + "   ON (p.oid OPERATOR(pg_catalog.=) t.tgfoid)"
+                + " WHERE (c.relnamespace OPERATOR(pg_catalog.=) ?)"
+                + "   AND (c.relname OPERATOR(pg_catalog.=) ANY(?))"
+                + "   AND NOT t.tgisinternal")) {
       ps.setLong(1, ns);
       ps.setLong(2, ns);
       ps.setArray(3, c.createArrayOf("text", SchemaExpectations.TABLES.toArray()));
@@ -981,14 +1013,16 @@ final class SchemaVerification {
     try (PreparedStatement ps =
         c.prepareStatement(
             "SELECT parent.relname, child.relname,"
-                + " parent.relnamespace = ?"
+                + " (parent.relnamespace OPERATOR(pg_catalog.=) ?)"
                 + " FROM pg_catalog.pg_inherits i"
-                + " JOIN pg_catalog.pg_class parent ON parent.oid = i.inhparent"
-                + " JOIN pg_catalog.pg_class child ON child.oid = i.inhrelid"
-                + " WHERE (parent.relnamespace = ?"
-                + "        AND parent.relname = ANY(?))"
-                + "    OR (child.relnamespace = ?"
-                + "        AND child.relname = ANY(?))")) {
+                + " JOIN pg_catalog.pg_class parent"
+                + "   ON (parent.oid OPERATOR(pg_catalog.=) i.inhparent)"
+                + " JOIN pg_catalog.pg_class child"
+                + "   ON (child.oid OPERATOR(pg_catalog.=) i.inhrelid)"
+                + " WHERE ((parent.relnamespace OPERATOR(pg_catalog.=) ?)"
+                + "        AND (parent.relname OPERATOR(pg_catalog.=) ANY(?)))"
+                + "    OR ((child.relnamespace OPERATOR(pg_catalog.=) ?)"
+                + "        AND (child.relname OPERATOR(pg_catalog.=) ANY(?)))")) {
       var names = c.createArrayOf("text", SchemaExpectations.TABLES.toArray());
       ps.setLong(1, ns);
       ps.setLong(2, ns);
@@ -1049,8 +1083,10 @@ final class SchemaVerification {
     try (PreparedStatement ps =
         c.prepareStatement(
             "SELECT c.relname, pg_catalog.count(pol.oid) FROM pg_catalog.pg_class c"
-                + " LEFT JOIN pg_catalog.pg_policy pol ON pol.polrelid = c.oid"
-                + " WHERE c.relnamespace = ? AND c.relname = ANY(?)"
+                + " LEFT JOIN pg_catalog.pg_policy pol"
+                + "   ON (pol.polrelid OPERATOR(pg_catalog.=) c.oid)"
+                + " WHERE (c.relnamespace OPERATOR(pg_catalog.=) ?)"
+                + " AND (c.relname OPERATOR(pg_catalog.=) ANY(?))"
                 + " GROUP BY c.relname")) {
       ps.setLong(1, ns);
       ps.setArray(2, c.createArrayOf("text", SchemaExpectations.TABLES.toArray()));
@@ -1072,8 +1108,10 @@ final class SchemaVerification {
     try (PreparedStatement ps =
         c.prepareStatement(
             "SELECT c.relname, pg_catalog.count(r.oid) FROM pg_catalog.pg_class c"
-                + " LEFT JOIN pg_catalog.pg_rewrite r ON r.ev_class = c.oid"
-                + " WHERE c.relnamespace = ? AND c.relname = ANY(?)"
+                + " LEFT JOIN pg_catalog.pg_rewrite r"
+                + "   ON (r.ev_class OPERATOR(pg_catalog.=) c.oid)"
+                + " WHERE (c.relnamespace OPERATOR(pg_catalog.=) ?)"
+                + " AND (c.relname OPERATOR(pg_catalog.=) ANY(?))"
                 + " GROUP BY c.relname")) {
       ps.setLong(1, ns);
       ps.setArray(2, c.createArrayOf("text", SchemaExpectations.TABLES.toArray()));
@@ -1101,13 +1139,13 @@ final class SchemaVerification {
     try (PreparedStatement ps =
         c.prepareStatement(
             "SELECT pg_catalog.current_setting('is_superuser'),"
-                + " pg_catalog.has_schema_privilege(current_user, ?::oid, 'CREATE'),"
-                + " pg_catalog.has_schema_privilege(current_user, ?::oid, 'USAGE'),"
+                + " pg_catalog.has_schema_privilege(current_user, ?::pg_catalog.oid, 'CREATE'),"
+                + " pg_catalog.has_schema_privilege(current_user, ?::pg_catalog.oid, 'USAGE'),"
                 + " pg_catalog.has_database_privilege(current_user, ?, 'TEMP'),"
                 + " pg_catalog.has_database_privilege(current_user, ?, 'CREATE'),"
                 + " pg_catalog.pg_has_role(current_user,"
                 + "   (SELECT d.datdba FROM pg_catalog.pg_database d"
-                + "      WHERE d.datname = ?), 'MEMBER')")) {
+                + "      WHERE (d.datname OPERATOR(pg_catalog.=) ?)), 'MEMBER')")) {
       ps.setLong(1, session.schemaOid());
       ps.setLong(2, session.schemaOid());
       ps.setString(3, session.database());
@@ -1157,7 +1195,8 @@ final class SchemaVerification {
                 + " pg_catalog.has_sequence_privilege(current_user, s.oid, 'SELECT'),"
                 + " pg_catalog.has_sequence_privilege(current_user, s.oid, 'UPDATE')"
                 + " FROM pg_catalog.pg_class s"
-                + " WHERE s.relnamespace = ? AND s.relname = ?")) {
+                + " WHERE (s.relnamespace OPERATOR(pg_catalog.=) ?)"
+                + " AND (s.relname OPERATOR(pg_catalog.=) ?)")) {
       ps.setLong(1, ns);
       ps.setString(2, SchemaExpectations.SEQUENCE);
       try (ResultSet rs = ps.executeQuery()) {
@@ -1225,7 +1264,8 @@ final class SchemaVerification {
             "SELECT a.attname,"
                 + " pg_catalog.has_column_privilege(current_user, a.attrelid, a.attnum, 'UPDATE')"
                 + " FROM pg_catalog.pg_attribute a"
-                + " WHERE a.attrelid = ? AND a.attnum > 0 AND NOT a.attisdropped")) {
+                + " WHERE (a.attrelid OPERATOR(pg_catalog.=) ?)"
+                + " AND (a.attnum OPERATOR(pg_catalog.>) 0) AND NOT a.attisdropped")) {
       ps.setLong(1, relation.oid());
       try (ResultSet rs = ps.executeQuery()) {
         boolean sawRequired = false;
@@ -1250,7 +1290,8 @@ final class SchemaVerification {
   private static boolean hasTablePrivilege(Connection c, long oid, String privilege)
       throws SQLException {
     try (PreparedStatement ps =
-        c.prepareStatement("SELECT pg_catalog.has_table_privilege(current_user, ?::oid, ?)")) {
+        c.prepareStatement(
+            "SELECT pg_catalog.has_table_privilege(current_user, ?::pg_catalog.oid, ?)")) {
       ps.setLong(1, oid);
       ps.setString(2, privilege);
       try (ResultSet rs = ps.executeQuery()) {
