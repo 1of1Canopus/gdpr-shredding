@@ -18,6 +18,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -571,6 +572,13 @@ final class SchemaVerification {
 
   // ---------------------------------------------------------------- guards
 
+  /**
+   * @param config the function's {@code pg_proc.proconfig}, empty when the column is SQL NULL. Read
+   *     as a {@code java.sql.Array} and compared in Java against {@link
+   *     SchemaExpectations#GUARD_PROCONFIG}: a SQL-side comparison of a NULL array evaluates to
+   *     NULL rather than to false, which would drop the row and report the guard as absent instead
+   *     of unguarded (design §2.6).
+   */
   private record Function(
       long oid,
       String name,
@@ -578,7 +586,7 @@ final class SchemaVerification {
       String kind,
       int args,
       boolean securityDefiner,
-      boolean noConfig,
+      Optional<List<String>> config,
       String language,
       String returns,
       boolean ownedByRole) {}
@@ -588,7 +596,7 @@ final class SchemaVerification {
     try (PreparedStatement ps =
         c.prepareStatement(
             "SELECT p.oid, p.proname, p.prosrc, p.prokind, p.pronargs, p.prosecdef,"
-                + " p.proconfig IS NULL, l.lanname,"
+                + " p.proconfig, l.lanname,"
                 + " pg_catalog.pg_get_function_result(p.oid),"
                 + " pg_catalog.pg_has_role(current_user, p.proowner, 'MEMBER')"
                 + " FROM pg_catalog.pg_proc p"
@@ -607,7 +615,7 @@ final class SchemaVerification {
                   rs.getString(4),
                   rs.getInt(5),
                   rs.getBoolean(6),
-                  rs.getBoolean(7),
+                  config(rs.getArray(7)),
                   rs.getString(8),
                   rs.getString(9),
                   rs.getBoolean(10)));
@@ -615,6 +623,26 @@ final class SchemaVerification {
       }
     }
     return found;
+  }
+
+  /**
+   * {@code proconfig} as a list, or empty when the column is SQL NULL. Not a {@code getString}: the
+   * text rendering of a {@code text[]} quotes and escapes per element, so comparing it to a joined
+   * constant would compare two renderings rather than two values.
+   */
+  private static Optional<List<String>> config(java.sql.Array array) throws SQLException {
+    if (array == null) {
+      return Optional.empty();
+    }
+    Object elements = array.getArray();
+    if (!(elements instanceof Object[] values)) {
+      return Optional.empty();
+    }
+    var out = new ArrayList<String>(values.length);
+    for (Object value : values) {
+      out.add(value == null ? "" : value.toString());
+    }
+    return Optional.of(List.copyOf(out));
   }
 
   private static void checkGuardFunctions(Map<String, Function> functions, List<String> guards) {
@@ -632,7 +660,6 @@ final class SchemaVerification {
       if (!"f".equals(have.kind())
           || have.args() != 0
           || have.securityDefiner()
-          || !have.noConfig()
           || !"plpgsql".equals(have.language())
           || !"trigger".equals(have.returns())) {
         guards.add(
@@ -644,14 +671,17 @@ final class SchemaVerification {
                 + have.args()
                 + ", prosecdef="
                 + have.securityDefiner()
-                + ", proconfig "
-                + (have.noConfig() ? "unset" : "set")
                 + ", language "
                 + have.language()
                 + ", returns "
                 + have.returns()
                 + ")");
         continue;
+      }
+      // Not a `continue`: the body digest is checked too, so a schema built by an older copy of
+      // the script is told about both halves of §2.3 in one refusal rather than one per restart.
+      if (!SchemaExpectations.GUARD_PROCONFIG.equals(have.config().orElse(null))) {
+        guards.add(unpinnedGuard(name, have.config()));
       }
       String actual = GuardBodies.normalise(have.body());
       if (actual.indexOf('\r') >= 0) {
@@ -677,6 +707,28 @@ final class SchemaVerification {
                 + " everything. Re-apply schema-postgresql.sql as the owner role.");
       }
     }
+  }
+
+  /**
+   * The inverted {@code proconfig} leg's refusal (design §2.4, finding C-13-14). Its own message,
+   * not a clause of the shape leg's, because the remedy and the consequence are specific: the
+   * guard's body resolves its operator names in the writing session, which is the session of the
+   * role the guard constrains.
+   */
+  private static String unpinnedGuard(String name, Optional<List<String>> actual) {
+    return "guard function "
+        + name
+        + " does not carry the search_path clause the schema step gives it: pg_proc.proconfig is "
+        + actual.map(Object::toString).orElse("NULL")
+        + ", expected exactly "
+        + SchemaExpectations.GUARD_PROCONFIG
+        + ". A guard function is not SECURITY DEFINER, so without that clause its body resolves"
+        + " its operator, function and type names along the search_path of whoever writes to the"
+        + " table - and a role that owns a single schema of its own can define an"
+        + " =(boolean,boolean) or a <>(bigint,bigint) there and write what the guard was meant to"
+        + " refuse. CREATE OR REPLACE FUNCTION with no SET clause clears the column with no error,"
+        + " so an older copy of schema-postgresql.sql re-applied over this schema is the usual"
+        + " cause. Re-apply the bundled schema-postgresql.sql as the owner role.";
   }
 
   private static String carriageReturn(String name) {

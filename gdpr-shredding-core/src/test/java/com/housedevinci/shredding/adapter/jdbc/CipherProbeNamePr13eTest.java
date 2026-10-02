@@ -208,7 +208,7 @@ class CipherProbeNamePr13eTest {
    */
   @Test
   void probe_no_statement_this_module_builds_contains_a_keyword_operator() {
-    su("GRANT USAGE, CREATE ON SCHEMA public TO " + APP);
+    ownerInstallsInPublicAndGrantsTheBlock();
     DataSource app = freshPool(APP);
     exec(
         app,
@@ -245,13 +245,16 @@ class CipherProbeNamePr13eTest {
         .describedAs("LIKE is ~~, and the role owns one")
         .isFalse();
 
-    String script = JdbcSupport.schemaScript();
-    assertThat(script)
-        .describedAs("a keyword operator in a shipped statement cannot be qualified")
-        .doesNotContain("IS DISTINCT FROM")
-        .doesNotContain(" LIKE ")
-        .doesNotContain(" ILIKE ")
-        .doesNotContain("COLLATE");
+    // The one place the bundled script used a keyword operator was the monotonic guard's `keyed`
+    // comparison. Asserted on the catalogue rather than on the script text, because a text
+    // assertion also matches the comment that explains the rule, and stripping comments with a
+    // regex is the failure mode GuardBodies refuses by design: the statement-wide rule belongs to
+    // the gate of design §3.5, which lexes comments instead of deleting them.
+    assertThat(guardBody("shredding_erasure_anchor_monotonic"))
+        .describedAs(
+            "`keyed` is NOT NULL on both OLD and NEW, so <> is equivalent and can be qualified")
+        .contains("NEW.keyed OPERATOR(pg_catalog.<>) OLD.keyed")
+        .doesNotContain("IS DISTINCT FROM OLD.keyed");
   }
 
   // ------------------------------------- M6 / E3a / C-16d: the precedence trap

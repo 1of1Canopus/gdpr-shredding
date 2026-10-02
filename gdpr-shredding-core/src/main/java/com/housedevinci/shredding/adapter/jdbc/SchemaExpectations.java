@@ -36,6 +36,40 @@ final class SchemaExpectations {
   static final List<String> INDEXES =
       List.of("shredding_data_key_subject", "shredding_erasure_subject");
 
+  /**
+   * The exact {@code pg_proc.proconfig} the schema step gives all three guards, compared element by
+   * element in Java and never as a SQL predicate.
+   *
+   * <p>Design {@code name-resolution-design.md} §2.4 and §2.6, finding C-13-14. A guard function is
+   * not {@code SECURITY DEFINER}, so without a {@code SET search_path} clause its body resolves its
+   * operator, function and type names in the session of whoever writes to the table - and the role
+   * that writes is the role the guard exists to constrain. Version 1 of this expectation required
+   * the opposite ({@code proconfig IS NULL}), on the reasoning that a {@code proconfig} is also how
+   * a guard gets redirected; the leg is inverted rather than dropped, so the column is still
+   * verified material, with exactly one accepted value instead of exactly one refused shape.
+   *
+   * <p>Three things make the exact comparison necessary rather than fussy. {@code CREATE OR REPLACE
+   * FUNCTION} with no {@code SET} clause clears the column with <b>no error</b>, so re-applying an
+   * older copy of the script disarms the clause silently and only an equality check sees it. A
+   * second setting (say {@code statement_timeout}) makes the array two elements long, and the
+   * expectation is about the whole array. And a SQL-side comparison of a NULL {@code proconfig}
+   * evaluates to NULL rather than to false, which drops the row and reports the guard as absent
+   * instead of unguarded - so the array is read into Java and compared here.
+   *
+   * <p>{@code pg_temp} is named for a measured reason: the implicit {@code pg_temp} precedes the
+   * path for <em>relation</em> references, and naming it explicitly is the only way to demote it.
+   * The three bodies name no relation today; the clause costs about a microsecond per invocation
+   * and removes the question for whatever a body names next.
+   *
+   * <p>Three spellings of the clause store this identical text ({@code = pg_catalog, pg_temp},
+   * {@code = pg_catalog,pg_temp} and {@code = "pg_catalog", pg_temp}). {@code SET search_path TO
+   * 'pg_catalog, pg_temp'} stores {@code search_path="pg_catalog, pg_temp"}, which means the same
+   * to the server and is refused here: a hand-edited schema is a schema this module cannot compare,
+   * and unverifiable is not clean. The one supported producer is the bundled script, which {@code
+   * SchemaVerificationTest} asserts produces exactly this.
+   */
+  static final List<String> GUARD_PROCONFIG = List.of("search_path=pg_catalog, pg_temp");
+
   static final List<String> GUARD_FUNCTIONS =
       List.of(
           "shredding_erasure_append_only",

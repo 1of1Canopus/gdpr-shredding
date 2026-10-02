@@ -102,7 +102,7 @@ CREATE OR REPLACE FUNCTION shredding_erasure_append_only() RETURNS trigger AS $$
 BEGIN
   RAISE EXCEPTION '% is append-only (attempted %)', TG_TABLE_NAME, TG_OP;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 DO $$ BEGIN
   IF NOT EXISTS (
       SELECT 1 FROM pg_catalog.pg_trigger
@@ -171,17 +171,29 @@ CREATE OR REPLACE FUNCTION shredding_erasure_anchor_monotonic() RETURNS trigger 
 BEGIN
   -- `keyed` is checked first: a caller that also gets the row count wrong must still be told the
   -- real problem, which is that it is trying to change the trail's mode.
-  IF NEW.keyed IS DISTINCT FROM OLD.keyed THEN
+  -- Every operator is written OPERATOR(pg_catalog....) and every binary application of one is
+  -- parenthesised. Both halves are load-bearing (C-13-14). Qualified, because this body is not
+  -- SECURITY DEFINER and - absent this function's own SET search_path clause - resolves its
+  -- operator names in the session of whoever writes to the anchor; a role that owns one schema
+  -- may define its own =(boolean,boolean), <>(bigint,bigint) and =(bpchar,bpchar).
+  -- Parenthesised, because every OPERATOR(...)-qualified operator takes one generic
+  -- precedence, so an unparenthesised
+  -- `a OPERATOR(pg_catalog.<>) b OPERATOR(pg_catalog.+) 1` parses as `(a <> b) + 1` and raises
+  -- `operator does not exist: boolean pg_catalog.+ integer` at run time, on the honest append.
+  -- IS DISTINCT FROM cannot be operator-qualified at all, so `keyed` is compared with <>; the
+  -- column is NOT NULL on both OLD and NEW, so the two are equivalent here.
+  IF NEW.keyed OPERATOR(pg_catalog.<>) OLD.keyed THEN
     RAISE EXCEPTION 'shredding_erasure_anchor.keyed is immutable once set (attempted % -> %)',
       OLD.keyed, NEW.keyed;
   END IF;
-  IF NEW.row_count <> OLD.row_count + 1 OR NEW.head_hash = OLD.head_hash THEN
+  IF (NEW.row_count OPERATOR(pg_catalog.<>) (OLD.row_count OPERATOR(pg_catalog.+) 1))
+     OR (NEW.head_hash OPERATOR(pg_catalog.=) OLD.head_hash) THEN
     RAISE EXCEPTION 'shredding_erasure_anchor only advances by one row (attempted % -> %)',
       OLD.row_count, NEW.row_count;
   END IF;
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 DO $$ BEGIN
   IF NOT EXISTS (
       SELECT 1 FROM pg_catalog.pg_trigger
@@ -198,7 +210,7 @@ CREATE OR REPLACE FUNCTION shredding_erasure_anchor_append_only() RETURNS trigge
 BEGIN
   RAISE EXCEPTION '% is append-only (attempted %)', TG_TABLE_NAME, TG_OP;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 DO $$ BEGIN
   IF NOT EXISTS (
       SELECT 1 FROM pg_catalog.pg_trigger

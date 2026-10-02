@@ -263,6 +263,57 @@ class SchemaVerificationTest {
         .containsExactlyInAnyOrderElementsOf(SchemaExpectations.CONSTRAINTS);
     assertThat(actualTriggers()).containsExactlyInAnyOrderElementsOf(SchemaExpectations.TRIGGERS);
     assertThat(SchemaExpectations.COLUMN_COUNT).isEqualTo(32);
+    // N7 of the name-resolution design: the proconfig expectation is a constant too, and the
+    // script is the only supported producer of it.
+    for (String guard : SchemaExpectations.GUARD_FUNCTIONS) {
+      assertThat(actualProconfig(guard))
+          .describedAs("pg_proc.proconfig of %s, as the bundled script creates it", guard)
+          .isEqualTo(SchemaExpectations.GUARD_PROCONFIG);
+    }
+  }
+
+  /**
+   * N3 and N4 of the name-resolution design: the leg accepts exactly one array, so a hostile value,
+   * an extra setting and a spelling that means the same thing to the server but stores different
+   * bytes are all refused. The last one is a documented fail-closed false refusal: the bundled
+   * script is the one supported producer of the clause.
+   */
+  @Test
+  void t36c_the_proconfig_leg_accepts_exactly_the_one_array_the_script_creates() {
+    owner(
+        "ALTER FUNCTION shredding_erasure_anchor_monotonic()"
+            + " SET search_path = app_decoy, pg_catalog, pg_temp");
+    var hostile = refusal();
+    assertThat(hostile.code()).isEqualTo(ErrorCodes.SCHEMA_UNGUARDED);
+    assertThat(hostile)
+        .hasMessageContaining("shredding_erasure_anchor_monotonic")
+        .hasMessageContaining("pg_proc.proconfig is [search_path=app_decoy, pg_catalog, pg_temp]");
+
+    owner(
+        "ALTER FUNCTION shredding_erasure_anchor_monotonic()"
+            + " SET search_path = pg_catalog, pg_temp",
+        "ALTER FUNCTION shredding_erasure_anchor_monotonic() SET statement_timeout = '1s'");
+    assertThat(refusal())
+        .describedAs("a second setting makes the array two elements long")
+        .hasMessageContaining("statement_timeout=1s");
+
+    owner(
+        "ALTER FUNCTION shredding_erasure_anchor_monotonic() RESET statement_timeout",
+        "ALTER FUNCTION shredding_erasure_anchor_monotonic()"
+            + " SET search_path TO 'pg_catalog, pg_temp'");
+    assertThat(refusal())
+        .describedAs(
+            "the same meaning, different stored bytes: refused, and the message names the script"
+                + " as the one supported producer")
+        .hasMessageContaining("search_path=\"pg_catalog, pg_temp\"")
+        .hasMessageContaining("Re-apply the bundled schema-postgresql.sql as the owner role");
+
+    owner(
+        "ALTER FUNCTION shredding_erasure_anchor_monotonic()"
+            + " SET search_path = pg_catalog,pg_temp");
+    assertThatCode(() -> JdbcSupport.verifySchema(appDs))
+        .describedAs("a spelling that stores the identical text is accepted")
+        .doesNotThrowAnyException();
   }
 
   @Test
@@ -353,7 +404,8 @@ class SchemaVerificationTest {
     long oidBefore = functionOid("shredding_erasure_append_only");
     owner(
         "CREATE OR REPLACE FUNCTION shredding_erasure_append_only() RETURNS trigger AS $$"
-            + " BEGIN RETURN NEW; END; $$ LANGUAGE plpgsql");
+            + " BEGIN RETURN NEW; END; $$ LANGUAGE plpgsql"
+            + " SET search_path = pg_catalog, pg_temp");
     assertThat(functionOid("shredding_erasure_append_only"))
         .describedAs("CREATE OR REPLACE keeps the oid; that is why identity checks are not enough")
         .isEqualTo(oidBefore);
@@ -379,7 +431,7 @@ class SchemaVerificationTest {
         List.of(
             bundled.replaceFirst("\n", "\r"),
             bundled.replace("-- `keyed` is checked first", "-- `keyed` is checked first\r"),
-            bundled.replace("\n  IF NEW.row_count", "\r  IF NEW.row_count"));
+            bundled.replace("\n  IF (NEW.row_count", "\r  IF (NEW.row_count"));
     for (String variant : refusedVariants) {
       installMonotonic(variant);
       assertThat(refusal())
@@ -1279,7 +1331,7 @@ class SchemaVerificationTest {
         "SET check_function_bodies = off",
         "CREATE OR REPLACE FUNCTION shredding_erasure_anchor_monotonic() RETURNS trigger AS "
             + literal(body)
-            + " LANGUAGE plpgsql");
+            + " LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp");
   }
 
   private static String literal(String value) {
@@ -1448,6 +1500,25 @@ class SchemaVerificationTest {
       throw new IllegalStateException(e);
     }
     return out;
+  }
+
+  private static List<String> actualProconfig(String guard) {
+    try (var c = ownerDs.getConnection();
+        var ps =
+            c.prepareStatement(
+                "SELECT p.proconfig FROM pg_catalog.pg_proc p"
+                    + " JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace"
+                    + " WHERE n.nspname = 'public' AND p.proname = ?")) {
+      ps.setString(1, guard);
+      try (var rs = ps.executeQuery()) {
+        if (!rs.next() || rs.getArray(1) == null) {
+          return List.of();
+        }
+        return List.of((String[]) rs.getArray(1).getArray());
+      }
+    } catch (java.sql.SQLException e) {
+      throw new IllegalStateException(e);
+    }
   }
 
   private static List<SchemaExpectations.Trigger> actualTriggers() {
