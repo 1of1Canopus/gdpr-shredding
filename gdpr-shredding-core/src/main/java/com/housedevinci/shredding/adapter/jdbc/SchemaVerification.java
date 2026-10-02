@@ -36,11 +36,11 @@ import java.util.Set;
  * a relation name does, any role may {@code ALTER ROLE <itself> SET search_path}, and the ordinary
  * runtime role owns a schema it may create functions in - so a {@code pg_has_role} or a {@code
  * format_type} written bare is a predicate the subject of the check supplies the answer to. Two
- * halves, neither sufficient alone: the transaction pins {@code search_path} to {@code pg_catalog}
- * for its own duration and reads the pin back, and every catalogue function, catalogue relation and
- * {@code regclass} cast is written with its {@code pg_catalog.} prefix anyway. Because the path is
- * pinned, the module's own schema can no longer be named by {@code current_schema()}: it is
- * captured once, before the pin, and bound into every later query as the namespace oid.
+ * halves, neither sufficient alone: the transaction pins {@code search_path} to {@code pg_catalog,
+ * pg_temp} for its own duration and reads the pin back, and every catalogue function, catalogue
+ * relation, operator, type and cast is written with its {@code pg_catalog.} prefix anyway. Because
+ * the path is pinned, the module's own schema can no longer be named by {@code current_schema()}:
+ * it is captured once, before the pin, and bound into every later query as the namespace oid.
  *
  * <p>Two rules run through all of it. <b>Unverifiable is not clean</b>: any {@link SQLException}
  * from verification itself is {@code SHRED-SCHEMA-005}, never a pass and never a warning - {@code
@@ -51,6 +51,16 @@ import java.util.Set;
 final class SchemaVerification {
 
   private SchemaVerification() {}
+
+  /**
+   * The one pinned value in this module, shared with every other place a path is replaced (§6).
+   * {@code pg_temp} is named because the implicit {@code pg_temp} precedes the path for
+   * <em>relation</em> references, so a role holding {@code TEMPORARY} can put a {@code pg_class} of
+   * its own in front of the real catalogue; naming it explicitly is the only way to demote it.
+   * Every catalogue relation here is qualified as well, so this changes no answer today - it
+   * removes the question for the next line.
+   */
+  private static final String PINNED_PATH = "pg_catalog, pg_temp";
 
   /**
    * Verifies in <b>one read-only transaction of its own</b> (C-13-4). Without this the eleven
@@ -128,8 +138,9 @@ final class SchemaVerification {
     // §4.9, in this order and before any leg: capture the session facts through qualified names,
     // pin the path so a name somebody forgets to prefix later still resolves in pg_catalog, and
     // read the pin back because set_config echoes its own argument whether or not it took.
-    Session session = session(c);
+    SessionFacts facts = sessionFacts(c);
     pinSearchPath(c);
+    Session session = new Session(facts, namespaceOid(c, facts));
     VerifiedSchema schema = session.schema();
     long ns = session.schemaOid();
 
@@ -215,25 +226,32 @@ final class SchemaVerification {
 
   // ---------------------------------------------------------------- session
 
-  private record Session(VerifiedSchema schema, long schemaOid, String role, String database) {}
+  private record SessionFacts(String schema, String role, String database) {}
+
+  private record Session(VerifiedSchema schema, long schemaOid, String role, String database) {
+    Session(SessionFacts facts, long schemaOid) {
+      this(new VerifiedSchema(facts.schema()), schemaOid, facts.role(), facts.database());
+    }
+  }
 
   /**
-   * Statement 1 of the transaction, qualified and first (§4.9 rule 1 and rule 2). After the pin
-   * {@code current_schema()} answers {@code pg_catalog}, which is right for resolving catalogue
-   * names and wrong for naming this module's tables, so the schema is read exactly once, here, and
-   * carried as an oid afterwards. The oid comes from an exact {@code nspname} match rather than
-   * from {@code '<name>'::regnamespace}: {@code regnamespacein} parses its argument as an SQL
-   * identifier, so a schema called {@code my schema} or {@code Public} - which {@link
-   * VerifiedSchema} deliberately supports - would turn every leg into {@code SHRED-SCHEMA-005}.
-   * {@code current_user} is a keyword, not a function, and cannot be shadowed.
+   * Statement 1 of the transaction, and it contains <b>no operator name at all</b> (C-13-13). It
+   * necessarily runs before the pin, because after the pin {@code current_schema()} answers {@code
+   * pg_catalog} - right for resolving catalogue names, wrong for naming this module's tables - so
+   * the schema has to be read first and carried as an oid afterwards. Version 1 read the name and
+   * the oid in one statement, which put {@code n.nspname = pg_catalog.current_schema()} on the
+   * unpinned side: a role that owns a schema ahead of {@code pg_catalog} defines its own {@code
+   * =(name, name)} there and splits the two, so the gate verifies one schema while {@link
+   * VerifiedSchema#qualify} sends every write to another. The split is into three statements -
+   * facts, pin, oid - so the only comparison is on the pinned side (§6).
+   *
+   * <p>{@code current_user} is a keyword, not a function, and cannot be shadowed.
    */
-  private static Session session(Connection c) throws SQLException {
+  private static SessionFacts sessionFacts(Connection c) throws SQLException {
     try (PreparedStatement ps =
             c.prepareStatement(
                 "SELECT pg_catalog.current_schema(), current_user,"
-                    + " pg_catalog.current_database(),"
-                    + " (SELECT n.oid FROM pg_catalog.pg_namespace n"
-                    + "   WHERE n.nspname = pg_catalog.current_schema())");
+                    + " pg_catalog.current_database()");
         ResultSet rs = ps.executeQuery()) {
       if (!rs.next() || rs.getString(1) == null) {
         throw new ShreddingException(
@@ -244,27 +262,47 @@ final class SchemaVerification {
                 + " URL (currentSchema=...) or grant USAGE on the one that holds the shredding"
                 + " tables.");
       }
-      long oid = rs.getLong(4);
-      if (rs.wasNull() || oid == 0) {
-        throw new ShreddingException(
-            ErrorCodes.SCHEMA_UNVERIFIABLE,
-            "current_schema() answered "
-                + rs.getString(1)
-                + " but no pg_namespace row carries that name, so the schema this module's"
-                + " statements resolve against cannot be identified and nothing about it can be"
-                + " verified. Unverifiable is not clean.");
+      return new SessionFacts(rs.getString(1), rs.getString(2), rs.getString(3));
+    }
+  }
+
+  /**
+   * Statement 4, the first leg that runs under the pin: the namespace oid every later leg binds.
+   * The schema name is a <b>bind parameter</b> carrying the bytes statement 1 read, and the
+   * comparison is qualified as well, so neither half depends on the role's path.
+   *
+   * <p>The oid comes from an exact {@code nspname} match rather than from {@code
+   * '<name>'::regnamespace}: {@code regnamespacein} parses its argument as an SQL identifier, so a
+   * schema called {@code my schema} or {@code Public} - which {@link VerifiedSchema} deliberately
+   * supports - would turn every leg into {@code SHRED-SCHEMA-005}.
+   */
+  private static long namespaceOid(Connection c, SessionFacts facts) throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT n.oid FROM pg_catalog.pg_namespace n"
+                + " WHERE n.nspname OPERATOR(pg_catalog.=) ?")) {
+      ps.setString(1, facts.schema());
+      try (ResultSet rs = ps.executeQuery()) {
+        long oid = rs.next() ? rs.getLong(1) : 0L;
+        if (oid == 0) {
+          throw new ShreddingException(
+              ErrorCodes.SCHEMA_UNVERIFIABLE,
+              "current_schema() answered "
+                  + facts.schema()
+                  + " but no pg_namespace row carries that name, so the schema this module's"
+                  + " statements resolve against cannot be identified and nothing about it can be"
+                  + " verified. Unverifiable is not clean.");
+        }
+        return oid;
       }
-      return new Session(
-          new VerifiedSchema(rs.getString(1)), oid, rs.getString(2), rs.getString(3));
     }
   }
 
   /**
    * Statements 2 and 3 of the transaction. The pin is {@code is_local = true}, so it ends with the
    * transaction and cannot follow a pooled connection out of verification. It is total over
-   * function, aggregate and operator names and it is <b>not</b> total over relation names - {@code
-   * pg_temp} precedes the path implicitly for references - which is why every relation here stays
-   * explicitly qualified as well.
+   * function, aggregate and operator names; over relation names it is total only because it names
+   * {@code pg_temp} explicitly, and every relation here stays explicitly qualified as well.
    *
    * <p>The read-back is the pin's own backstop and is compared against the literal {@code
    * pg_catalog}, never against the value just sent: {@code set_config} returns its own argument
@@ -274,7 +312,8 @@ final class SchemaVerification {
    */
   private static void pinSearchPath(Connection c) throws SQLException {
     try (PreparedStatement ps =
-            c.prepareStatement("SELECT pg_catalog.set_config('search_path', 'pg_catalog', true)");
+            c.prepareStatement(
+                "SELECT pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true)");
         ResultSet rs = ps.executeQuery()) {
       rs.next();
     }
@@ -282,11 +321,13 @@ final class SchemaVerification {
             c.prepareStatement("SELECT pg_catalog.current_setting('search_path')");
         ResultSet rs = ps.executeQuery()) {
       String pinned = rs.next() ? rs.getString(1) : null;
-      if (!"pg_catalog".equals(pinned)) {
+      if (!PINNED_PATH.equals(pinned)) {
         throw new ShreddingException(
             ErrorCodes.SCHEMA_UNVERIFIABLE,
             "shredding: the verification transaction could not pin its own search_path to"
-                + " pg_catalog (it reads back as "
+                + " '"
+                + PINNED_PATH
+                + "' (it reads back as "
                 + pinned
                 + "). Every catalogue function this check calls is also written with a pg_catalog."
                 + " prefix, but the pin is the backstop for the one call a later edit forgets, and"
