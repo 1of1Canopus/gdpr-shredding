@@ -914,3 +914,209 @@ condition for MERGEABLE is the three probes in `CipherProbeNoDdlPr13dTest` flipp
 their two controls still green, the 55 of `SchemaVerificationTest` and the 8 of
 `CipherProbeNoDdlPr13cTest` unchanged, and the design page reviewed before the code that
 closes C-13-14.
+
+## Review of PR A (2026-10-03)
+
+Head `d1289db`, first pass of two. Scope reviewed: the three guard bodies with their `proconfig`
+pin, the inverted verification leg, the qualified bundled script, the capture split, the qualified
+adapter and starter statements, and the name gate. Everything below was measured on PostgreSQL
+16.15 (`postgres:16-alpine`, aarch64) in a two-role fixture: `shred_owner` owns schema `app` and
+applied the bundled script there; `shred_app` is `NOSUPERUSER NOCREATEDB NOCREATEROLE`, holds only
+the SECURITY-NOTES grant block, owns its own schema `decoy`, and set its own role-level
+`search_path`.
+
+Build on this head, foreground, Docker up, nothing skipped:
+
+| module | tests | failures | errors | skipped |
+|---|---|---|---|---|
+| core | 221 | 0 | 0 | 0 |
+| starter | 219 | 0 | 0 | 0 |
+| sample | 17 | 0 | 0 | 0 |
+| total | 457 | 0 | 0 | 0 |
+
+Coverage gate met in all four reactor modules, Spotless clean, licence gate clean, `BUILD SUCCESS`
+in 2:16. My own earlier probes on this branch are green by code: `CipherProbeNoDdlPr13cTest` and
+`CipherProbeNoDdlPr13dTest` ran inside that 221 with no failures and no skips.
+
+### The fixture claim is confirmed, and it is load-bearing
+
+The builder's note that the earlier starter fixture was not hostile because `pg_catalog` is
+implicitly first unless it is named is correct, and my own first run reproduced the mistake. With
+`search_path = decoy, app` and `CREATE DOMAIN decoy.text AS char(3)` in place,
+`'abcdefgh'::text` answers `abcdefgh` typed `text` - pg_catalog won. With
+`search_path = decoy, app, pg_catalog` the identical expression answers `abc`, and
+`pg_typeof` still prints `text`. `true <> false` answers `f` once `decoy.<>(boolean,boolean)`
+exists. Every measurement below names `pg_catalog` last. A role may install that path on itself:
+`ALTER ROLE shred_app SET search_path = decoy, app, pg_catalog` succeeded as `shred_app`.
+
+### Rulings
+
+**C-13-13 (capture statement) - CLOSED.** The transaction is `sessionFacts` -> `pinSearchPath` ->
+`namespaceOid`, so the one statement that runs unpinned is statement 1, and it contains no operator
+at all: `pg_catalog.current_schema()`, `current_user` (a keyword, not a resolvable function) and
+`pg_catalog.current_database()`. The namespace oid is then resolved under the pin with the captured
+bytes as a **bind parameter** against `n.nspname OPERATOR(pg_catalog.=) ?`. Attacked with a schema
+named `MiXed Sch"ema` (mixed case, a space and an embedded double quote): `current_schema()`
+answered `MiXed Sch"ema`, the bound `nspname` match answered one oid, and
+`VerifiedSchema.qualify` addressed `"MiXed Sch""ema"."t"` with no parse error and no second
+relation. No finding.
+
+**C-13-14, PR A's half (P1) - CLOSED.** As `shred_app`, on the hostile path, with
+`decoy.<>(boolean,boolean)`, `decoy.<>(bigint,bigint)`, `decoy.=(char,char)` and
+`decoy.+(bigint,integer)` all installed by the runtime role itself: flipping `keyed`, rewinding
+`row_count` to 0, jumping it by 7, and re-using the previous `head_hash` were each refused by
+`shredding_erasure_anchor_monotonic`, and the honest `row_count + 1` with a new hash committed. The
+precedence trap does not fire: the parenthesised
+`(NEW.row_count OPERATOR(pg_catalog.<>) (OLD.row_count OPERATOR(pg_catalog.+) 1))` evaluates on the
+honest append rather than raising `operator does not exist`. `UPDATE`, `DELETE` and `TRUNCATE` on
+the erasure log and the tombstone were refused at the privilege check, which is earlier than the
+trigger and is the stronger refusal. The inverted leg refuses a cleared `proconfig`
+(`CipherProbeNamePr13eTest:440`), a hostile one, a second setting, and the
+`SET search_path TO 'pg_catalog, pg_temp'` spelling that means the same thing and stores different
+bytes (`SchemaVerificationTest.t36c`), and accepts exactly the three spellings that store the
+expected text. `CREATE OR REPLACE` clearing the clause is a refusal, not a silent disarm. The P2b
+and P3 halves of C-13-14 are not in this PR and stay open.
+
+**C-13-15 (the script's own names) - CLOSED.** Every `||` in the script is
+`OPERATOR(pg_catalog.||)`, every `to_regclass`, `quote_ident` and `current_schema` carries its
+prefix, and the `CHECK` is `(id OPERATOR(pg_catalog.=) 1)`. The script applied clean as
+`shred_owner` into `app`, and all three guards carry
+`{"search_path=pg_catalog, pg_temp"}`. The remaining unqualified type spellings in the
+`CREATE TABLE` bodies - `varchar(255)`, `char(64)`, `integer`, `bigint`, `smallint`, `boolean`,
+`bigserial` - are grammar productions or the `serial` special case and are not resolvable; the
+three that are resolvable (`bytea`, `timestamptz`, `text`) are prefixed. Correct.
+
+**The named open refusal - REFUSED as a deferral.** See C-A-6.
+
+### Findings
+
+Five of the six are in the name gate, which is the one new mechanism in this PR. Probe file
+`gdpr-shredding-core/src/test/java/com/housedevinci/shredding/namegate/CipherProbeNamePr13fGateTest.java`:
+5 tests, 5 RED on this head.
+
+**C-A-1 (MEDIUM) - the gate's grammar-type allowlist contains six names the grammar does not
+have.** `SqlNameLexer.GRAMMAR_TYPES` lists `text`, `bytea`, `timestamptz`, `int2`, `int4` and
+`int8` alongside the real grammar keywords. PostgreSQL's grammar has no `TEXT`, `BYTEA`,
+`TIMESTAMPTZ`, `INT2`, `INT4` or `INT8` production: those six are ordinary type names looked up
+along `search_path`. `checkTypeName` therefore accepts `x::text`, `x::int8`, `x::timestamptz` and
+`CAST(x AS text)` as "an unquoted grammar type keyword". Repro: `CREATE DOMAIN decoy.text AS
+char(3)` then `'abcdefgh'::text` -> `abc`, silently, with `pg_typeof` still printing `text`;
+`CREATE DOMAIN decoy.int8 AS smallint` then `'12'::int8` -> the domain. The allowance is sound for
+`varchar(255)`, which is a syntax error in expression position; it is not sound for these six.
+Fix: remove the six from `GRAMMAR_TYPES` and keep only the spellings that are productions in
+`gram.y` (`varchar`, `char`, `character`, `numeric`, `decimal`, `bit`, `time`, `timestamp`,
+`interval`, `boolean`, `bigint`, `smallint`, `integer`, `int`, `real`, `double`). Test
+`probe_the_gate_allows_unqualified_casts_to_shadowable_type_names`. Routing: Thor, the run that
+built the gate.
+
+**C-A-2 (MEDIUM) - the same six names are allowed in function-call position.**
+`checkFunctionCall` returns early for any identifier in `GRAMMAR_TYPES` followed by `(`, on the
+stated ground that it is "a grammar type with a length modifier". `text(x)`, `int8(x)`,
+`bytea(x)`, `timestamptz(x)`, `int2(x)` and `int4(x)` are not length modifiers: they are plain
+function calls resolved along `search_path`, which is the function-syntax cast the brief names.
+The gate returns zero refusals for `SELECT text(relname) FROM pg_catalog.pg_class` and for
+`SELECT int8(relpages) FROM pg_catalog.pg_class`. Fix: the same removal as C-A-1 closes both; the
+length-modifier allowance must be keyed on the token being a `gram.y` production, never on a type
+name. Test `probe_the_gate_allows_function_syntax_casts_to_shadowable_type_names`. Routing: Thor.
+
+**C-A-3 (LOW) - `isDdlObjectName` is a fixed six-token lookback, so an index expression is read as
+the object being created.** `CREATE INDEX i ON t (lower(c))` returns zero refusals: scanning back
+from `lower` finds `index` within six tokens and `create` within four more, so every call inside
+the index expression is treated as a name being created rather than a name being resolved. The
+bundled script survives only because `CREATE INDEX IF NOT EXISTS` pushes `index` out of the
+window - an accident of token count, not a rule. Fix: decide the DDL-object position by the token
+immediately after the object-type keyword, not by proximity. Test
+`probe_the_gate_allows_an_unqualified_function_inside_a_create_index_expression`. Routing: Thor.
+
+**C-A-4 (LOW) - `isAssignment` accepts any `=` with an identifier to its left while the lexer
+believes it is inside a SET clause.** `UPDATE "s"."t" SET a = (b = c)` returns zero refusals: the
+inner `=` is a resolvable operator and is read as a second assignment target. The module's own
+`SET encryption_count = (encryption_count OPERATOR(pg_catalog.+) ?)` is qualified, so nothing is
+live; the gate exists to catch the edit that is not. Fix: an assignment is the first `=` after a
+SET-clause target at depth 0 of the clause, and a `=` inside parentheses is never one. Test
+`probe_the_gate_allows_an_unqualified_equals_inside_a_set_clause_expression`. Routing: Thor.
+
+**C-A-5 (MEDIUM) - the gate's relation leg cannot fire on anything this module actually emits, and
+it reports the three section-3.4 statements clean.** `checkRelationPosition` returns early unless
+the token is an unquoted `IDENT`. `TableRef.sql()` always quotes
+(`"\"" + identifier + "\""`), and `VerifiedSchema.qualify` quotes both parts, so every relation
+this module interpolates is a `QUOTED_IDENT` the leg skips; a `HOLE` is skipped as well.
+`TableRef.schema` is an `Optional`, so an entity whose `@Table` names no schema renders as `"t"`.
+The gate returns zero refusals for `SELECT a FROM "t" WHERE i OPERATOR(pg_catalog.=) ?` and for
+`UPDATE "t" SET c = ? WHERE i OPERATOR(pg_catalog.=) ?`, which are exactly the shapes of the three
+statements `ShreddingEventListener` and `WriteVerification` build on the application's connection.
+Measured: as `shred_app` on the hostile path, `SELECT email_cipher FROM "customer"` read
+`decoy.customer`, confirmed by `to_regclass('"customer"')::regnamespace` answering `decoy`.
+Not HIGH: section 3.2's refusal is PR B's by design and the exposure is named in SECURITY-NOTES
+(lines 118-128 and 896) and in the design's section 3.2, so no document claims these tables are
+qualified. It is MEDIUM because the gate does claim it - `SqlSites`'s own doc says a hole carries
+"a name the module holds as data and not a name the server resolves", which is false for a
+`TableRef` with no schema - and because the leg is dead against the module's rendering, so it will
+not catch the next relation that drifts either. Fix: lex `QUOTED_IDENT` and `HOLE` in relation
+position too, and until section 3.2 lands, record the three starter sites as named open refusals
+beside `IS DISTINCT FROM` rather than reporting them clean. Test
+`probe_the_gate_never_refuses_a_quoted_unqualified_relation`. Routing: Thor.
+
+**C-A-6 (LOW) - the one allowlisted open refusal is a deferral, and this house does not defer.**
+`NameQualificationGateTest` carries an exact-match allowance for
+`JdbcErasureStore.java:404 keyword operator: IS DISTINCT FROM`. The statement is the
+blind-index residual count under other tenant values, whose only consequence is a WARN, so the
+severity is LOW; the rule is not. A control with an allowlisted hole is "will fix later" with a
+test around it. Fix, in this PR: the tenant column is nullable, so a bare
+`OPERATOR(pg_catalog.<>)` is not equivalent - write
+`(<tenant> IS NULL OR NOT (<tenant> OPERATOR(pg_catalog.=) ?))` and delete the allowance, leaving
+`NameQualificationGateTest` asserting an empty refusal set. Routing: Isis, a correction.
+
+**C-A-7 (INFO) - scope drift, stated for the coordinator.** The design's section 12 assigns
+section 2, 5 and 6 to PR A and sections 3, 3.4 and 3.5 to PR B. This PR carries sections 3, 3.4
+and 3.5, which is how a new mechanism - the gate - arrived in a PR whose reviewed design scope did
+not include it. All five gate findings are in that mechanism. No security consequence by itself;
+the observation is that the gate did not get the design pass the design-stop rule gives a new
+mechanism.
+
+**C-A-8 (INFO) - the test tree uses the spelling C-A-1 shows is resolvable.**
+`SchemaVerificationTest:1552` and `CipherProbeNamePr13eTest:633` read
+`p.proconfig::text`. Tests are outside the gate's scan and nothing is exposed, but the house
+spelling should be uniform: `::pg_catalog.text`. Routing: Isis.
+
+### Attacked, clean
+
+- The anchor guard under every name class the body can reach: `<>(boolean,boolean)`,
+  `<>(bigint,bigint)`, `=(char,char)`, `+(bigint,integer)`, all owned by the writing role, all
+  first on its path. Refused, four attacks out of four, with the honest append still committing.
+- `CREATE OR REPLACE FUNCTION` with no `SET` clause: clears `proconfig` with no error and is a
+  refusal at the next verification, with its own message and remedy.
+- `proconfig` hostile (`search_path=app_decoy, pg_catalog, pg_temp`), extended
+  (`statement_timeout=1s`), and spelled `TO 'pg_catalog, pg_temp'`: three refusals, each naming the
+  stored bytes. The two spellings that store the identical text are accepted.
+- The inverted leg's NULL handling: `config()` returns `Optional.empty()` for a SQL NULL array and
+  for any representation it does not recognise, and `orElse(null)` then never equals the expected
+  list, so both paths refuse. No SQL-side array comparison anywhere.
+- The capture binding with a mixed-case, space-bearing, quote-bearing schema name: round-trips.
+- The three statements on the application's connection: empty id list is unreachable through
+  `groupByTable` and refused rather than rendered as `WHERE ()`; one id, and 500 ids at
+  `CHUNK = 500`, render one parenthesised OR chain with one bind each; a NULL id matches no row and
+  both call sites refuse (`executeUpdate() != 1`, and `stored.get(...) == null` ->
+  `UNVERIFIED_WRITE`). Fail-closed on all four.
+- `LIKE`, `ILIKE`, `SIMILAR TO`, `AT TIME ZONE`, `COLLATE`, `OVERLAPS`, `BETWEEN`: none appears in
+  any main-source statement of either module, and the gate refuses each of them by name, plus
+  `IN (`, plus `= ANY(` without a qualified operator in front of it.
+- Quoted keywords in a function or type position (`"numeric"(1)`, `::"text"`): refused, because the
+  allowance is keyed on the token being an unquoted `IDENT`.
+- `OPERATOR ( pg_catalog . = )` with whitespace and `OPERATOR("pg_catalog".=)`: both parse on the
+  server and both are refused by the gate, which accepts only the one adjacent six-token spelling
+  the module writes.
+- `ORDER BY seq ASC` in the tail read: the ordering operator comes from the default btree operator
+  class, which `GetDefaultOpClass` picks by type and access method with no `search_path`
+  involvement, and a second default class for the same type is an ambiguity error rather than a
+  silent win.
+- Prefix operator applications: an unqualified one is refused as an operator; a qualified one is
+  counted by `bump`, which can only over-refuse.
+
+### Verdict
+
+**MERGE WITH FIXES.** No HIGH. Six findings to fix before merge - C-A-1, C-A-2, C-A-5 (MEDIUM),
+C-A-3, C-A-4, C-A-6 (LOW) - and two INFO, C-A-7 and C-A-8. C-A-1 through C-A-5 are inside the gate
+and go to the builder that wrote it; C-A-6 and C-A-8 are corrections for a fix pass. The condition
+for MERGE is the five tests of `CipherProbeNamePr13fGateTest` green, `NameQualificationGateTest`
+asserting an empty refusal set with no allowance, and the 457 unchanged with nothing skipped.
