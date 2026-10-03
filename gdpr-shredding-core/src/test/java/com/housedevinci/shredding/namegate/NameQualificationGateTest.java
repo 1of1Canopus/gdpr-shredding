@@ -61,23 +61,60 @@ class NameQualificationGateTest {
   }
 
   /**
+   * The two starter files named below, and nothing else under {@link #starterMain}, builds a
+   * statement on the application's own connection (C-A-13's closure assertion checks the rest).
+   */
+  private static final List<String> STARTER_FILES =
+      List.of("WriteVerification.java", "ShreddingEventListener.java");
+
+  /**
    * Every Java file the gate reads: the whole JDBC adapter package, plus the two starter files that
    * build statements on the application's own connection (P2b, section 3.4). The list is a
    * directory walk and two named files rather than a list of statements, so a new adapter file is
-   * covered the day it is added.
+   * covered the day it is added, and {@link #assertStarterListIsClosed} covers a new starter file.
    */
   private static List<Path> sources() {
     try (Stream<Path> core = Files.walk(coreMain())) {
       var out =
           new ArrayList<Path>(core.filter(p -> p.toString().endsWith(".java")).sorted().toList());
-      out.add(starterMain().resolve("WriteVerification.java"));
-      out.add(starterMain().resolve("ShreddingEventListener.java"));
+      for (String name : STARTER_FILES) {
+        out.add(starterMain().resolve(name));
+      }
       for (Path p : out) {
         assertThat(p).describedAs("the gate's source list must not rot").exists();
       }
+      assertStarterListIsClosed();
       return out;
     } catch (IOException e) {
       throw new IllegalStateException("the gate could not walk " + coreMain().toAbsolutePath(), e);
+    }
+  }
+
+  /**
+   * The closure C-A-13 asks for: {@link #STARTER_FILES} is two hard-coded names with nothing that
+   * fails if a third starter file starts building a statement on the connection. Walks every other
+   * {@code .java} file under {@link #starterMain} and fails if it calls a method in {@link
+   * SqlSites#STATEMENT_CALLS} - the file would then build a statement the gate never reads.
+   */
+  private static void assertStarterListIsClosed() throws IOException {
+    try (Stream<Path> walk = Files.walk(starterMain())) {
+      for (Path p : walk.filter(path -> path.toString().endsWith(".java")).toList()) {
+        String fileName = p.getFileName().toString();
+        if (STARTER_FILES.contains(fileName)) {
+          continue;
+        }
+        String text = SqlSites.read(p);
+        for (String call : SqlSites.STATEMENT_CALLS) {
+          assertThat(text.contains(call + "("))
+              .describedAs(
+                  fileName
+                      + " calls "
+                      + call
+                      + "( and is not in NameQualificationGateTest.STARTER_FILES (C-A-13): add it"
+                      + " to the gate's source list or this closure assertion is false")
+              .isFalse();
+        }
+      }
     }
   }
 
@@ -167,6 +204,25 @@ class NameQualificationGateTest {
               + " WHERE <> OPERATOR(p...",
           "ShreddingEventListener.java:873 unqualified relation: `<>` in ...SELECT , <> FROM <>"
               + " WHERE <> OPERATOR(p...");
+
+  /**
+   * C-A-14: the nine entries of {@link #OPEN_REFUSALS} are carried only because {@code
+   * TableRef.sql()} is not yet in {@link SqlSites#QUALIFYING_CALLS} (design section 3.2, PR B1's
+   * mechanism). The day it joins, {@code TableRef.sql()} cannot render a one-part name any more and
+   * the nine refusals must be deleted; until then they must stay. This fails on either drift: the
+   * carry present after the mechanism lands, or the mechanism absent with no carry to explain why
+   * qualification does not reach these nine names.
+   */
+  @Test
+  void the_nine_refusal_carry_expires_the_day_table_ref_sql_joins_qualifying_calls() {
+    boolean tableRefSqlQualifies = SqlSites.QUALIFYING_CALLS.contains("sql");
+    assertThat(tableRefSqlQualifies)
+        .describedAs(
+            "SqlSites.QUALIFYING_CALLS containing \"sql\" and OPEN_REFUSALS being non-empty must"
+                + " never both be true, and must never both be false: one is the reason for the"
+                + " other")
+        .isEqualTo(OPEN_REFUSALS.isEmpty());
+  }
 
   @Test
   void the_bundled_script_resolves_no_name() {

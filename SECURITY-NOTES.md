@@ -938,12 +938,16 @@ the remedy is to re-apply `schema-postgresql.sql` as the owner.
   refuses on its own. Closing the framework-rendered half needs a mechanism of its own — the
   statement's `search_path` replaced for the width of that one statement and restored immediately —
   and that is a separate change, not a correction.
-- The **cross-tenant WARN** read-back uses `IS DISTINCT FROM`, which is a keyword spelling of the
-  type's own `=` and has no `OPERATOR(pg_catalog....)` form at all. The tenant column is nullable,
-  so `<>` is not equivalent and the rewrite is not available either. On a hostile path it can
-  over-count, which costs the accuracy of a log line and never the erasure's verdict: it is a WARN,
-  and every refusing leg on the same column is qualified. It moves inside the same one-statement
-  window as the leg above.
+- The **cross-tenant WARN** read-back is qualified: it is written
+  `(<tenant> IS NULL OR NOT (<tenant> OPERATOR(pg_catalog.=) ?))`, which avoids the keyword
+  spelling of the type's own equality that has no `OPERATOR(pg_catalog....)` form at all and was
+  the one name in this module qualification could not reach. The tenant column is nullable, so a
+  bare `OPERATOR(pg_catalog.<>)` is not equivalent - `NULL <> ?` is `NULL`, which would drop
+  exactly the rows this WARN exists to find - and the rewrite above is the one that is equivalent
+  for the non-null bound value this always passes. On a hostile path the keyword form this module
+  no longer writes would have *suppressed* the WARN rather than inflated it, which costs the
+  accuracy of a log line and never the erasure's verdict: it is a WARN, and every refusing leg on
+  the same column is qualified. It moves inside the same one-statement window as the leg above.
 - The **mapping admission** — whether the relation a `@Shredded` entity names is an ordinary
   permanent table, reachable, not hidden by a row-level-security policy, and whose compared columns
   have a `pg_catalog` equality operator and a deterministic collation — is read from the catalogue

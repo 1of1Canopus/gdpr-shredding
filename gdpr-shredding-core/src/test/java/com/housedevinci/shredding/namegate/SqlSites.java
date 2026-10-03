@@ -53,8 +53,19 @@ public final class SqlSites {
   /** The result of a scan: what was resolved, and what was not. */
   public record Scan(List<Site> sites, List<Unresolved> unresolved) {}
 
-  private static final Set<String> STATEMENT_CALLS =
-      Set.of("prepareStatement", "execute", "executeQuery", "executeUpdate", "addBatch");
+  /**
+   * Package-private, not private (C-A-13): {@code NameQualificationGateTest} asserts its starter
+   * file list is closed against this exact set, so a file the gate does not read that calls one of
+   * these methods fails the gate rather than passing silently.
+   */
+  static final Set<String> STATEMENT_CALLS =
+      Set.of(
+          "prepareStatement",
+          "execute",
+          "executeQuery",
+          "executeUpdate",
+          "addBatch",
+          "prepareCall");
 
   /**
    * Statement arguments that are a file read rather than a composed string. Accepted by name, with
@@ -81,7 +92,7 @@ public final class SqlSites {
    * it lands the six user-table relation sites are carried as named open refusals in the gate's
    * test, each with that mechanism named.
    */
-  private static final Set<String> QUALIFYING_CALLS = Set.of("qualify");
+  static final Set<String> QUALIFYING_CALLS = Set.of("qualify");
 
   private SqlSites() {}
 

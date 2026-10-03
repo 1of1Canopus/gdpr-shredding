@@ -59,6 +59,15 @@ public final class SqlNameLexer {
    * Every use of the six in this module is therefore written {@code pg_catalog.text} and the gate
    * refuses the bare spelling in both positions. The length-modifier allowance is keyed on the
    * token being a production, never on it naming a type.
+   *
+   * <p><b>{@code double} removed (C-A-9).</b> It was listed here as if {@code double} alone were a
+   * grammar production; it is not - {@code double precision} is the production, and the single word
+   * is an ordinary name. {@link #CATCODE_C_KEYWORDS} is the membership rule this list is checked
+   * against: {@code pg_get_keywords()} answers catcode {@code 'C'} ("unreserved, cannot be function
+   * or type name") for every one of the fifteen entries left, and {@code 'U'} ("unreserved, can be
+   * function or type name") for {@code double}, which is exactly the review's measurement that
+   * {@code CREATE DOMAIN decoy.double AS pg_catalog.varchar(3)} made {@code 'abcdefgh'::double}
+   * resolve the decoy.
    */
   private static final Set<String> GRAMMAR_TYPES =
       Set.of(
@@ -76,8 +85,86 @@ public final class SqlNameLexer {
           "smallint",
           "integer",
           "int",
+          "real");
+
+  /**
+   * The spellings PostgreSQL 16.14's own {@code pg_get_keywords()} answers catcode {@code 'C'}
+   * ("unreserved, cannot be function or type name") for, captured as a constant so {@link
+   * #GRAMMAR_TYPES} can be checked against it rather than against nothing (C-A-9). {@link
+   * CatcodeCKeywordsTest} compares this list to a live query on the digest the module's own tests
+   * pin and fails on drift. A word in this list can never be shadowed by a function or a type the
+   * role defines, because the grammar itself refuses to let it appear in a function-call or
+   * type-name position as anything but the keyword - which is the one property the length-modifier
+   * allowance in {@link #checkFunctionCall} and {@link #checkTypeName} depends on.
+   */
+  static final Set<String> CATCODE_C_KEYWORDS =
+      Set.of(
+          "between",
+          "bigint",
+          "bit",
+          "boolean",
+          "char",
+          "character",
+          "coalesce",
+          "dec",
+          "decimal",
+          "exists",
+          "extract",
+          "float",
+          "greatest",
+          "grouping",
+          "inout",
+          "int",
+          "integer",
+          "interval",
+          "json_array",
+          "json_arrayagg",
+          "json_object",
+          "json_objectagg",
+          "least",
+          "national",
+          "nchar",
+          "none",
+          "normalize",
+          "nullif",
+          "numeric",
+          "out",
+          "overlay",
+          "position",
+          "precision",
           "real",
-          "double");
+          "row",
+          "setof",
+          "smallint",
+          "substring",
+          "time",
+          "timestamp",
+          "treat",
+          "trim",
+          "values",
+          "varchar",
+          "xmlattributes",
+          "xmlconcat",
+          "xmlelement",
+          "xmlexists",
+          "xmlforest",
+          "xmlnamespaces",
+          "xmlparse",
+          "xmlpi",
+          "xmlroot",
+          "xmlserialize",
+          "xmltable");
+
+  /**
+   * Keywords that sit in {@link #KEYWORDS} for a reason unrelated to the function-call allowance -
+   * {@code replace} and {@code mode} are needed by {@link #ddlObjectNames} to skip {@code OR
+   * REPLACE} and a plpgsql parameter mode, {@code left} and {@code right} name a join type - but
+   * that are themselves ordinary, shadowable pg_catalog functions and must never be exempted from
+   * {@link #checkFunctionCall} (C-A-9). None of the four is catcode {@code 'C'}: {@code left} and
+   * {@code right} are {@code 'T'} ("reserved, can be function or type name") and {@code replace},
+   * {@code mode} are {@code 'U'} ("unreserved, can be function or type name"). All four hijack.
+   */
+  private static final Set<String> SHADOWABLE_KEYWORDS = Set.of("left", "right", "replace", "mode");
 
   /**
    * Keyword operators: names the grammar spells as words, which resolve along {@code search_path}
@@ -227,6 +314,14 @@ public final class SqlNameLexer {
 
   /** Token indices that are the {@code ON <relation>} of a {@code CREATE INDEX} (C-A-3). */
   private Set<Integer> indexTargets = Set.of();
+
+  /**
+   * Token indices that are a relation position, every entry of a list and past an ONLY (C-A-10).
+   */
+  private Set<Integer> relationTargets = Set.of();
+
+  /** Token indices that are the operator class of a {@code CREATE INDEX} column (C-A-11). */
+  private Set<Integer> operatorClassPositions = Set.of();
 
   private SqlNameLexer(String sql) {
     this.sql = sql;
@@ -442,6 +537,8 @@ public final class SqlNameLexer {
     // proximity (C-A-3). Computed once, before any rule runs.
     ddlObjectNames = ddlObjectNames(t);
     indexTargets = indexTargets(t);
+    relationTargets = relationTargets(t);
+    operatorClassPositions = operatorClassPositions(t);
 
     boolean inSetClause = false;
     // The parenthesis depth at which the current SET clause's assignments live, and whether the
@@ -459,6 +556,7 @@ public final class SqlNameLexer {
     for (int i = 0; i < t.size(); i++) {
       Token tok = t.get(i);
       checkRelationPosition(t, i);
+      checkOperatorClass(t, i);
       if (tok.isIdent("OPERATOR") && qualifiedOperatorRun(t, i)) {
         // The whole six-token run is ONE operator application, and it is an application at the
         // depth the run sits at, not inside its own parentheses. Consumed here so the run's `(`
@@ -672,14 +770,16 @@ public final class SqlNameLexer {
       return;
     }
     String word = tok.text().toLowerCase(Locale.ROOT);
-    if (KEYWORDS.contains(word) || GRAMMAR_TYPES.contains(word)) {
+    if ((KEYWORDS.contains(word) || GRAMMAR_TYPES.contains(word))
+        && !SHADOWABLE_KEYWORDS.contains(word)) {
       // A grammar keyword, or a grammar production with a length modifier - `numeric(1)`,
       // `varchar(255)`. Unquoted only: a quoted "numeric" is a QUOTED_IDENT token and never
       // reaches this branch (C-5d). The allowance holds because a production in a call position is
       // a syntax error rather than a lookup; it must never be keyed on the token naming a type.
       // `text(x)`, `int8(x)`, `bytea(x)`, `timestamptz(x)`, `int2(x)` and `int4(x)` are plain
       // function calls resolved along search_path - the function-syntax cast - and are refused
-      // since those six left GRAMMAR_TYPES (C-A-2).
+      // since those six left GRAMMAR_TYPES (C-A-2). `left(`, `right(`, `replace(`, `mode(` and
+      // `double(` are refused the same way: all five hijack and none is catcode 'C' (C-A-9).
       return;
     }
     if (isQualified(t, i)) {
@@ -802,6 +902,81 @@ public final class SqlNameLexer {
   }
 
   /**
+   * The operator class of a {@code CREATE INDEX} column: the identifier that can follow a column
+   * name inside the column list, resolved along {@code search_path} exactly as a function or type
+   * is (C-A-11). Not written by this module - the bundled script names none - so this is drift
+   * coverage rather than a fix for a live statement.
+   *
+   * <p>Decided the same way {@link #ddlObjectNames} is, by the grammar's shape and not by a list:
+   * two identifiers adjacent at the column list's own paren depth, with nothing between them, is a
+   * shape only a column name followed by its operator class produces - every other valid entry puts
+   * a comma, {@code ASC}/{@code DESC}, {@code COLLATE} or a closing paren between two names.
+   */
+  private Set<Integer> operatorClassPositions(List<Token> t) {
+    var out = new HashSet<Integer>();
+    for (int i = 0; i < t.size(); i++) {
+      if (!t.get(i).isIdent("create")) {
+        continue;
+      }
+      boolean index = false;
+      int j = i + 1;
+      while (j < t.size()
+          && t.get(j).kind() == Kind.IDENT
+          && KEYWORDS.contains(t.get(j).text().toLowerCase(Locale.ROOT))) {
+        index |= t.get(j).isIdent("index");
+        j++;
+      }
+      if (!index) {
+        continue;
+      }
+      while (j < t.size() && !t.get(j).isPunct("(") && !t.get(j).isPunct(";")) {
+        j++;
+      }
+      if (j >= t.size() || !t.get(j).isPunct("(")) {
+        continue;
+      }
+      int depth = 0;
+      Integer lastIdentAt = null;
+      for (int k = j; k < t.size(); k++) {
+        Token tok = t.get(k);
+        if (tok.isPunct("(")) {
+          depth++;
+          lastIdentAt = null;
+          continue;
+        }
+        if (tok.isPunct(")")) {
+          depth--;
+          lastIdentAt = null;
+          if (depth == 0) {
+            break;
+          }
+          continue;
+        }
+        if (depth != 1) {
+          continue;
+        }
+        if (tok.kind() == Kind.IDENT || tok.kind() == Kind.QUOTED_IDENT) {
+          if (lastIdentAt != null) {
+            out.add(k);
+          }
+          lastIdentAt = k;
+        } else {
+          lastIdentAt = null;
+        }
+      }
+    }
+    return Set.copyOf(out);
+  }
+
+  private void checkOperatorClass(List<Token> t, int i) {
+    if (!operatorClassPositions.contains(i)) {
+      return;
+    }
+    Token tok = t.get(i);
+    refuse("unqualified operator class", tok.text(), context(tok.at()));
+  }
+
+  /**
    * {@code EXECUTE FUNCTION shredding_...()} inside {@code CREATE TRIGGER}, and the guard names in
    * the script's {@code DO} blocks: section 5.2 of the design. These names resolve in the
    * <b>applying</b> session's path, not the runtime role's, and the script cannot know its own
@@ -822,8 +997,90 @@ public final class SqlNameLexer {
   }
 
   /**
-   * The relation leg: {@code FROM}, {@code JOIN}, {@code INSERT INTO}, {@code UPDATE}, {@code LOCK
-   * TABLE}.
+   * The token indices that are a relation position: {@code FROM}, {@code JOIN}, {@code INSERT
+   * INTO}, {@code UPDATE}, {@code LOCK TABLE}, {@code TRUNCATE} and the {@code USING} clause of a
+   * {@code DELETE} - every entry of a comma-separated list, and past an {@code ONLY} in between
+   * (C-A-10).
+   *
+   * <p>Computed once, like {@link #ddlObjectNames} and {@link #indexTargets}, because the bug this
+   * replaces was exactly a lookback that read only the single token immediately after the position
+   * keyword: {@code FROM a, b, c} never visited {@code b} or {@code c}, and {@code FROM ONLY t} and
+   * {@code LOCK TABLE ONLY t} never visited {@code t} at all, because {@code ONLY} is itself a
+   * keyword the old check returned clean on without looking further. {@code SchemaVerification}'s
+   * own {@code FROM pg_catalog.pg_class s, pg_catalog.pg_class t, pg_catalog.pg_attribute a} is the
+   * live statement that measured it: qualified today, reported clean for the wrong reason.
+   */
+  private Set<Integer> relationTargets(List<Token> t) {
+    var out = new HashSet<Integer>();
+    int depth = 0;
+    int listDepth = -1;
+    boolean expect = false;
+    for (int i = 0; i < t.size(); i++) {
+      Token tok = t.get(i);
+      if (tok.isPunct("(")) {
+        depth++;
+        continue;
+      }
+      if (tok.isPunct(")")) {
+        depth--;
+        if (listDepth > depth) {
+          listDepth = -1;
+          expect = false;
+        }
+        continue;
+      }
+      if (listDepth >= 0 && depth == listDepth) {
+        if (tok.isPunct(",")) {
+          expect = true;
+          continue;
+        }
+        if (tok.isPunct(";")
+            || tok.isIdent("where")
+            || tok.isIdent("group")
+            || tok.isIdent("order")
+            || tok.isIdent("having")
+            || tok.isIdent("limit")
+            || tok.isIdent("returning")
+            || tok.isIdent("values")
+            || tok.isIdent("set")
+            || tok.isIdent("on")) {
+          listDepth = -1;
+          expect = false;
+        }
+      }
+      if (expect) {
+        if (tok.isIdent("only")) {
+          // ONLY does not satisfy the expectation: the name after it is still unvisited (C-A-10).
+          continue;
+        }
+        out.add(i);
+        expect = false;
+        continue;
+      }
+      boolean startsInto = tok.isIdent("into") && !(i >= 1 && t.get(i - 1).isIdent("conflict"));
+      boolean startsUpdate = tok.isIdent("update") && !(i >= 1 && t.get(i - 1).isIdent("do"));
+      boolean startsLockTable = tok.isIdent("table") && i >= 1 && t.get(i - 1).isIdent("lock");
+      boolean startsUsing =
+          tok.isIdent("using") && !(i + 1 < t.size() && t.get(i + 1).isPunct("("));
+      if (tok.isIdent("from")
+          || tok.isIdent("truncate")
+          || startsInto
+          || startsUpdate
+          || startsLockTable
+          || startsUsing) {
+        listDepth = depth;
+        expect = true;
+      } else if (tok.isIdent("join")) {
+        // JOIN takes one relation, never a comma list, so no listDepth is opened.
+        expect = true;
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The relation leg's body: given that {@link #relationTargets} has already decided this index is
+   * a relation position, decide whether the name found there resolves along {@code search_path}.
    *
    * <p><b>Every token kind, not only an unquoted identifier (C-A-5).</b> Revision 1 returned early
    * unless the token was an unquoted {@code IDENT}, which made the leg dead against everything this
@@ -839,20 +1096,10 @@ public final class SqlNameLexer {
    * refusal: the gate has no evidence about what it carries.
    */
   private void checkRelationPosition(List<Token> t, int i) {
+    if (!relationTargets.contains(i)) {
+      return;
+    }
     Token tok = t.get(i);
-    if (i == 0) {
-      return;
-    }
-    Token prev = t.get(i - 1);
-    boolean relationPosition =
-        prev.isIdent("from")
-            || prev.isIdent("join")
-            || (prev.isIdent("into") && !t.get(Math.max(0, i - 2)).isIdent("conflict"))
-            || (prev.isIdent("update") && !(i >= 2 && t.get(i - 2).isIdent("do")))
-            || (prev.isIdent("table") && i >= 2 && t.get(i - 2).isIdent("lock"));
-    if (!relationPosition) {
-      return;
-    }
     if (tok.kind() == Kind.HOLE) {
       if (tok.text().equals(QUALIFIED_HOLE)) {
         return;
@@ -904,6 +1151,15 @@ public final class SqlNameLexer {
     }
     Token tok = t.get(i);
     if (tok.kind() == Kind.HOLE) {
+      // A hole after :: or CAST( ... AS ...) carries no evidence that the type names its schema,
+      // exactly as a hole in relation position does not (C-A-5). Revision 1 of this leg returned
+      // here unconditionally, which read a Java-side type name as clean on no evidence at all
+      // (C-A-11). The QUALIFIED_HOLE spelling is the one the relation leg accepts for the same
+      // reason it accepts it there: a call that cannot return a one-part name.
+      if (tok.text().equals(QUALIFIED_HOLE)) {
+        return;
+      }
+      refuse("unqualified type", "<>", context(tok.at()));
       return;
     }
     if (tok.kind() == Kind.IDENT
