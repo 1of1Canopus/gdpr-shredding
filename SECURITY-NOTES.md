@@ -992,7 +992,15 @@ refusal below, and this window.
 
 **What a `SELECT` can still run inside the window.** A row-level-security policy function, and a
 function called from a view an entity is mapped to, resolve their own unqualified names in there and
-fail loudly (`relation "..." does not exist`) rather than silently. A `LANGUAGE sql` body resolves
+fail loudly (`relation "..." does not exist`) rather than silently. So does the mapping's own SQL:
+the text of a `@SQLRestriction` and of every auto-enabled `@Filter` condition on a `@BlindIndex`
+entity is rendered by Hibernate into the windowed read-back, and an unqualified function, relation or
+non-keyword type name in it does not resolve there. That is the commoner case, and it makes every
+erasure of that entity fail, loudly and with the transaction rolled back whole (the data key is
+still present afterwards), while the application itself reads and writes the entity normally. The
+remedy is to schema-qualify every function, relation and non-keyword type those fragments name, for
+example `@SQLRestriction("public.pr18_visible(owner_id)")`; a qualified function whose body resolves
+names at run time needs the remedy below as well. A `LANGUAGE sql` body resolves
 its names at creation time and is immune. If you have such a function, give it its own clause:
 `ALTER FUNCTION <fn> SET search_path = <schema>, pg_catalog` — the same mechanism this module gives
 its own guards. The failure mode is availability of that one erasure, fail-closed, and it is

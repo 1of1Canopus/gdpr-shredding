@@ -97,6 +97,11 @@ If a row-level-security policy function on that table, or a function called from
 mapped to, names a relation unqualified, that statement fails with the database's own `relation
 "..." does not exist` and the erasure is refused rather than completing on an unexpected answer.
 The remedy is one line per function: `ALTER FUNCTION <fn> SET search_path = <schema>, pg_catalog`.
+The same applies to the SQL in your own mapping: the text of a `@SQLRestriction`, and of every
+auto-enabled `@Filter` condition, on an entity with a `@BlindIndex` field is rendered into that
+read-back. Schema-qualify every function, relation and non-keyword type they name, for example
+`@SQLRestriction("public.pr18_visible(owner_id)")`; an unqualified name makes every erasure of that
+entity fail, loudly, and the erasure rolls back whole.
 A `LANGUAGE sql` body resolves its names at creation time and is unaffected.
 
 ## Steps
