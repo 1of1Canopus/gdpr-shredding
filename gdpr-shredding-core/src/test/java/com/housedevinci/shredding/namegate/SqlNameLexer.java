@@ -210,15 +210,41 @@ public final class SqlNameLexer {
           "concurrently");
 
   private final String sql;
+  private final boolean window;
   private final List<Refusal> refusals = new ArrayList<>();
 
-  private SqlNameLexer(String sql) {
+  private SqlNameLexer(String sql, boolean window) {
     this.sql = sql;
+    this.window = window;
   }
 
   /** Every name in {@code sql} the gate refuses; empty means the statement resolves no name. */
   public static List<Refusal> refusals(String sql) {
-    var lexer = new SqlNameLexer(sql);
+    return refusals(sql, false);
+  }
+
+  /**
+   * As {@link #refusals(String)}, with one relaxation when {@code insideWindow} is true: a
+   * <b>keyword operator</b> is admitted.
+   *
+   * <p>The relaxation is exactly the class of names that has no qualified spelling at all. {@code
+   * IS DISTINCT FROM} is the type's own {@code =} behind a grammar keyword and {@code LIKE} is
+   * {@code ~~}; neither can be written {@code OPERATOR(pg_catalog....)}, so for these names
+   * qualification is not a mechanism that exists. Inside the one-statement window of {@code
+   * JdbcSupport.inOneStatementWindow} the session's path is {@code pg_catalog, pg_temp}, and
+   * operator, function and aggregate names are never consulted in {@code pg_temp} even when it is
+   * named first (T8a, T8b) - so a keyword operator in there can only resolve from {@code
+   * pg_catalog}, which is the property qualification would have given it.
+   *
+   * <p>Nothing else is relaxed, on purpose. A symbolic operator, a function, a type, a cast and a
+   * relation all have a qualified spelling, the module writes it, and the window does not excuse
+   * leaving one out - a relation especially, since {@code pg_temp} <em>is</em> consulted for
+   * relation names. {@code COLLATE} stays refused too: a collation is a schema object, whether a
+   * role can place one where the window would reach it has not been measured, and unverifiable is
+   * not clean.
+   */
+  public static List<Refusal> refusals(String sql, boolean insideWindow) {
+    var lexer = new SqlNameLexer(sql, insideWindow);
     lexer.run();
     return List.copyOf(lexer.refusals);
   }
@@ -256,7 +282,7 @@ public final class SqlNameLexer {
       if (t.kind() == Kind.DOLLAR_BODY) {
         // The guard bodies: lexed with the same rules, which is what holds the parentheses of E3a
         // in place and what refuses a backslash inside a body (revision 1's R4 residual).
-        refusals.addAll(refusals(t.text()));
+        refusals.addAll(refusals(t.text(), window));
       }
     }
   }
@@ -553,23 +579,28 @@ public final class SqlNameLexer {
     Token tok = t.get(i);
     String word = tok.text().toLowerCase(java.util.Locale.ROOT);
     if (KEYWORD_OPERATORS.contains(word)) {
-      refuse("keyword operator", tok.text(), context(tok.at()));
+      // COLLATE is never admitted, window or not: see refusals(String, boolean).
+      if (word.equals("collate")) {
+        refuse("keyword operator", tok.text(), context(tok.at()));
+      } else {
+        refuseKeywordOperator(tok.text(), tok.at());
+      }
       return;
     }
     if (word.equals("similar") && next(t, i, "to")) {
-      refuse("keyword operator", "SIMILAR TO", context(tok.at()));
+      refuseKeywordOperator("SIMILAR TO", tok.at());
       return;
     }
     if (word.equals("at") && next(t, i, "time")) {
-      refuse("keyword operator", "AT TIME ZONE", context(tok.at()));
+      refuseKeywordOperator("AT TIME ZONE", tok.at());
       return;
     }
     if (word.equals("distinct") && i > 0 && (t.get(i - 1).isIdent("is") || isIsNot(t, i - 1))) {
-      refuse("keyword operator", "IS DISTINCT FROM", context(tok.at()));
+      refuseKeywordOperator("IS DISTINCT FROM", tok.at());
       return;
     }
     if (word.equals("in") && i + 1 < t.size() && t.get(i + 1).isPunct("(") && !isDdlIn(t, i)) {
-      refuse("keyword operator", "IN", context(tok.at()));
+      refuseKeywordOperator("IN", tok.at());
       return;
     }
     if ((word.equals("any") || word.equals("all") || word.equals("some"))
@@ -751,6 +782,17 @@ public final class SqlNameLexer {
 
   private void refuse(String rule, String token, int at) {
     refusals.add(new Refusal(rule, token, context(at)));
+  }
+
+  /**
+   * A keyword operator: refused everywhere except inside the one-statement window, which is the
+   * only place this module has a mechanism for a name with no qualified spelling.
+   */
+  private void refuseKeywordOperator(String token, int at) {
+    if (window) {
+      return;
+    }
+    refusals.add(new Refusal("keyword operator", token, context(at)));
   }
 
   private String context(int at) {

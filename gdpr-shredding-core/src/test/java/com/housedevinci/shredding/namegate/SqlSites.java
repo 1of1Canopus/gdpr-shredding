@@ -37,14 +37,28 @@ public final class SqlSites {
 
   /**
    * One resolved statement site. {@code variants} is more than one when a ternary is in the chain.
+   *
+   * @param window true when this statement call sits lexically inside the argument list of a {@link
+   *     #WINDOW_CALLS} call, which is the only way a statement of this module reaches the server
+   *     with the session's {@code search_path} replaced by {@code pg_catalog, pg_temp}. The lexer
+   *     admits a keyword operator - a name with no {@code OPERATOR(pg_catalog....)} spelling at all
+   *     - only there.
    */
-  public record Site(String file, int line, List<String> variants) {}
+  public record Site(String file, int line, List<String> variants, boolean window) {}
+
+  /**
+   * One {@link #WINDOW_CALLS} call site, with how many text-carrying statement calls it encloses.
+   * The window's whole contract is one statement (design section 4.3, M9), and the gate is what
+   * checks it: a second statement inside one window is how the window becomes a transaction again
+   * by accident.
+   */
+  public record Window(String file, int line, int statements) {}
 
   /** A statement call the resolver could not resolve: a gate failure by itself. */
   public record Unresolved(String file, int line, String argument) {}
 
-  /** The result of a scan: what was resolved, and what was not. */
-  public record Scan(List<Site> sites, List<Unresolved> unresolved) {}
+  /** The result of a scan: what was resolved, what was not, and every window that was opened. */
+  public record Scan(List<Site> sites, List<Unresolved> unresolved, List<Window> windows) {}
 
   private static final Set<String> STATEMENT_CALLS =
       Set.of("prepareStatement", "execute", "executeQuery", "executeUpdate", "addBatch");
@@ -56,6 +70,15 @@ public final class SqlSites {
    */
   public static final Set<String> FILE_READ_CALLS = Set.of("schemaScript()");
 
+  /**
+   * The one-statement window of {@code JdbcSupport.inOneStatementWindow} (design section 4). A
+   * statement call lexically inside this call's argument list is a statement that reaches the
+   * server with the path replaced, and nothing else is: the helper opens the window itself, runs
+   * the unit of work, and closes it in a {@code finally}. So the admission the lexer makes for
+   * these sites follows the mechanism, mechanically, rather than a file, a line or an extension.
+   */
+  public static final Set<String> WINDOW_CALLS = Set.of("inOneStatementWindow");
+
   private SqlSites() {}
 
   static Map<String, List<String>> debugBindings(Path file) {
@@ -66,17 +89,21 @@ public final class SqlSites {
   public static Scan scan(List<Path> files) {
     var sites = new ArrayList<Site>();
     var unresolved = new ArrayList<Unresolved>();
+    var windows = new ArrayList<Window>();
     for (Path file : files) {
-      scanOne(file, sites, unresolved);
+      scanOne(file, sites, unresolved, windows);
     }
-    return new Scan(List.copyOf(sites), List.copyOf(unresolved));
+    return new Scan(List.copyOf(sites), List.copyOf(unresolved), List.copyOf(windows));
   }
 
-  private static void scanOne(Path file, List<Site> sites, List<Unresolved> unresolved) {
+  private static void scanOne(
+      Path file, List<Site> sites, List<Unresolved> unresolved, List<Window> windows) {
     String source = read(file);
     List<Tok> toks = lexJava(source);
     Map<String, List<String>> bindings = bindings(toks);
     String name = file.getFileName().toString();
+    List<int[]> windowRanges = windowRanges(toks);
+    var statementsPerWindow = new int[windowRanges.size()];
 
     for (int i = 0; i < toks.size(); i++) {
       Tok t = toks.get(i);
@@ -100,8 +127,41 @@ public final class SqlSites {
         unresolved.add(new Unresolved(name, line(source, t.at), text));
         continue;
       }
-      sites.add(new Site(name, line(source, t.at), variants));
+      int window = windowOf(windowRanges, i);
+      if (window >= 0) {
+        statementsPerWindow[window]++;
+      }
+      sites.add(new Site(name, line(source, t.at), variants, window >= 0));
     }
+    for (int w = 0; w < windowRanges.size(); w++) {
+      windows.add(new Window(name, line(source, windowRanges.get(w)[2]), statementsPerWindow[w]));
+    }
+  }
+
+  /**
+   * Every {@link #WINDOW_CALLS} call's argument list, as {@code {from, to, at}} token indices. A
+   * statement call between {@code from} and {@code to} is inside that window: the helper's contract
+   * is that it runs its unit of work with the path replaced, so lexical containment in the argument
+   * list is containment in the window.
+   */
+  private static List<int[]> windowRanges(List<Tok> toks) {
+    var out = new ArrayList<int[]>();
+    for (int i = 0; i < toks.size() - 1; i++) {
+      Tok t = toks.get(i);
+      if (t.kind == K.IDENT && WINDOW_CALLS.contains(t.text) && toks.get(i + 1).is("(")) {
+        out.add(new int[] {i + 1, matching(toks, i + 1), t.at});
+      }
+    }
+    return out;
+  }
+
+  private static int windowOf(List<int[]> ranges, int index) {
+    for (int w = 0; w < ranges.size(); w++) {
+      if (index > ranges.get(w)[0] && index < ranges.get(w)[1]) {
+        return w;
+      }
+    }
+    return -1;
   }
 
   /**

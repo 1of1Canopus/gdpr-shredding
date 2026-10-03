@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * The name gate, section 3.5 of the name-resolution design (test N22).
@@ -99,7 +100,7 @@ class NameQualificationGateTest {
     var refusals = new ArrayList<String>();
     for (var site : scan.sites()) {
       for (String variant : site.variants()) {
-        for (var refusal : SqlNameLexer.refusals(variant)) {
+        for (var refusal : SqlNameLexer.refusals(variant, site.window())) {
           refusals.add(site.file() + ":" + site.line() + " " + refusal);
         }
       }
@@ -116,28 +117,100 @@ class NameQualificationGateTest {
   }
 
   /**
-   * The one name in this module that qualification cannot reach, named here with the mechanism that
-   * closes it rather than allowlisted by file or by line.
+   * The invariant the window's javadoc states and this is what checks it (design section 4.3, M9):
+   * <b>one statement per window</b>. Everything that makes the window acceptable rests on it - the
+   * erasure's own {@code UPDATE} running outside it on the arrived path, the application's trigger
+   * still firing (T17), and the fact that no exception can be swallowed with the path still
+   * replaced. The cross-tenant WARN count therefore gets its own window rather than sharing the
+   * read-back's.
    *
-   * <p>{@code IS DISTINCT FROM} is the type's own {@code =} reached through a grammar keyword, and
-   * it has no {@code OPERATOR(pg_catalog....)} spelling at all. The site is the cross-tenant WARN
-   * read-back in {@code JdbcErasureStore.verifyCleared}, where the tenant column is nullable and
-   * {@code <>} is therefore not equivalent. Revision 1 of the design claimed the {@code
-   * search_path} pin covered it; T3c measured that on the arrived path it answers 2 where the truth
-   * is 1. Revision 2 moves the statement <b>inside</b> the replaced-path bracket of section 4,
-   * where it is correct (T2e) - and that bracket is PR B1, not this PR.
-   *
-   * <p>It stays a WARN and never a refusal, and the refusing legs on the same column are qualified,
-   * so what is at risk here is the accuracy of a log line rather than the erasure's verdict.
-   *
-   * <p>The expectation is the exact refusal, not a file or a line: a second keyword operator
-   * anywhere, or this one moving to another statement, fails the gate, and PR B1 removes this entry
-   * when the bracket lands.
+   * <p>"At most one" and not "exactly one" for one reason, stated so nobody reads it as slack: the
+   * framework-rendered read-back's statement is issued by Hibernate, not by a {@code
+   * prepareStatement} in this module's source, so a text gate cannot see it at all. That window's
+   * one-statement property rests on {@code StatelessSession} being unable to flush, on {@code
+   * HibernateBlindIndexResidual}'s contract, and on the behavioural probes - not on this assertion.
+   * What this assertion closes is the other direction: a second statement of the module's own,
+   * added into either window by a later edit.
    */
-  private static final List<String> OPEN_REFUSALS =
-      List.of(
-          "JdbcErasureStore.java:404 keyword operator: `IS DISTINCT FROM` in"
-              + " ...g_catalog.=) ?) AND <> IS DISTINCT FROM ? AND <> IS ...");
+  @Test
+  void every_window_holds_at_most_one_statement_of_this_modules_own() {
+    var scan = SqlSites.scan(sources());
+
+    assertThat(scan.windows())
+        .describedAs("the two windows of section 4.3 must be found at all")
+        .hasSizeGreaterThanOrEqualTo(2);
+    assertThat(scan.windows().stream().filter(w -> w.statements() > 1).toList())
+        .describedAs(
+            "a second statement inside one window is how the window becomes a transaction again by"
+                + " accident, and it is the one place an exception could be swallowed with the"
+                + " search_path still replaced")
+        .isEmpty();
+  }
+
+  /**
+   * The negative of the rule above, on a synthetic source rather than on this module's own: the
+   * gate has to be able to see a second statement in a window, or the assertion above is
+   * decoration.
+   */
+  @Test
+  void a_window_holding_two_statements_is_seen_by_the_gate(@TempDir Path dir) throws IOException {
+    Path two = dir.resolve("TwoStatements.java");
+    Files.writeString(
+        two,
+        """
+        class TwoStatements {
+          void run() {
+            JdbcSupport.inOneStatementWindow(
+                c,
+                () -> {
+                  c.prepareStatement("SELECT pg_catalog.count(*) FROM pg_catalog.pg_class");
+                  c.prepareStatement("SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc");
+                  return 1L;
+                });
+          }
+        }
+        """);
+
+    var scan = SqlSites.scan(List.of(two));
+
+    assertThat(scan.windows()).hasSize(1);
+    assertThat(scan.windows().get(0).statements()).isEqualTo(2);
+    assertThat(scan.sites()).allMatch(SqlSites.Site::window);
+  }
+
+  /**
+   * The admission itself, and its limits. Inside the window a keyword operator is admitted - {@code
+   * IS DISTINCT FROM} and {@code LIKE} have no {@code OPERATOR(pg_catalog....)} spelling at all,
+   * and inside the window they can only resolve from {@code pg_catalog}, because operator, function
+   * and aggregate names are never consulted in {@code pg_temp} (T8a, T8b). Every other name class
+   * keeps its refusal: each of them has a qualified spelling, and {@code pg_temp} <em>is</em>
+   * consulted for relation names.
+   */
+  @Test
+  void the_window_admits_a_keyword_operator_and_nothing_else() {
+    String distinct = "SELECT pg_catalog.count(*) FROM s.t WHERE a IS DISTINCT FROM ?";
+    assertThat(SqlNameLexer.refusals(distinct, true))
+        .describedAs("the one name qualification cannot reach, inside the mechanism that can")
+        .isEmpty();
+    assertThat(rules(distinct)).containsExactly("keyword operator");
+
+    assertThat(rules("SELECT 1 FROM s.t WHERE a LIKE ?", true)).isEmpty();
+
+    assertThat(rules("SELECT 1 FROM s.t WHERE (a = ?)", true))
+        .describedAs("a symbolic operator has a qualified spelling; the window is not an excuse")
+        .containsExactly("unqualified operator");
+    assertThat(rules("SELECT pg_catalog.count(*) FROM t", true))
+        .describedAs("pg_temp IS consulted for relation names, so this one matters most in there")
+        .containsExactly("unqualified relation");
+    assertThat(rules("SELECT count(*) FROM s.t", true))
+        .containsExactly("unqualified function or aggregate");
+    assertThat(rules("SELECT 'pg_class'::regclass", true)).containsExactly("unqualified type");
+    assertThat(rules("SELECT 1 FROM s.t WHERE (a OPERATOR(pg_catalog.=) ? COLLATE ci)", true))
+        .describedAs(
+            "a collation is a schema object; whether a role can place one where the window would"
+                + " reach it has not been measured, and unverifiable is not clean")
+        .contains("keyword operator");
+  }
 
   @Test
   void the_bundled_script_resolves_no_name() {
@@ -173,7 +246,13 @@ class NameQualificationGateTest {
   // --------------------------------------------- one negative per rule class
 
   private static List<String> rules(String sql) {
-    return SqlNameLexer.refusals(sql).stream().map(SqlNameLexer.Refusal::rule).toList();
+    return rules(sql, false);
+  }
+
+  private static List<String> rules(String sql, boolean insideWindow) {
+    return SqlNameLexer.refusals(sql, insideWindow).stream()
+        .map(SqlNameLexer.Refusal::rule)
+        .toList();
   }
 
   @Test
