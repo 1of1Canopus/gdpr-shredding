@@ -1,7 +1,9 @@
 package com.housedevinci.shredding.namegate;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 
 /**
@@ -37,12 +39,26 @@ public final class SqlNameLexer {
   private static final String OPERATOR_CHARS = "+-*/<>=~!@#%^&|`?";
 
   /**
-   * Grammar type keywords. Allowed unquoted in a type position and before {@code (} with a length
-   * modifier, because the unquoted spellings are grammar productions rather than resolvable names -
-   * {@code varchar(255)} in expression position is a syntax error (C-5a). The <b>quoted</b>
-   * spelling is not allowed: {@code "numeric"(1)} with {@code CREATE FUNCTION app."numeric"(int4)}
-   * in place resolves to the function (C-5d), so the allowance is keyed on the token being an
-   * unquoted identifier whose text is in this list, never on the text alone.
+   * The type spellings PostgreSQL's own grammar produces, and nothing else.
+   *
+   * <p>Allowed unquoted in a type position and before {@code (} with a length modifier, because
+   * every spelling here is a production in {@code gram.y} rather than a name the server looks up -
+   * {@code varchar(255)} in expression position is a syntax error (C-5a), and so is {@code
+   * boolean(x)}. The <b>quoted</b> spelling is not allowed: {@code "numeric"(1)} with {@code CREATE
+   * FUNCTION app."numeric"(int4)} in place resolves to the function (C-5d), so the allowance is
+   * keyed on the token being an unquoted identifier whose text is in this list, never on the text
+   * alone.
+   *
+   * <p><b>Six spellings the review removed (C-A-1, C-A-2).</b> {@code text}, {@code bytea}, {@code
+   * timestamptz}, {@code int2}, {@code int4} and {@code int8} were listed here as if they were
+   * grammar keywords. They are not: the grammar has no {@code TEXT}, {@code BYTEA}, {@code
+   * TIMESTAMPTZ}, {@code INT2}, {@code INT4} or {@code INT8} production, so all six are ordinary
+   * type names resolved along {@code search_path}, and all six are also ordinary function names.
+   * The review measured {@code CREATE DOMAIN decoy.text AS char(3)} turning {@code
+   * 'abcdefgh'::text} into {@code abc} silently with {@code pg_typeof} still printing {@code text}.
+   * Every use of the six in this module is therefore written {@code pg_catalog.text} and the gate
+   * refuses the bare spelling in both positions. The length-modifier allowance is keyed on the
+   * token being a production, never on it naming a type.
    */
   private static final Set<String> GRAMMAR_TYPES =
       Set.of(
@@ -54,20 +70,14 @@ public final class SqlNameLexer {
           "bit",
           "time",
           "timestamp",
-          "timestamptz",
           "interval",
           "boolean",
           "bigint",
           "smallint",
           "integer",
           "int",
-          "int2",
-          "int4",
-          "int8",
           "real",
-          "double",
-          "text",
-          "bytea");
+          "double");
 
   /**
    * Keyword operators: names the grammar spells as words, which resolve along {@code search_path}
@@ -212,6 +222,12 @@ public final class SqlNameLexer {
   private final String sql;
   private final List<Refusal> refusals = new ArrayList<>();
 
+  /** Token indices this statement creates a name at rather than resolves one at (C-A-3). */
+  private Set<Integer> ddlObjectNames = Set.of();
+
+  /** Token indices that are the {@code ON <relation>} of a {@code CREATE INDEX} (C-A-3). */
+  private Set<Integer> indexTargets = Set.of();
+
   private SqlNameLexer(String sql) {
     this.sql = sql;
   }
@@ -264,6 +280,21 @@ public final class SqlNameLexer {
   /** The hole token: the one spelling a Java-side non-literal becomes. */
   static final String HOLE = "\u0001HOLE\u0001";
 
+  /**
+   * The second hole spelling: a non-literal {@link SqlSites} has established <b>carries its
+   * schema</b>, because the call that produced it cannot return a one-part name.
+   *
+   * <p>Why two spellings and not one (C-A-5). Revision 1 of the gate skipped a hole in relation
+   * position on the stated ground that a hole "carries a name the module holds as data and not a
+   * name the server resolves". For {@code VerifiedSchema.qualify} that is true by construction -
+   * {@code quote(name) + "." + quote(relation)} has no branch that drops the schema. For {@code
+   * TableRef.sql()} it is false: {@code TableRef.schema} is an {@link java.util.Optional} and an
+   * entity whose mapping names no schema renders {@code "t"}, which {@code search_path} resolves.
+   * One spelling could not tell those apart, so the leg skipped both and was dead against every
+   * relation this module emits.
+   */
+  static final String QUALIFIED_HOLE = "\u0001QHOLE\u0001";
+
   private List<Token> tokenise(String s) {
     var out = new ArrayList<Token>();
     int i = 0;
@@ -276,6 +307,11 @@ public final class SqlNameLexer {
       if (s.startsWith(HOLE, i)) {
         out.add(new Token(Kind.HOLE, HOLE, i));
         i += HOLE.length();
+        continue;
+      }
+      if (s.startsWith(QUALIFIED_HOLE, i)) {
+        out.add(new Token(Kind.HOLE, QUALIFIED_HOLE, i));
+        i += QUALIFIED_HOLE.length();
         continue;
       }
       if (c == '-' && i + 1 < s.length() && s.charAt(i + 1) == '-') {
@@ -402,7 +438,18 @@ public final class SqlNameLexer {
   // ------------------------------------------------------------------- rules
 
   private void apply(List<Token> t) {
+    // The DDL object-name positions of this statement, decided by the grammar's shape and not by
+    // proximity (C-A-3). Computed once, before any rule runs.
+    ddlObjectNames = ddlObjectNames(t);
+    indexTargets = indexTargets(t);
+
     boolean inSetClause = false;
+    // The parenthesis depth at which the current SET clause's assignments live, and whether the
+    // next `=` at that depth is one. An assignment is the first `=` after a SET-clause target at
+    // the clause's own depth; the `=` of `SET a = (b = c)` is an operator (C-A-4).
+    int depth = 0;
+    int setDepth = -1;
+    boolean awaitingAssignment = false;
     // Operator applications seen since the innermost `(`, per nesting level: two at the same level
     // with no parentheses between them re-associate once the operators are OPERATOR()-qualified,
     // which all take one generic precedence (M6, C-16d, E3a).
@@ -411,6 +458,7 @@ public final class SqlNameLexer {
 
     for (int i = 0; i < t.size(); i++) {
       Token tok = t.get(i);
+      checkRelationPosition(t, i);
       if (tok.isIdent("OPERATOR") && qualifiedOperatorRun(t, i)) {
         // The whole six-token run is ONE operator application, and it is an application at the
         // depth the run sits at, not inside its own parentheses. Consumed here so the run's `(`
@@ -422,31 +470,40 @@ public final class SqlNameLexer {
       switch (tok.kind()) {
         case PUNCT -> {
           if (tok.text().equals("(")) {
+            depth++;
             applications.add(0);
           } else if (tok.text().equals(")")) {
+            depth--;
             if (applications.size() > 1) {
               applications.remove(applications.size() - 1);
             }
           } else if (tok.text().equals(";") || tok.text().equals(",")) {
             if (tok.text().equals(";")) {
               inSetClause = false;
+              setDepth = -1;
+              awaitingAssignment = false;
+            } else if (inSetClause && depth == setDepth) {
+              awaitingAssignment = true;
             }
             applications.set(applications.size() - 1, 0);
           }
         }
         case IDENT -> {
-          String word = tok.text().toLowerCase(java.util.Locale.ROOT);
+          String word = tok.text().toLowerCase(Locale.ROOT);
           if (word.equals("set")) {
             inSetClause = true;
+            setDepth = depth;
+            awaitingAssignment = true;
           } else if (word.equals("where")
               || word.equals("from")
               || word.equals("returning")
               || word.equals("values")) {
             inSetClause = false;
+            setDepth = -1;
+            awaitingAssignment = false;
           }
           checkKeywordOperator(t, i);
           checkFunctionCall(t, i);
-          checkRelationPosition(t, i);
           checkCast(t, i);
         }
         case QUOTED_IDENT -> {
@@ -462,8 +519,10 @@ public final class SqlNameLexer {
         case OPERATOR -> {
           if (isStar(t, i)) {
             // `*` in `SELECT *` and `pg_catalog.count(*)` is the grammar's star, not an operator.
-          } else if (isAssignment(t, i, inSetClause)) {
-            // `SET <col> =` and `DO UPDATE SET <col> =`: an assignment position, not a name.
+          } else if (awaitingAssignment && depth == setDepth && isAssignment(t, i, inSetClause)) {
+            // `SET <col> =` and `DO UPDATE SET <col> =`: an assignment position, not a name. Only
+            // the first `=` after a target, and only at the clause's own depth (C-A-4).
+            awaitingAssignment = false;
           } else {
             refuse(
                 "unqualified operator",
@@ -539,6 +598,16 @@ public final class SqlNameLexer {
         || prev.isIdent("distinct");
   }
 
+  /**
+   * True when this {@code =} is a SET-clause assignment rather than an operator.
+   *
+   * <p>The caller has already established that the clause is open, that this token sits at the
+   * clause's own parenthesis depth and that no assignment has been seen since the clause started or
+   * since the last comma at that depth. All three are needed: revision 1 asked only "is an
+   * identifier to the left while a SET clause is open", which read the inner {@code =} of {@code
+   * SET a = (b = c)} as a second assignment target and let a resolvable operator through (C-A-4).
+   * Nothing in this module writes that shape; the gate exists for the edit that does.
+   */
   private boolean isAssignment(List<Token> t, int i, boolean inSetClause) {
     if (!t.get(i).text().equals("=") || !inSetClause || i == 0) {
       return false;
@@ -551,7 +620,7 @@ public final class SqlNameLexer {
 
   private void checkKeywordOperator(List<Token> t, int i) {
     Token tok = t.get(i);
-    String word = tok.text().toLowerCase(java.util.Locale.ROOT);
+    String word = tok.text().toLowerCase(Locale.ROOT);
     if (KEYWORD_OPERATORS.contains(word)) {
       refuse("keyword operator", tok.text(), context(tok.at()));
       return;
@@ -602,10 +671,15 @@ public final class SqlNameLexer {
     if (i + 1 >= t.size() || !t.get(i + 1).isPunct("(")) {
       return;
     }
-    String word = tok.text().toLowerCase(java.util.Locale.ROOT);
+    String word = tok.text().toLowerCase(Locale.ROOT);
     if (KEYWORDS.contains(word) || GRAMMAR_TYPES.contains(word)) {
-      // A grammar keyword, or a grammar type with a length modifier. Unquoted only: a quoted
-      // "numeric" is a QUOTED_IDENT token and never reaches this branch (C-5d).
+      // A grammar keyword, or a grammar production with a length modifier - `numeric(1)`,
+      // `varchar(255)`. Unquoted only: a quoted "numeric" is a QUOTED_IDENT token and never
+      // reaches this branch (C-5d). The allowance holds because a production in a call position is
+      // a syntax error rather than a lookup; it must never be keyed on the token naming a type.
+      // `text(x)`, `int8(x)`, `bytea(x)`, `timestamptz(x)`, `int2(x)` and `int4(x)` are plain
+      // function calls resolved along search_path - the function-syntax cast - and are refused
+      // since those six left GRAMMAR_TYPES (C-A-2).
       return;
     }
     if (isQualified(t, i)) {
@@ -618,34 +692,113 @@ public final class SqlNameLexer {
       }
       return;
     }
-    if (isDdlObjectName(t, i) || isTriggerFunctionName(t, i)) {
+    if (isDdlObjectName(t, i) || isTriggerFunctionName(t, i) || isIndexTarget(t, i)) {
       return;
     }
     refuse("unqualified function or aggregate", tok.text() + "(", context(tok.at()));
   }
 
   /**
-   * {@code CREATE TABLE x (}, {@code CREATE FUNCTION x (}: created in current_schema, not resolved.
+   * {@code CREATE TABLE x (}, {@code CREATE FUNCTION x (}: created in {@code current_schema()}, not
+   * resolved along the path.
    */
   private boolean isDdlObjectName(List<Token> t, int i) {
-    for (int j = i - 1; j >= 0 && j >= i - 6; j--) {
-      Token p = t.get(j);
-      if (p.isIdent("table")
-          || p.isIdent("function")
-          || p.isIdent("index")
-          || p.isIdent("sequence")
-          || p.isIdent("trigger")
-          || p.isIdent("domain")
-          || p.isIdent("operator")) {
-        for (int k = j; k >= 0 && k >= j - 4; k--) {
-          if (t.get(k).isIdent("create") || t.get(k).isIdent("alter") || t.get(k).isIdent("drop")) {
-            return true;
-          }
-        }
-        return false;
+    return ddlObjectNames.contains(i);
+  }
+
+  /**
+   * The object-name position of every {@code CREATE} / {@code ALTER} / {@code DROP} in a statement,
+   * decided by the grammar's shape: after the verb, the grammar allows only its own keywords -
+   * {@code OR REPLACE}, {@code UNIQUE}, the object type, {@code IF NOT EXISTS}, {@code
+   * CONCURRENTLY} - until the name, so the <b>first non-keyword identifier after the verb</b> is
+   * the name and nothing further along is.
+   *
+   * <p>Why not a lookback (C-A-3). Revision 1 scanned back up to six tokens for an object-type
+   * keyword and four more for the verb, so {@code CREATE INDEX i ON t (lower(c))} put {@code lower}
+   * four tokens from {@code index} and the whole index expression was read as the object being
+   * created: zero refusals for a statement whose {@code lower} resolves along the applying
+   * session's path. The bundled script escaped only because {@code IF NOT EXISTS} pushes {@code
+   * index} out of the window - an accident of token count, not a rule.
+   */
+  private Set<Integer> ddlObjectNames(List<Token> t) {
+    var out = new HashSet<Integer>();
+    for (int i = 0; i < t.size(); i++) {
+      if (!(t.get(i).isIdent("create") || t.get(i).isIdent("alter") || t.get(i).isIdent("drop"))) {
+        continue;
+      }
+      int j = i + 1;
+      while (j < t.size()
+          && t.get(j).kind() == Kind.IDENT
+          && KEYWORDS.contains(t.get(j).text().toLowerCase(Locale.ROOT))) {
+        j++;
+      }
+      if (j >= t.size()) {
+        continue;
+      }
+      Kind kind = t.get(j).kind();
+      if (kind != Kind.IDENT && kind != Kind.QUOTED_IDENT) {
+        continue;
+      }
+      out.add(j);
+      // `CREATE TABLE "s"."t" (`: the schema is named, not resolved, and the second part is the
+      // object. Neither depends on search_path.
+      if (j + 2 < t.size() && t.get(j + 1).isPunct(".")) {
+        out.add(j + 2);
       }
     }
-    return false;
+    return Set.copyOf(out);
+  }
+
+  /**
+   * The relation a {@code CREATE INDEX} attaches to: {@code CREATE INDEX IF NOT EXISTS i ON t
+   * (cols)}, where {@code t} is followed by {@code (} and would otherwise read as a function call.
+   *
+   * <p>This is the same class as {@link #isTriggerFunctionName} and is stated with the same reason
+   * (design section 5.2). The script cannot qualify it: an unqualified {@code CREATE TABLE} targets
+   * {@code current_schema()}, so the script has no schema name to write at parse time, and the
+   * {@code ON} relation is then resolved in the <b>applying</b> session's path. What covers it is
+   * not qualification but verification: {@code SchemaVerification} reads the indexes of the
+   * verified schema's own relations, so an index that landed on a same-named relation earlier on
+   * the applying session's path leaves the verified schema's table without it and boot refuses.
+   *
+   * <p>Revision 1 of the gate allowed this token by accident rather than by rule: the six-token
+   * lookback found {@code INDEX} at exactly distance six through {@code IF NOT EXISTS}, so the
+   * relation was read as the object being created. With the lookback replaced (C-A-3) the rule has
+   * to be written down, which is what this is.
+   */
+  private boolean isIndexTarget(List<Token> t, int i) {
+    return indexTargets.contains(i);
+  }
+
+  private Set<Integer> indexTargets(List<Token> t) {
+    var out = new HashSet<Integer>();
+    for (int i = 0; i < t.size(); i++) {
+      if (!t.get(i).isIdent("create")) {
+        continue;
+      }
+      boolean index = false;
+      int j = i + 1;
+      while (j < t.size()
+          && t.get(j).kind() == Kind.IDENT
+          && KEYWORDS.contains(t.get(j).text().toLowerCase(Locale.ROOT))) {
+        index |= t.get(j).isIdent("index");
+        j++;
+      }
+      if (!index) {
+        continue;
+      }
+      while (j < t.size() && !t.get(j).isPunct(";") && !t.get(j).isIdent("on")) {
+        j++;
+      }
+      if (j + 1 >= t.size() || !t.get(j).isIdent("on")) {
+        continue;
+      }
+      out.add(j + 1);
+      if (j + 3 < t.size() && t.get(j + 2).isPunct(".")) {
+        out.add(j + 3);
+      }
+    }
+    return Set.copyOf(out);
   }
 
   /**
@@ -668,6 +821,23 @@ public final class SqlNameLexer {
     return i >= 2 && t.get(i - 1).isPunct(".") && t.get(i - 2).kind() == Kind.IDENT;
   }
 
+  /**
+   * The relation leg: {@code FROM}, {@code JOIN}, {@code INSERT INTO}, {@code UPDATE}, {@code LOCK
+   * TABLE}.
+   *
+   * <p><b>Every token kind, not only an unquoted identifier (C-A-5).</b> Revision 1 returned early
+   * unless the token was an unquoted {@code IDENT}, which made the leg dead against everything this
+   * module emits: {@code TableRef.sql()} and {@code VerifiedSchema.qualify} both quote, so a
+   * relation reaches the lexer as a {@code QUOTED_IDENT} or, through a Java-side call, as a hole.
+   * The leg reported the three statements of design section 3.4 clean while {@code SELECT
+   * email_cipher FROM "customer"} was measured reading {@code decoy.customer} on a role's own
+   * hostile path. Quoting changes the case folding of a name; it does not stop the server resolving
+   * it.
+   *
+   * <p>A hole is accepted only in its {@link #QUALIFIED_HOLE} spelling, which {@link SqlSites}
+   * emits for a call that cannot return a one-part name. A plain hole in relation position is a
+   * refusal: the gate has no evidence about what it carries.
+   */
   private void checkRelationPosition(List<Token> t, int i) {
     Token tok = t.get(i);
     if (i == 0) {
@@ -683,13 +853,20 @@ public final class SqlNameLexer {
     if (!relationPosition) {
       return;
     }
-    if (tok.kind() != Kind.IDENT) {
+    if (tok.kind() == Kind.HOLE) {
+      if (tok.text().equals(QUALIFIED_HOLE)) {
+        return;
+      }
+      refuse("unqualified relation", "<>", context(tok.at()));
+      return;
+    }
+    if (tok.kind() != Kind.IDENT && tok.kind() != Kind.QUOTED_IDENT) {
       return;
     }
     if (i + 1 < t.size() && t.get(i + 1).isPunct(".")) {
       return; // schema-qualified
     }
-    if (KEYWORDS.contains(tok.text().toLowerCase(java.util.Locale.ROOT))) {
+    if (tok.kind() == Kind.IDENT && KEYWORDS.contains(tok.text().toLowerCase(Locale.ROOT))) {
       return;
     }
     refuse("unqualified relation", tok.text(), context(tok.at()));
@@ -735,8 +912,7 @@ public final class SqlNameLexer {
         && tok.text().equals("pg_catalog")) {
       return;
     }
-    if (tok.kind() == Kind.IDENT
-        && GRAMMAR_TYPES.contains(tok.text().toLowerCase(java.util.Locale.ROOT))) {
+    if (tok.kind() == Kind.IDENT && GRAMMAR_TYPES.contains(tok.text().toLowerCase(Locale.ROOT))) {
       return; // an unquoted grammar type keyword
     }
     refuse(
@@ -756,6 +932,9 @@ public final class SqlNameLexer {
   private String context(int at) {
     int from = Math.max(0, at - 30);
     int to = Math.min(sql.length(), at + 30);
-    return sql.substring(from, to).replace('\n', ' ').replace(HOLE, "<>");
+    return sql.substring(from, to)
+        .replace('\n', ' ')
+        .replace(HOLE, "<>")
+        .replace(QUALIFIED_HOLE, "<s.>");
   }
 }

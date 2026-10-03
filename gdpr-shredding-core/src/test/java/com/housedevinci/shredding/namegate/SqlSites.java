@@ -16,10 +16,17 @@ import java.util.Set;
  *
  * <p>A chain of string literals is SQL if and only if it <b>reaches a statement call</b> - {@code
  * prepareStatement}, {@code execute}, {@code executeQuery}, {@code executeUpdate}, {@code addBatch}
- * - either directly as the argument, or through a local {@code String}, or through a {@code
- * StringBuilder} whose appends are literal chains. Non-literal parts of a chain become one hole
- * token, because what they carry is a name the module holds as data (a {@code VerifiedSchema}
- * qualification, a {@code TableRef}) and not a name the server resolves.
+ * - either directly as the argument, or through a local {@code String}, a field the constructor
+ * composes, or a {@code StringBuilder} whose appends are literal chains.
+ *
+ * <p><b>Non-literal parts of a chain become a hole token, and a hole is not a clean bill (finding
+ * C-A-5).</b> Revision 1 said a hole carries "a name the module holds as data and not a name the
+ * server resolves", and used that to skip it everywhere. Half of it was false: {@code
+ * VerifiedSchema.qualify} cannot return a one-part name, but {@code TableRef.sql()} renders {@code
+ * "t"} for any mapping that names no schema, and {@code search_path} resolves that. The two are now
+ * different tokens - {@link SqlNameLexer#QUALIFIED_HOLE} for the calls listed in {@code
+ * QUALIFYING_CALLS}, {@link SqlNameLexer#HOLE} for everything else - and the lexer refuses a plain
+ * hole in relation position.
  *
  * <p>The naive alternative - "a literal containing a SQL keyword" - was measured and rejected: on
  * this head it selects 31 chains that never reach a statement, 27 of them prose error messages
@@ -55,6 +62,26 @@ public final class SqlSites {
    * of the two unresolved sites).
    */
   public static final Set<String> FILE_READ_CALLS = Set.of("schemaScript()");
+
+  /**
+   * The calls whose result <b>cannot be a one-part name</b>, so a hole they produce carries its
+   * schema (C-A-5).
+   *
+   * <p>One entry, and it is a construction rule rather than a convention. {@link
+   * com.housedevinci.shredding.adapter.jdbc.VerifiedSchema#qualify} is {@code quote(name) + "." +
+   * quote(relation)} with no branch: there is no input for which it returns one part, and the
+   * schema it names is the one {@code current_schema()} answered on the connection verification ran
+   * on. An operand ending in this call resolves to {@link SqlNameLexer#QUALIFIED_HOLE}, which is
+   * the only hole the lexer accepts in relation position.
+   *
+   * <p>{@code TableRef.sql()} is deliberately <b>not</b> here. {@code TableRef.schema} is an {@code
+   * Optional} and the method renders {@code "t"} when the mapping names no schema, so a hole it
+   * produces is exactly the case the gate must refuse; design section 3.2's startup refusal, which
+   * makes a schema-less {@code @Shredded} mapping impossible, is PR B1's and not this PR's. Until
+   * it lands the six user-table relation sites are carried as named open refusals in the gate's
+   * test, each with that mechanism named.
+   */
+  private static final Set<String> QUALIFYING_CALLS = Set.of("qualify");
 
   private SqlSites() {}
 
@@ -123,6 +150,21 @@ public final class SqlSites {
         int end = terminator(toks, i + 3);
         List<Tok> expr = toks.subList(i + 3, end);
         out.put(name, resolveInitialiser(expr, out));
+      }
+      // this.<name> = <expr> ;   a field the constructor composes, which is how the adapters hold
+      // their qualified table expressions (`this.dataKeyTable = schema.qualify(...)`). Without this
+      // the field reads as a bare hole at every statement that interpolates it, and the relation
+      // leg has nothing to decide on.
+      if (t.kind == K.IDENT
+          && t.text.equals("this")
+          && i + 4 < toks.size()
+          && toks.get(i + 1).is(".")
+          && toks.get(i + 2).kind == K.IDENT
+          && toks.get(i + 3).is("=")
+          && !toks.get(i + 4).is("=")) {
+        String name = toks.get(i + 2).text;
+        int end = terminator(toks, i + 4);
+        out.put(name, resolveInitialiser(toks.subList(i + 4, end), out));
       }
       // <name>.append(<expr>) and <name>.append(<expr>).append(<expr>) ...
       if (t.kind == K.IDENT && out.containsKey(t.text) && i + 1 < toks.size()) {
@@ -231,6 +273,9 @@ public final class SqlSites {
         return bound;
       }
     }
+    if (QUALIFYING_CALLS.contains(lastCall(trimmed))) {
+      return List.of(SqlNameLexer.QUALIFIED_HOLE);
+    }
     if (trimmed.stream().anyMatch(t -> t.kind == K.STRING)) {
       // A chain inside a shape this resolver does not model (a call argument, a stream lambda).
       // Flattened token by token rather than recursed on, so every literal in it is still lexed
@@ -250,6 +295,30 @@ public final class SqlSites {
       return List.of(flat.toString());
     }
     return List.of(SqlNameLexer.HOLE);
+  }
+
+  /**
+   * The name of the last method invoked in an operand, or {@code ""} when it invokes none. {@code
+   * schema.qualify(SchemaExpectations.DATA_KEY)} answers {@code qualify}; {@code
+   * first.tableName().sql()} answers {@code sql}.
+   */
+  private static String lastCall(List<Tok> operand) {
+    String last = "";
+    int depth = 0;
+    for (int i = 0; i < operand.size(); i++) {
+      Tok t = operand.get(i);
+      if (t.is("(")) {
+        depth++;
+      } else if (t.is(")")) {
+        depth--;
+      } else if (depth == 0
+          && t.kind == K.IDENT
+          && i + 1 < operand.size()
+          && operand.get(i + 1).is("(")) {
+        last = t.text;
+      }
+    }
+    return last;
   }
 
   private static List<String> orHole(List<String> resolved) {

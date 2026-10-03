@@ -114,28 +114,59 @@ class NameQualificationGateTest {
   }
 
   /**
-   * The one name in this module that qualification cannot reach, named here with the mechanism that
-   * closes it rather than allowlisted by file or by line.
+   * The names in this module that qualification cannot reach <b>in this PR</b>, each named with the
+   * mechanism that closes it rather than allowlisted by file, line or extension.
    *
-   * <p>{@code IS DISTINCT FROM} is the type's own {@code =} reached through a grammar keyword, and
-   * it has no {@code OPERATOR(pg_catalog....)} spelling at all. The site is the cross-tenant WARN
-   * read-back in {@code JdbcErasureStore.verifyCleared}, where the tenant column is nullable and
-   * {@code <>} is therefore not equivalent. Revision 1 of the design claimed the {@code
-   * search_path} pin covered it; T3c measured that on the arrived path it answers 2 where the truth
-   * is 1. Revision 2 moves the statement <b>inside</b> the replaced-path bracket of section 4,
-   * where it is correct (T2e) - and that bracket is PR B1, not this PR.
+   * <p>All nine are the same name: the user table a blind-index statement addresses, rendered by
+   * {@code TableRef.sql()}. {@code TableRef.schema} is an {@code Optional}, and a {@code @Shredded}
+   * entity whose mapping names no schema - no {@code @Table(schema)}, no {@code
+   * hibernate.default_schema} - renders {@code "customer"}, which the server resolves along the
+   * writing session's {@code search_path}. The review measured it: as the runtime role, with {@code
+   * search_path = decoy, app, pg_catalog} and a {@code decoy.customer} it owns, {@code SELECT
+   * email_cipher FROM "customer"} read the decoy.
    *
-   * <p>It stays a WARN and never a refusal, and the refusing legs on the same column are qualified,
-   * so what is at risk here is the accuracy of a log line rather than the erasure's verdict.
+   * <p><b>The mechanism that closes them is design section 3.2, and it is PR B1's.</b> Section 3.2
+   * refuses a schema-less {@code @Shredded} mapping at startup with {@code SHRED-CONFIG}; once it
+   * lands, {@code TableRef.sql()} cannot render one part for a shredded entity, {@code
+   * TableRef.sql} joins {@code SqlSites.QUALIFYING_CALLS}, and these nine entries are deleted by
+   * that PR. Section 3.2 exists in the design to make the candidate set of section 4's bracket
+   * sound, which is why revision 2.3 puts it in PR B1 beside the bracket and not here. Nine
+   * refusals carried with their mechanism named are the accurate state of a control whose other
+   * half is in the next PR; reporting them clean, which is what the dead leg did, is not.
    *
-   * <p>The expectation is the exact refusal, not a file or a line: a second keyword operator
-   * anywhere, or this one moving to another statement, fails the gate, and PR B1 removes this entry
-   * when the bracket lands.
+   * <p>What the exposure is bounded by, stated so nobody reads this as unguarded: it is named in
+   * SECURITY-NOTES and in the design's section 3.2, no document claims these tables are qualified,
+   * and the independent read-back of {@code JdbcErasureStore.verifyCleared} goes through
+   * Hibernate's own rendering, so an erasure whose statements addressed a shadow and cleared
+   * nothing is refused rather than recorded - the two legs would have to be shadowed consistently
+   * to agree.
+   *
+   * <p>The expectations are exact refusals, not files or lines: a tenth relation anywhere, or a
+   * keyword operator, or any other rule class, fails the gate. {@code IS DISTINCT FROM} is no
+   * longer among them - the cross-tenant WARN read-back is now written {@code (<tenant> IS NULL OR
+   * NOT (<tenant> OPERATOR(pg_catalog.=) ?))}, which is equivalent for the non-null bound value and
+   * resolves no name (finding C-A-6).
    */
   private static final List<String> OPEN_REFUSALS =
       List.of(
-          "JdbcErasureStore.java:404 keyword operator: `IS DISTINCT FROM` in"
-              + " ...g_catalog.=) ?) AND <> IS DISTINCT FROM ? AND <> IS ...");
+          "JdbcErasureStore.java:288 unqualified relation: `<>` in ...UPDATE <> SET <> = NULL"
+              + " WHERE...",
+          "JdbcErasureStore.java:373 unqualified relation: `<>` in ...LECT pg_catalog.count(*)"
+              + " FROM <> WHERE (<> OPERATOR(...",
+          "JdbcErasureStore.java:413 unqualified relation: `<>` in ...LECT pg_catalog.count(*)"
+              + " FROM <> WHERE (<> OPERATOR(...",
+          "WriteVerification.java:259 unqualified relation: `<>` in ...SELECT <>, <> FROM <> WHERE"
+              + " (<> OPERATOR(...",
+          "WriteVerification.java:259 unqualified relation: `<>` in ...SELECT <>, <> FROM <> WHERE"
+              + " ( OR <> OPERA...",
+          "ShreddingEventListener.java:650 unqualified relation: `<>` in ...SELECT <> FROM <>"
+              + " WHERE <> OPERATOR(p...",
+          "ShreddingEventListener.java:650 unqualified relation: `<>` in ...SELECT , <> FROM <>"
+              + " WHERE <> OPERATOR(p...",
+          "ShreddingEventListener.java:873 unqualified relation: `<>` in ...SELECT <> FROM <>"
+              + " WHERE <> OPERATOR(p...",
+          "ShreddingEventListener.java:873 unqualified relation: `<>` in ...SELECT , <> FROM <>"
+              + " WHERE <> OPERATOR(p...");
 
   @Test
   void the_bundled_script_resolves_no_name() {
@@ -302,8 +333,79 @@ class NameQualificationGateTest {
         .contains("unqualified relation");
     assertThat(rules("SELECT 1 FROM pg_catalog.pg_class")).isEmpty();
     assertThat(rules("SELECT 1 FROM " + hole()))
-        .describedAs("a hole is a name held as data")
+        .describedAs(
+            "a hole is NOT evidence that a relation is qualified (C-A-5): the leg used to skip it,"
+                + " and TableRef.sql() renders one part whenever the mapping names no schema")
+        .containsExactly("unqualified relation");
+    assertThat(rules("SELECT 1 FROM " + qualifiedHole()))
+        .describedAs(
+            "the one hole the leg accepts: a call that cannot return a one-part name"
+                + " (VerifiedSchema.qualify, which is quote(schema) + \".\" + quote(relation)"
+                + " with no branch)")
         .isEmpty();
+    assertThat(rules("SELECT 1 FROM \"t\""))
+        .describedAs("quoting changes case folding, not resolution")
+        .containsExactly("unqualified relation");
+    assertThat(rules("UPDATE \"t\" SET c = ?")).contains("unqualified relation");
+    assertThat(rules("SELECT 1 FROM \"s\".\"t\"")).isEmpty();
+  }
+
+  @Test
+  void a_ddl_object_name_is_decided_by_the_grammar_and_not_by_proximity() {
+    // C-A-3: the object being created is the first non-keyword identifier after the verb, and
+    // nothing further along is. The lookback it replaces read every call inside an index
+    // expression as the object being created.
+    assertThat(rules("CREATE INDEX i ON t (lower(c))"))
+        .describedAs("lower( resolves along the applying session's path")
+        .contains("unqualified function or aggregate");
+    assertThat(rules("CREATE INDEX IF NOT EXISTS i ON t (pg_catalog.lower(c))"))
+        .describedAs(
+            "the ON relation of a CREATE INDEX is the section 5.2 class: resolved in the applying"
+                + " session, covered by the index leg of schema verification, not by qualification")
+        .isEmpty();
+    assertThat(rules("CREATE TABLE IF NOT EXISTS t (a pg_catalog.text DEFAULT lower(?))"))
+        .describedAs("a call in a column default is not the object being created either")
+        .contains("unqualified function or aggregate");
+    assertThat(
+            rules(
+                "CREATE OR REPLACE FUNCTION f() RETURNS pg_catalog.text AS $$ BEGIN"
+                    + " RETURN pg_catalog.lower('a'); END $$ LANGUAGE plpgsql"))
+        .isEmpty();
+  }
+
+  @Test
+  void only_the_top_level_equals_of_a_set_clause_is_an_assignment() {
+    // C-A-4: the inner `=` of SET a = (b = c) is a resolvable operator. Nothing in this module
+    // writes that shape; the gate exists for the edit that does.
+    assertThat(rules("UPDATE \"s\".\"t\" SET a = (b = c)")).contains("unqualified operator");
+    assertThat(rules("UPDATE \"s\".\"t\" SET a = ?, b = ?")).isEmpty();
+    assertThat(rules("UPDATE \"s\".\"t\" SET a = (b OPERATOR(pg_catalog.=) c)")).isEmpty();
+    assertThat(
+            rules(
+                "UPDATE \"s\".\"t\" SET a = (a OPERATOR(pg_catalog.+) ?) WHERE"
+                    + " (b OPERATOR(pg_catalog.=) ?)"))
+        .describedAs("the shape the key adapter writes")
+        .isEmpty();
+  }
+
+  @Test
+  void a_shadowable_type_name_is_refused_in_both_positions() {
+    // C-A-1 / C-A-2: the grammar has no TEXT, BYTEA, TIMESTAMPTZ, INT2, INT4 or INT8 production,
+    // so all six are ordinary names resolved along search_path in a type position and in a call
+    // position alike. varchar(255) stays allowed: it is a production, and a syntax error in
+    // expression position.
+    for (String type : List.of("text", "bytea", "timestamptz", "int2", "int4", "int8")) {
+      assertThat(rules("SELECT ?::" + type)).describedAs("::" + type).contains("unqualified type");
+      assertThat(rules("SELECT CAST(? AS " + type + ")"))
+          .describedAs("CAST AS " + type)
+          .contains("unqualified type");
+      assertThat(rules("SELECT " + type + "(?)"))
+          .describedAs(type + "(")
+          .contains("unqualified function or aggregate");
+      assertThat(rules("SELECT ?::pg_catalog." + type)).describedAs("qualified " + type).isEmpty();
+    }
+    assertThat(rules("SELECT numeric(1)")).isEmpty();
+    assertThat(rules("SELECT ?::varchar")).isEmpty();
   }
 
   @Test
@@ -378,5 +480,9 @@ class NameQualificationGateTest {
 
   private static String hole() {
     return "\u0001HOLE\u0001";
+  }
+
+  private static String qualifiedHole() {
+    return "\u0001QHOLE\u0001";
   }
 }
