@@ -216,8 +216,9 @@ There is no fail-open property anywhere in this module.
 | `SHRED-SCHEMA-005` | verification could not complete - a refused catalogue read, a lost connection, an unreadable bundled resource, or a migration in flight. Never a pass and never a warning |
 | `SHRED-SCHEMA-006` | `shredding.jdbc.initialize-schema=true` and the DDL failed. Carries the SQLState only |
 | `SHRED-SCHEMA-007` | a privilege the adapters need is missing. Never downgraded by `allow-privileged-runtime-role` |
+| `SHRED-SCHEMA-008` | the module could not isolate the name resolution of its independent read-back: the connection was in auto-commit, or something moved `search_path` inside the erasure's transaction. The one `SHRED-SCHEMA-*` code that is never a startup condition and never means "re-apply the script"; treat it as an outage of that operation. The erasure's whole transaction rolls back |
 
-The `SHRED-SCHEMA-*` codes are startup refusals: the application context fails to build, so nothing
+Every `SHRED-SCHEMA-*` code except `-008` is a startup refusal: the application context fails to build, so nothing
 serves traffic against a schema this module cannot vouch for. Each message lists every problem it
 found, names the schema, the role and the property that changes the outcome, and points at
 [upgrading-0.2.0.md](upgrading-0.2.0.md).
@@ -331,11 +332,23 @@ already null, so it is normally smaller than the subject's row count.
 
 Every statement this module builds for one of your tables is addressed at the table Hibernate maps,
 schema and all, taken from the persister at startup. `@Table(schema = "app2")` and
-`spring.jpa.properties.hibernate.default_schema` both work. A catalog-qualified table, and a table
-or schema whose name is not lowercase, are refused at startup rather than addressed by a guess. With
-no schema in the mapping the statements are unqualified, exactly like Hibernate's own, and the
-connection's `search_path` decides. This module's own `shredding_*` tables are unqualified: keep
-them on the runtime role's `search_path`.
+`spring.jpa.properties.hibernate.default_schema` both work, and **one of them is required**: a
+`@Shredded` entity whose mapping names no schema is refused at startup with `SHRED-CONFIG-001`.
+Without a schema, the erasure's `UPDATE`, the module's own read-back and the read-back Hibernate
+renders are all unqualified; a table of the same name in a schema ahead of yours on the connection's
+`search_path` takes all three at once, they agree with each other, and the erasure reports
+`COMPLETE` over data it never touched. A catalog-qualified table, and a table or schema whose name
+is not lowercase, are refused at startup rather than addressed by a guess.
+
+One statement of an erasure is rendered by Hibernate from your mapping, so there is no name in it
+for this module to qualify. It runs with the connection's `search_path` replaced by `pg_catalog,
+pg_temp` for the width of that one statement, and restored to the exact bytes it arrived with. If a
+row-level-security policy function, or a function called from a view one of your entities is mapped
+to, names a relation unqualified, it will fail inside that one statement rather than resolve
+something unexpected: give it `ALTER FUNCTION <fn> SET search_path = <schema>, pg_catalog`. See
+SECURITY-NOTES.md.
+
+This module's own `shredding_*` tables are qualified to the schema verified at boot.
 
 ## The cross-node cache window
 

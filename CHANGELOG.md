@@ -62,8 +62,8 @@ All notable changes to this project. The format follows
   relation and `regclass` cast carries a `pg_catalog.` prefix regardless. The bundled script's
   `to_regclass`, `quote_ident`, `current_schema`, `pg_advisory_xact_lock`, `pg_attribute` and
   `pg_trigger`, and the erasure store's `count(*)`, `now()` and `pg_advisory_xact_lock(...)`, are
-  qualified for the same reason. The Hibernate-rendered independent read-back remains `count(*)` as
-  HQL renders it; it is named in SECURITY-NOTES rather than left implied.
+  qualified for the same reason. The Hibernate-rendered independent read-back has no name this
+  module can qualify at all and is covered by the one-statement window below.
 - **The three append-only guard functions no longer resolve a name in the session of the role they
   constrain.** A guard function is not `SECURITY DEFINER`, so until this release its body resolved
   its operator names along the `search_path` of whoever wrote to the table. Reproduced: a role
@@ -107,6 +107,57 @@ All notable changes to this project. The format follows
   qualification and **no** session mechanism on purpose: a transaction-local `set_config` there
   would re-point every later statement of the application's transaction, including statements of
   entities this module knows nothing about.
+- **BREAKING. A `@Shredded` entity's table must name a schema in its mapping.** Startup refuses with
+  `SHRED-CONFIG-001`, naming the entity, unless the mapping carries one -
+  `spring.jpa.properties.hibernate.default_schema`, or `@Table(schema = ...)` per entity. Until now
+  a mapping with no schema was the documented intended property ("this module addresses the table
+  Hibernate addresses"), and what it cost was measured: the erasure's blind-index `UPDATE`, this
+  module's own same-text read-back and the read-back Hibernate renders are then all unqualified, a
+  table of the same name in a schema ahead of the real one on the role's own path takes all three at
+  once, they agree with each other, and the erasure reports `COMPLETE` over untouched residue. It is
+  also the only shape in which the one-statement window below can exist, because that window leaves
+  no role-writable schema on the path for an unqualified relation to resolve from. Both spellings and
+  the exact message are in [docs/upgrading-0.2.0.md](docs/upgrading-0.2.0.md).
+- **The one statement of an erasure this module did not write now runs with `search_path` replaced
+  for its own width.** The independent blind-index read-back is rendered by Hibernate from the entity
+  mapping - that independence is what catches a mis-addressed column, since it shares no identifier
+  with the statements the erasure built - so there is no name in it for this module to qualify, and
+  HQL has no spelling for `pg_catalog.count(*)` or `OPERATOR(pg_catalog.=)`. Prefixing `pg_catalog`
+  to the path does not help: an `=(varchar, varchar)` is an exact-type match that wins at step 2 of
+  operator resolution whatever the order, and a relation name cannot be moved by a prefix at all.
+  The path is therefore **replaced** with `pg_catalog, pg_temp` around exactly one statement and
+  restored to the bytes it arrived with. Measured with the shadow installed and a residue the
+  erasure cannot clear: outside the window the framework-rendered leg answers 0 and only the
+  module's own qualified leg refuses; inside it, the leg that is independent of the erasure's own
+  identifiers is the one that refuses, which is the control S-22 exists for. The same window, its
+  own instance of it, covers the cross-tenant WARN count's `IS DISTINCT FROM`, which is the type's
+  own `=` behind a grammar keyword and has no qualified spelling either.
+
+  Six statements, not two: capture, pin, read the pin back, the statement, restore, read the restore
+  back. A pin that is not read back is a fiction - in auto-commit `set_config(..., true)` returns
+  the pinned value while the next statement sees the old path - so a connection in auto-commit is
+  refused outright. The restore **binds** the captured bytes: a role may set its own `search_path`
+  to a value containing a quote and a statement terminator, and a restore composed into statement
+  text then leaves the control off and sends attacker-supplied text as a second statement. The
+  restore runs in a `finally` and never replaces the exception that caused it: a statement that
+  fails inside the window propagates its own failure with the refused restore (`25P02`, the
+  transaction is already aborted) attached as suppressed. The restore is sent non-locally, because a
+  transaction-local one is shadowed by a non-local `SET` issued inside the window and `COMMIT` would
+  then leave the session carrying that `SET`.
+
+  The window is **one statement wide** and that is a property of the design, not a style: the
+  erasure's own `UPDATE` runs outside it, on the arrived path, with every name qualified, so an
+  application trigger whose body names a relation unqualified still fires and still succeeds. The
+  name gate refuses a second statement of this module's own inside either window. What a `SELECT`
+  can still run in there - a row-level-security policy function, a function called from a mapped
+  view - resolves its unqualified names inside the window and fails loudly; the remedy, `ALTER
+  FUNCTION ... SET search_path`, is in SECURITY-NOTES and in the upgrade note.
+- New error code `SHRED-SCHEMA-008`: the module could not isolate the name resolution of its
+  independent read-back. The one `SHRED-SCHEMA-*` code that is never a startup condition and never
+  means "re-apply the script" - it means the connection was in auto-commit, or something moved
+  `search_path` inside the erasure's transaction. The whole erasure transaction rolls back, so there
+  is no partial state: no key destroyed, no index half-cleared, no record appended. Treat it as an
+  outage of that one operation.
 - **The verified schema's identity is captured on the pinned side of the transaction.** Verification
   read the schema name and its namespace oid in one statement whose `n.nspname =
   pg_catalog.current_schema()` comparison ran before the `search_path` pin. A role owning a schema
@@ -122,7 +173,12 @@ All notable changes to this project. The format follows
   resolve: an operator outside the exact six-token `OPERATOR(pg_catalog....)` sequence, a keyword
   operator, an unqualified function or type, an unqualified relation, a character its lexer does not
   classify, and two operator tokens at one nesting depth with no parentheses between them. A
-  statement whose text the gate cannot resolve fails the gate rather than being skipped.
+  statement whose text the gate cannot resolve fails the gate rather than being skipped. Its one
+  exception follows the mechanism rather than a file or a line: a keyword operator is admitted for a
+  statement call that sits inside the one-statement window, which is the only place a name with no
+  qualified spelling can be reached at all, and inside the window every other class - a symbolic
+  operator, a function, a type, a relation, `COLLATE` - keeps its refusal. The gate also checks the
+  window's own invariant: at most one statement of this module's own per window.
 - `schema-postgresql.sql` sets all seven guard triggers to `ENABLE ALWAYS`, unconditionally and
   idempotently, every time it runs. `CREATE TRIGGER` leaves a trigger at `O`, which does not fire
   for a replication apply worker, for a superuser session in `session_replication_role = replica`,
