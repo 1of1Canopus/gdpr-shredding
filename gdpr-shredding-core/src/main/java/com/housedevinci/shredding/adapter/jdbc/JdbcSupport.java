@@ -2,6 +2,7 @@ package com.housedevinci.shredding.adapter.jdbc;
 
 import com.housedevinci.shredding.domain.ErrorCodes;
 import com.housedevinci.shredding.domain.KeyUnavailableException;
+import com.housedevinci.shredding.domain.ShreddingException;
 import com.housedevinci.shredding.domain.SubjectId;
 import com.housedevinci.shredding.domain.TenantId;
 import java.io.IOException;
@@ -86,7 +87,7 @@ public final class JdbcSupport {
   public static void lockSubject(Connection c, TenantId tenant, SubjectId subject)
       throws SQLException {
     try (PreparedStatement ps =
-        c.prepareStatement("SELECT pg_advisory_xact_lock(?, hashtext(?))")) {
+        c.prepareStatement("SELECT pg_catalog.pg_advisory_xact_lock(?, pg_catalog.hashtext(?))")) {
       ps.setInt(1, SUBJECT_LOCK_CLASS);
       // L11: length-prefixed, the same canonical form as Pseudonymiser.append and ErasureChain,
       // rather than a "|"-joined string - "a|b" + "c" and "a" + "b|c" hash the same joined string
@@ -116,42 +117,146 @@ public final class JdbcSupport {
     return t == null ? null : t.toInstant();
   }
 
-  /** Runs the bundled PostgreSQL schema; idempotent. */
+  static final String SCHEMA_RESOURCE = "/com/housedevinci/shredding/schema-postgresql.sql";
+
+  /**
+   * Runs the bundled PostgreSQL schema; idempotent.
+   *
+   * <p><b>Owner role only, and never from application boot.</b> This is DDL: the role that runs it
+   * ends up owning the four tables, the sequence, the two indexes and the three guard functions,
+   * and an owner can {@code ALTER TABLE ... DISABLE TRIGGER} or {@code CREATE OR REPLACE} a guard
+   * into a no-op. Run it from a migration step, a Flyway callback or a one-off job that holds its
+   * own credential, then point the application at a role that holds only the grants in
+   * SECURITY-NOTES.md "Database roles". The starter calls this exactly once, from {@code
+   * ShreddingSchemaGate}, and only when {@code shredding.jdbc.initialize-schema=true}, which warns
+   * at every startup that the controls are advisory in that configuration.
+   */
   public static void initializeSchema(DataSource ds) {
-    String sql;
-    try (InputStream in =
-        JdbcSupport.class.getResourceAsStream(
-            "/com/housedevinci/shredding/schema-postgresql.sql")) {
-      if (in == null) {
-        throw new IllegalStateException("schema-postgresql.sql missing from classpath");
-      }
-      sql = new String(in.readAllBytes(), StandardCharsets.UTF_8);
-    } catch (IOException e) {
-      throw new IllegalStateException("cannot read schema", e);
-    }
     inTransaction(
         ds,
         c -> {
-          try (Statement st = c.createStatement()) {
-            st.execute(sql);
-          }
+          initializeSchema(c);
           return null;
         });
   }
 
-  /** True when the current database role owns the erasure table and could disable its triggers. */
-  public static boolean runtimeRoleOwnsErasureTable(DataSource ds) {
-    return withConnection(
-        ds,
-        c -> {
-          try (Statement st = c.createStatement();
-              var rs =
-                  st.executeQuery(
-                      "SELECT tableowner = current_user FROM pg_tables"
-                          + " WHERE tablename = 'shredding_erasure'")) {
-            return rs.next() && rs.getBoolean(1);
-          }
-        });
+  private static void initializeSchema(Connection c) throws SQLException {
+    try (Statement st = c.createStatement()) {
+      st.execute(schemaScript());
+    }
+  }
+
+  static String schemaScript() {
+    try (InputStream in = JdbcSupport.class.getResourceAsStream(SCHEMA_RESOURCE)) {
+      if (in == null) {
+        throw new ShreddingException(
+            ErrorCodes.SCHEMA_UNVERIFIABLE,
+            "the bundled schema resource " + SCHEMA_RESOURCE + " is missing from the classpath");
+      }
+      return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+    } catch (IOException e) {
+      throw new ShreddingException(
+          ErrorCodes.SCHEMA_UNVERIFIABLE,
+          "the bundled schema resource " + SCHEMA_RESOURCE + " could not be read",
+          e);
+    }
+  }
+
+  /**
+   * Verifies, on one connection and with catalogue reads only, that the schema in {@code
+   * current_schema()} is the one this module's controls rest on and that this role cannot remove
+   * those controls. Creates nothing, writes nothing, and never repairs a gap.
+   *
+   * <p>The strict form: a privileged runtime role is a refusal. This is the assertion a non-Spring
+   * caller should make at its own startup, right after handing the adapters their {@code
+   * DataSource}.
+   *
+   * @return the schema that was verified. Hand it to {@link JdbcKeyProvider} and {@link
+   *     JdbcErasureStore} so that "the schema that was verified" and "the schema that is written
+   *     to" are the same name by construction (design §16).
+   * @throws com.housedevinci.shredding.domain.ShreddingException {@code SHRED-SCHEMA-001} to {@code
+   *     -005} and {@code -007}; see {@link ErrorCodes}
+   */
+  public static SchemaVerdict verifySchema(DataSource ds) {
+    return verifySchema(ds, false);
+  }
+
+  /**
+   * @param allowPrivilegedRuntimeRole when true, {@code SHRED-SCHEMA-004} is not thrown and the
+   *     legs that fired are returned in {@link SchemaVerdict#privilegeLegs()} for the caller to
+   *     warn about at every startup. {@code SHRED-SCHEMA-007} is never downgraded.
+   */
+  public static SchemaVerdict verifySchema(DataSource ds, boolean allowPrivilegedRuntimeRole) {
+    try (Connection c = ds.getConnection()) {
+      return SchemaVerification.verify(c, allowPrivilegedRuntimeRole);
+    } catch (SQLException e) {
+      throw new ShreddingException(
+          ErrorCodes.SCHEMA_UNVERIFIABLE,
+          "shredding: the schema could not be verified because no connection could be obtained"
+              + " (SQLState "
+              + e.getSQLState()
+              + "). Unverifiable is not clean, so this is a refusal.",
+          e);
+    }
+  }
+
+  /**
+   * Applies the bundled script and verifies the result, in one transaction and therefore inside the
+   * script's own {@code pg_advisory_xact_lock}, so two instances starting together cannot
+   * interleave create-then-verify. Only the {@code initialize-schema=true} path uses this.
+   *
+   * <p>A DDL failure is {@code SHRED-SCHEMA-006} carrying the SQLState and nothing else: the
+   * driver's message can quote a statement, and the operator needs to be told that the role lacks
+   * DDL rights and that the supported path is an owner-applied script, not to be handed a raw
+   * {@code permission denied for schema public}.
+   */
+  public static SchemaVerdict initializeAndVerifySchema(
+      DataSource ds, boolean allowPrivilegedRuntimeRole) {
+    try (Connection c = ds.getConnection()) {
+      boolean previous = c.getAutoCommit();
+      c.setAutoCommit(false);
+      try {
+        try {
+          initializeSchema(c);
+        } catch (SQLException ddl) {
+          c.rollback();
+          throw new ShreddingException(
+              ErrorCodes.SCHEMA_CREATION_FAILED,
+              "shredding: shredding.jdbc.initialize-schema=true, and running the bundled"
+                  + " schema-postgresql.sql with this application's own database credentials"
+                  + " failed (SQLState "
+                  + ddl.getSQLState()
+                  + "). The usual cause is that this role cannot run DDL here: CREATE TABLE needs"
+                  + " CREATE on the schema, and CREATE INDEX IF NOT EXISTS and CREATE OR REPLACE"
+                  + " FUNCTION both need ownership of the object that already exists, so granting"
+                  + " CREATE is not enough on a schema someone else created. The supported path is"
+                  + " the other way round: apply the script once with a privileged role, grant this"
+                  + " role the statements in SECURITY-NOTES.md \"Database roles\", and leave"
+                  + " shredding.jdbc.initialize-schema=false. See docs/upgrading-0.2.0.md. The"
+                  + " driver's own message is not repeated here because it can quote a statement.",
+              ddl);
+        }
+        // The caller's transaction, which has just run the DDL under the script's advisory lock:
+        // not read-only and not a fresh snapshot, and it must not be made either (C-13-4).
+        SchemaVerdict verdict =
+            SchemaVerification.verifyInCallersTransaction(c, allowPrivilegedRuntimeRole);
+        c.commit();
+        return verdict;
+      } catch (RuntimeException e) {
+        c.rollback();
+        throw e;
+      } finally {
+        c.setAutoCommit(previous);
+      }
+    } catch (SQLException e) {
+      throw new ShreddingException(
+          ErrorCodes.SCHEMA_UNVERIFIABLE,
+          "shredding: the schema step could not run because no connection could be obtained"
+              + " (SQLState "
+              + e.getSQLState()
+              + ").",
+          e);
+    }
   }
 
   /**

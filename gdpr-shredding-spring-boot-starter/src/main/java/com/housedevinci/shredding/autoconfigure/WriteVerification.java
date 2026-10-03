@@ -214,19 +214,41 @@ final class WriteVerification {
   private static void verifyChunk(
       SharedSessionContractImplementor session, WriteVerification ledger, List<Key> chunkKeys) {
     var chunk = chunkKeys.stream().map(ledger.debts::get).toList();
+    if (chunk.isEmpty()) {
+      // Not reachable through groupByTable, and refused rather than left to emit `WHERE ()`:
+      // design section 3.4. An empty chunk means this transaction verified nothing, and
+      // "unverifiable is not clean" applies to the ledger as much as to the schema.
+      throw new ShreddingException(
+          ErrorCodes.UNVERIFIED_WRITE,
+          "the write-verification ledger produced a chunk with no rows in it, so nothing was read"
+              + " back before commit. The transaction is refused rather than committed"
+              + " unverified.");
+    }
     Debt first = chunk.get(0);
     var fields = first.fields();
     StringBuilder sql = new StringBuilder("SELECT ").append(first.idColumn().sql());
     for (var field : fields) {
       sql.append(", ").append(field.column().sql());
     }
-    sql.append(" FROM ")
-        .append(first.tableName().sql())
-        .append(" WHERE ")
-        .append(first.idColumn().sql())
-        .append(" IN (");
+    // P2b, design section 3.4. This statement runs on the application's own Hibernate connection,
+    // inside the application's transaction, so no session mechanism is available here: a
+    // transaction-local set_config would re-point every later statement of that transaction,
+    // including statements of entities this module knows nothing about. Property B only, which
+    // means every name in it is qualified.
+    //
+    // IN (?, ...) cannot be operator-qualified, and ANY (ARRAY[?, ?]) with inferred parameter
+    // types does not parse - the parameters infer as text and the qualified operator then has no
+    // candidate. A typed array would need the id column's PostgreSQL type, which is a boot-time
+    // derivation and a new refusal; the OR chain needs nothing and is type-agnostic. It costs
+    // about 5 ms per 500-row chunk, against a read-back that already reads every row it verifies.
+    //
+    // The whole chain goes inside one pair of parentheses by construction, so it cannot bind
+    // looser than a neighbouring AND if one is ever added.
+    sql.append(" FROM ").append(first.tableName().sql()).append(" WHERE (");
     for (int i = 0; i < chunk.size(); i++) {
-      sql.append(i == 0 ? "?" : ", ?");
+      sql.append(i == 0 ? "" : " OR ")
+          .append(first.idColumn().sql())
+          .append(" OPERATOR(pg_catalog.=) ?");
     }
     sql.append(")");
 

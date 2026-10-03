@@ -137,6 +137,8 @@ class CipherProbeBlindIndexTenantColumnTest {
             .web(WebApplicationType.NONE)
             .properties(
                 "shredding.master-key=" + b64("tenantcolumn-master-key-32-byte!"),
+                "shredding.jdbc.initialize-schema=true",
+                "shredding.jdbc.allow-privileged-runtime-role=true",
                 "shredding.erasure-log.hmac-secret=" + b64("tenantcolumn-chain-secret-32byte"),
                 "shredding.blind-index.hmac-secret=" + b64("tenantcolumn-index-secret-32byte"),
                 "spring.jpa.hibernate.ddl-auto=create-drop",

@@ -73,6 +73,8 @@ class CipherProbeLedgerCapConfigTest {
             .web(WebApplicationType.NONE)
             .properties(
                 "shredding.master-key=" + b64("starter-integration-master-key32"),
+                "shredding.jdbc.initialize-schema=true",
+                "shredding.jdbc.allow-privileged-runtime-role=true",
                 "shredding.erasure-log.hmac-secret=" + b64("starter-integration-chain-secret"),
                 "shredding.blind-index.hmac-secret=" + b64("starter-integration-index-secret"),
                 "shredding.write-verification.max-outstanding=" + cap,

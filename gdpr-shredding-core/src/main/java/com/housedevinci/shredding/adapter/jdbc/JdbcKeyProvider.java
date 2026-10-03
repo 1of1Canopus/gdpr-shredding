@@ -38,13 +38,29 @@ public final class JdbcKeyProvider implements KeyProvider {
   private final MasterKey masterKey;
   private final RandomSource random;
   private final Clock clock;
+  private final String dataKeyTable;
+  private final String erasedSubjectTable;
 
+  /**
+   * @param schema the schema {@link JdbcSupport#verifySchema} resolved and verified. There is no
+   *     constructor that takes a bare {@code DataSource}: design §16 (finding C-D2-1) requires
+   *     every statement this module issues to name the relation that was verified, and a
+   *     constructor that let a caller skip that would be the one path back to a {@code search_path}
+   *     the runtime role controls.
+   */
   public JdbcKeyProvider(
-      DataSource dataSource, MasterKey masterKey, RandomSource random, Clock clock) {
+      DataSource dataSource,
+      VerifiedSchema schema,
+      MasterKey masterKey,
+      RandomSource random,
+      Clock clock) {
     this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+    Objects.requireNonNull(schema, "schema");
     this.masterKey = Objects.requireNonNull(masterKey, "masterKey");
     this.random = Objects.requireNonNull(random, "random");
     this.clock = Objects.requireNonNull(clock, "clock");
+    this.dataKeyTable = schema.qualify(SchemaExpectations.DATA_KEY);
+    this.erasedSubjectTable = schema.qualify(SchemaExpectations.ERASED_SUBJECT);
   }
 
   @Override
@@ -77,8 +93,11 @@ public final class JdbcKeyProvider implements KeyProvider {
         c -> {
           try (PreparedStatement ps =
               c.prepareStatement(
-                  "SELECT version, wrapped_key, state, encryption_count, created_at"
-                      + " FROM shredding_data_key WHERE tenant = ? AND subject = ? AND version = ?")) {
+                  "SELECT version, wrapped_key, state, encryption_count, created_at FROM "
+                      + dataKeyTable
+                      + " WHERE (tenant OPERATOR(pg_catalog.=) ?)"
+                      + " AND (subject OPERATOR(pg_catalog.=) ?)"
+                      + " AND (version OPERATOR(pg_catalog.=) ?)")) {
             ps.setString(1, tenant.value());
             ps.setString(2, subject.value());
             ps.setInt(3, version);
@@ -102,8 +121,12 @@ public final class JdbcKeyProvider implements KeyProvider {
         c -> {
           try (PreparedStatement ps =
               c.prepareStatement(
-                  "UPDATE shredding_data_key SET encryption_count = encryption_count + ?"
-                      + " WHERE tenant = ? AND subject = ? AND version = ?"
+                  "UPDATE "
+                      + dataKeyTable
+                      + " SET encryption_count = (encryption_count OPERATOR(pg_catalog.+) ?)"
+                      + " WHERE (tenant OPERATOR(pg_catalog.=) ?)"
+                      + " AND (subject OPERATOR(pg_catalog.=) ?)"
+                      + " AND (version OPERATOR(pg_catalog.=) ?)"
                       + " RETURNING encryption_count")) {
             ps.setInt(1, count);
             ps.setString(2, tenant.value());
@@ -142,7 +165,7 @@ public final class JdbcKeyProvider implements KeyProvider {
           dataSource,
           c -> {
             try (PreparedStatement ps =
-                c.prepareStatement("SELECT 1 FROM shredding_data_key LIMIT 0")) {
+                c.prepareStatement("SELECT 1 FROM " + dataKeyTable + " LIMIT 0")) {
               ps.executeQuery().close();
               return true;
             }
@@ -159,7 +182,10 @@ public final class JdbcKeyProvider implements KeyProvider {
     // undone within milliseconds and nothing in the log says so (control 11).
     try (PreparedStatement ps =
         c.prepareStatement(
-            "SELECT 1 FROM shredding_erased_subject WHERE tenant = ? AND subject = ? FOR SHARE")) {
+            "SELECT 1 FROM "
+                + erasedSubjectTable
+                + " WHERE (tenant OPERATOR(pg_catalog.=) ?)"
+                + " AND (subject OPERATOR(pg_catalog.=) ?) FOR SHARE")) {
       ps.setString(1, tenant.value());
       ps.setString(2, subject.value());
       try (ResultSet rs = ps.executeQuery()) {
@@ -176,7 +202,8 @@ public final class JdbcKeyProvider implements KeyProvider {
       byte[] wrapped = masterKey.wrap(tenant, subject, version, material, random);
       try (PreparedStatement ps =
           c.prepareStatement(
-              "INSERT INTO shredding_data_key"
+              "INSERT INTO "
+                  + dataKeyTable
                   + " (tenant, subject, version, wrapped_key, state, encryption_count, created_at)"
                   + " VALUES (?,?,?,?,?,0,?)")) {
         ps.setString(1, tenant.value());
@@ -209,11 +236,14 @@ public final class JdbcKeyProvider implements KeyProvider {
       long encryptionCount,
       java.time.Instant createdAt) {}
 
-  private static Row highestVersion(
-      Connection c, TenantId tenant, SubjectId subject, boolean forUpdate) throws SQLException {
+  private Row highestVersion(Connection c, TenantId tenant, SubjectId subject, boolean forUpdate)
+      throws SQLException {
     String sql =
-        "SELECT version, wrapped_key, state, encryption_count, created_at FROM shredding_data_key"
-            + " WHERE tenant = ? AND subject = ? ORDER BY version DESC LIMIT 1"
+        "SELECT version, wrapped_key, state, encryption_count, created_at FROM "
+            + dataKeyTable
+            + " WHERE (tenant OPERATOR(pg_catalog.=) ?)"
+            + " AND (subject OPERATOR(pg_catalog.=) ?)"
+            + " ORDER BY version DESC LIMIT 1"
             + (forUpdate ? " FOR UPDATE" : "");
     try (PreparedStatement ps = c.prepareStatement(sql)) {
       ps.setString(1, tenant.value());

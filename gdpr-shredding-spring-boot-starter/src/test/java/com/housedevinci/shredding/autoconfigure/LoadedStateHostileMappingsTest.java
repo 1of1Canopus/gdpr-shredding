@@ -88,6 +88,8 @@ class LoadedStateHostileMappingsTest {
             .web(WebApplicationType.NONE)
             .properties(
                 "shredding.master-key=" + b64("hostile-master-key-32-bytes-long"),
+                "shredding.jdbc.initialize-schema=true",
+                "shredding.jdbc.allow-privileged-runtime-role=true",
                 "shredding.erasure-log.hmac-secret=" + b64("hostile-chain-secret-32-bytes-x!"),
                 "shredding.blind-index.hmac-secret=" + b64("hostile-index-secret-32-bytes-x!"),
                 // Nothing but the entity under test: this module's test sources declare several

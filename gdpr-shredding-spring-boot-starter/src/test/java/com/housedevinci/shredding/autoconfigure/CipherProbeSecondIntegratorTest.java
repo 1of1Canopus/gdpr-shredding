@@ -138,6 +138,8 @@ class CipherProbeSecondIntegratorTest {
             .web(WebApplicationType.NONE)
             .properties(
                 "shredding.master-key=" + b64("secondintegrator-master-key-32!!"),
+                "shredding.jdbc.initialize-schema=true",
+                "shredding.jdbc.allow-privileged-runtime-role=true",
                 "shredding.erasure-log.hmac-secret=" + b64("secondintegrator-chain-secret32!"),
                 "shredding.blind-index.hmac-secret=" + b64("secondintegrator-index-secret32!"),
                 "spring.jpa.hibernate.ddl-auto=create-drop",

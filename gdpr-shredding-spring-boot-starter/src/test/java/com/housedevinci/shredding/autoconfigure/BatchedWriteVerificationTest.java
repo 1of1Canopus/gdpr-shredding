@@ -82,6 +82,8 @@ class BatchedWriteVerificationTest {
   @DynamicPropertySource
   static void secrets(DynamicPropertyRegistry registry) {
     registry.add("shredding.master-key", () -> b64("starter-integration-master-key32"));
+    registry.add("shredding.jdbc.initialize-schema", () -> "true");
+    registry.add("shredding.jdbc.allow-privileged-runtime-role", () -> "true");
     registry.add(
         "shredding.erasure-log.hmac-secret", () -> b64("starter-integration-chain-secret"));
     registry.add(
@@ -604,16 +606,20 @@ class BatchedWriteVerificationTest {
   /** Every settlement statement issued against one table while recording was on. */
   private static List<String> settlementsFor(String table) {
     return SettlementRecorder.SQL.stream()
-        .filter(sql -> sql.contains("\"" + table + "\"") && sql.contains(" IN ("))
+        .filter(sql -> sql.contains("\"" + table + "\"") && sql.contains(" WHERE ("))
         .toList();
   }
 
-  /** How many rows the settlement statements covered: one bind placeholder per row. */
+  /**
+   * How many rows the settlement statements covered: one bind placeholder per row. The id predicate
+   * is an OR chain of OPERATOR(pg_catalog.=) rather than an IN list (design section 3.4), wrapped
+   * in one pair of parentheses, so the chain starts at " WHERE (".
+   */
   private static int placeholdersInSettlementFor(String table) {
     int total = 0;
     for (String sql : settlementsFor(table)) {
-      String in = sql.substring(sql.indexOf(" IN ("));
-      total += in.length() - in.replace("?", "").length();
+      String chain = sql.substring(sql.indexOf(" WHERE ("));
+      total += chain.length() - chain.replace("?", "").length();
     }
     return total;
   }

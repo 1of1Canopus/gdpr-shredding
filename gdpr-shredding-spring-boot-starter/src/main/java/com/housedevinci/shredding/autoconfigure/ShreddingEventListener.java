@@ -631,16 +631,16 @@ public final class ShreddingEventListener
       return;
     }
     ColumnRef idColumn = singleIdColumn(event.getPersister());
-    String sql =
-        "UPDATE "
-            + fields.get(0).table().sql()
-            + " SET "
-            + columns.stream()
-                .map(c -> c.sql() + " = ?")
-                .collect(java.util.stream.Collectors.joining(", "))
-            + " WHERE "
-            + idColumn.sql()
-            + " = ?";
+    // P2b, design section 3.4: built on the application's connection, inside the application's
+    // transaction, so Property B only - every name qualified, no session mechanism. The SET
+    // assignments are an assignment position and not an operator name; the WHERE is.
+    StringBuilder statement =
+        new StringBuilder("UPDATE ").append(fields.get(0).table().sql()).append(" SET ");
+    for (int i = 0; i < columns.size(); i++) {
+      statement.append(i == 0 ? "" : ", ").append(columns.get(i).sql()).append(" = ?");
+    }
+    statement.append(" WHERE ").append(idColumn.sql()).append(" OPERATOR(pg_catalog.=) ?");
+    String sql = statement.toString();
     // Not cast to EventSource: a StatelessSession insert of an IDENTITY-generated shredded entity
     // reaches this rebind too, and StatelessSessionImpl is not an EventSource.
     event
@@ -856,18 +856,18 @@ public final class ShreddingEventListener
       Object id,
       List<ShreddedModel.ShreddedField> fields,
       ColumnRef idColumn) {
-    String columns =
-        fields.stream()
-            .map(f -> f.column().sql())
-            .collect(java.util.stream.Collectors.joining(", "));
-    String sql =
-        "SELECT "
-            + columns
-            + " FROM "
-            + fields.get(0).table().sql()
-            + " WHERE "
-            + idColumn.sql()
-            + " = ?";
+    // P2b, as above: the application's connection, Property B only.
+    StringBuilder statement = new StringBuilder("SELECT ");
+    for (int i = 0; i < fields.size(); i++) {
+      statement.append(i == 0 ? "" : ", ").append(fields.get(i).column().sql());
+    }
+    statement
+        .append(" FROM ")
+        .append(fields.get(0).table().sql())
+        .append(" WHERE ")
+        .append(idColumn.sql())
+        .append(" OPERATOR(pg_catalog.=) ?");
+    String sql = statement.toString();
     return session.doReturningWork(
         connection -> {
           try (PreparedStatement ps = connection.prepareStatement(sql)) {

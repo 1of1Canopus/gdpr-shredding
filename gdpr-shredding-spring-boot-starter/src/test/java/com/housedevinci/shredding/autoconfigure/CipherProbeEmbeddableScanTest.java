@@ -55,6 +55,8 @@ class CipherProbeEmbeddableScanTest {
             .web(WebApplicationType.NONE)
             .properties(
                 "shredding.master-key=" + b64("embeddable-master-key-32-bytes!!"),
+                "shredding.jdbc.initialize-schema=true",
+                "shredding.jdbc.allow-privileged-runtime-role=true",
                 "shredding.erasure-log.hmac-secret=" + b64("embeddable-chain-secret-32bytes!"),
                 "shredding.blind-index.hmac-secret=" + b64("embeddable-index-secret-32bytes!"),
                 "spring.jpa.hibernate.ddl-auto=create-drop",
@@ -117,6 +119,8 @@ class CipherProbeEmbeddableScanTest {
             .web(WebApplicationType.NONE)
             .properties(
                 "shredding.master-key=" + b64("embeddable-master-key-32-bytes!!"),
+                "shredding.jdbc.initialize-schema=true",
+                "shredding.jdbc.allow-privileged-runtime-role=true",
                 "shredding.erasure-log.hmac-secret=" + b64("embeddable-chain-secret-32bytes!"),
                 "shredding.blind-index.hmac-secret=" + b64("embeddable-index-secret-32bytes!"),
                 "spring.jpa.hibernate.ddl-auto=create-drop",

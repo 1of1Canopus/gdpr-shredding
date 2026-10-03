@@ -42,6 +42,7 @@ public class ShreddingProperties {
   private final BlindIndexProperties blindIndex = new BlindIndexProperties();
   private final ErasureProperties erasure = new ErasureProperties();
   private final SubjectPseudonymProperties subjectPseudonym = new SubjectPseudonymProperties();
+  private final JdbcProperties jdbc = new JdbcProperties();
 
   public String getMasterKey() {
     return masterKey;
@@ -91,11 +92,76 @@ public class ShreddingProperties {
     return erasure;
   }
 
+  public JdbcProperties getJdbc() {
+    return jdbc;
+  }
+
   public SubjectPseudonymProperties getSubjectPseudonym() {
     return subjectPseudonym;
   }
 
   /** What a read returns once the key is gone. One policy per application, never per call. */
+  /**
+   * The database schema, and what this application is allowed to do to it. Both defaults are the
+   * secure ones and both weaker modes WARN at every startup.
+   */
+  public static class JdbcProperties {
+
+    /**
+     * Whether this application runs the bundled {@code schema-postgresql.sql} with its own database
+     * credentials at boot.
+     *
+     * <p><b>False, and that is the whole finding.</b> Until 0.2.0 the starter ran that DDL
+     * unconditionally, on the application's own {@code DataSource}, with no property and no
+     * condition. DDL implies ownership, and the owner of these tables can {@code ALTER TABLE ...
+     * DISABLE TRIGGER} or {@code CREATE OR REPLACE} a guard function into a no-op and then delete
+     * from the erasure log - so there was no configuration an operator could actually run in which
+     * the append-only erasure log (control 8) and the erasure tombstone (control 11) were
+     * load-bearing against the application itself.
+     *
+     * <p>With this false, the application issues no DDL at all and verifies the schema instead,
+     * refusing to start if it is absent, incomplete or unguarded. With it true, the script runs on
+     * boot, the same verification runs against the result, and a WARN naming this property is
+     * logged at every startup. Mirrors {@code agentguard.jdbc.initialize-schema} deliberately: one
+     * concept configured twice, not two concepts.
+     */
+    private boolean initializeSchema = false;
+
+    /**
+     * Whether the application boots when its database role is privileged over this module's
+     * objects.
+     *
+     * <p>"Privileged" is a list, not a synonym for "owner": a member of the owner role (including a
+     * {@code NOINHERIT} member, who can still {@code SET ROLE}), a superuser, the owner of any one
+     * of the nine objects - four tables, the sequence, the two indexes, the three guard functions -
+     * a role holding {@code CREATE} on the schema, {@code CREATE} or {@code TEMPORARY} on the
+     * database, membership of the database owner, or any table privilege beyond the documented
+     * grant set. Each of those is one step away from removing a guard, and the message names the
+     * legs that fired.
+     *
+     * <p>With this true the application boots and WARNs at every startup that the append-only
+     * controls are advisory in that configuration. It never suppresses {@code SHRED-SCHEMA-007}, a
+     * privilege the adapters actually need: that is a broken deployment, not a posture.
+     */
+    private boolean allowPrivilegedRuntimeRole = false;
+
+    public boolean isInitializeSchema() {
+      return initializeSchema;
+    }
+
+    public void setInitializeSchema(boolean initializeSchema) {
+      this.initializeSchema = initializeSchema;
+    }
+
+    public boolean isAllowPrivilegedRuntimeRole() {
+      return allowPrivilegedRuntimeRole;
+    }
+
+    public void setAllowPrivilegedRuntimeRole(boolean allowPrivilegedRuntimeRole) {
+      this.allowPrivilegedRuntimeRole = allowPrivilegedRuntimeRole;
+    }
+  }
+
   public static class ErasedValueProperties {
     /** {@code sentinel} (default), {@code exception}, or {@code null} (WARNs at every startup). */
     private ErasedValuePolicy policy = ErasedValuePolicy.SENTINEL;

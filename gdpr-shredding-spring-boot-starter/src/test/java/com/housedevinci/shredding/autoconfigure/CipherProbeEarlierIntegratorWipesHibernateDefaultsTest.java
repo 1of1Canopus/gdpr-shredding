@@ -109,6 +109,8 @@ class CipherProbeEarlierIntegratorWipesHibernateDefaultsTest {
             .web(WebApplicationType.NONE)
             .properties(
                 "shredding.master-key=" + b64("displaced-master-key-32-bytes!!!"),
+                "shredding.jdbc.initialize-schema=true",
+                "shredding.jdbc.allow-privileged-runtime-role=true",
                 "shredding.erasure-log.hmac-secret=" + b64("displaced-chain-secret-32-byte!!"),
                 "shredding.blind-index.hmac-secret=" + b64("displaced-index-secret-32-byte!!"),
                 "spring.jpa.hibernate.ddl-auto=create-drop",

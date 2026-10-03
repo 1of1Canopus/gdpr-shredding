@@ -67,7 +67,7 @@ public class ShreddingActuatorAutoConfiguration {
   @Bean
   @ConditionalOnMissingBean(name = "shreddingHealthIndicator")
   public HealthIndicator shreddingHealthIndicator(
-      KeyProvider keyProvider, ErasureChainVerifier verifier) {
+      KeyProvider keyProvider, ErasureChainVerifier verifier, ShreddingSchemaGate gate) {
     return () -> {
       if (!keyProvider.healthy()) {
         // A key store that is down is an outage, not an erasure: the readiness probe must say so
@@ -77,6 +77,13 @@ public class ShreddingActuatorAutoConfiguration {
       var report = verifier.verify();
       Health.Builder builder = report.intact() ? Health.up() : Health.down();
       return builder
+          // C-12-1: reported from the gate's verdict, never re-derived here. The indicator says
+          // which schema was verified and whether the role it verified is one that could remove
+          // the guards; it does not run its own check, because two checks that can disagree are
+          // worse than one.
+          .withDetail("schema", gate.schema().name())
+          .withDetail(
+              "runtimeRolePrivileged", gate.verdict().runtimeRoleIsUnprivileged() ? "no" : "yes")
           .withDetail("keyStore", "reachable")
           .withDetail("erasureLog", report.status().name())
           .withDetail("erasureRecords", report.verified())

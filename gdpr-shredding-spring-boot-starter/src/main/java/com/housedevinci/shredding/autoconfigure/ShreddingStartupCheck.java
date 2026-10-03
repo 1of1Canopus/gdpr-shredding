@@ -1,13 +1,11 @@
 package com.housedevinci.shredding.autoconfigure;
 
-import com.housedevinci.shredding.adapter.jdbc.JdbcSupport;
 import com.housedevinci.shredding.application.FieldCipher;
 import com.housedevinci.shredding.domain.ErasedValuePolicy;
 import com.housedevinci.shredding.domain.ErrorCodes;
 import com.housedevinci.shredding.domain.ShreddingException;
 import com.housedevinci.shredding.jpa.ShreddingRuntime;
 import jakarta.persistence.EntityManagerFactory;
-import javax.sql.DataSource;
 import org.hibernate.engine.spi.SessionFactoryImplementor;
 import org.hibernate.event.service.spi.EventListenerRegistry;
 import org.hibernate.event.spi.EventType;
@@ -27,7 +25,7 @@ public final class ShreddingStartupCheck implements InitializingBean {
   private final ShreddingProperties properties;
   private final FieldCipher cipher;
   private final ShreddedModel model;
-  private final DataSource dataSource;
+  private final ShreddingSchemaGate schemaGate;
   private final EntityManagerFactory entityManagerFactory;
   private final ShreddingEventListener shreddingEventListener;
 
@@ -35,13 +33,19 @@ public final class ShreddingStartupCheck implements InitializingBean {
       ShreddingProperties properties,
       FieldCipher cipher,
       ShreddedModel model,
-      DataSource dataSource,
+      ShreddingSchemaGate schemaGate,
       EntityManagerFactory entityManagerFactory,
       ShreddingEventListener shreddingEventListener) {
     this.properties = properties;
     this.cipher = cipher;
     this.model = model;
-    this.dataSource = dataSource;
+    // C-12-1: this bean holds the gate, not a DataSource. Its only database call used to be
+    // JdbcSupport.runtimeRoleOwnsErasureTable, which is deleted - the query had no schemaname
+    // predicate at all, so it answered about whichever copy of the table pg_tables listed first,
+    // and it tested ownership of one table when the runtime role only has to own one guard
+    // function to replace every guard. The gate checks all nine objects, against the resolved
+    // schema, and refuses rather than warns.
+    this.schemaGate = schemaGate;
     this.entityManagerFactory = entityManagerFactory;
     this.shreddingEventListener = shreddingEventListener;
   }
@@ -91,19 +95,6 @@ public final class ShreddingStartupCheck implements InitializingBean {
           "shredding: shredding.erasure-log.unkeyed=true. The erasure log's integrity rests only on"
               + " database privilege separation.");
     }
-    // L3: the append-only triggers stop the runtime role; they cannot stop the table's owner,
-    // who can ALTER TABLE ... DISABLE TRIGGER and defeat control 8. SECURITY-NOTES.md prescribes
-    // running with a role that only has INSERT/SELECT; this is the check that says out loud when
-    // that prescription was not followed, instead of leaving
-    // JdbcSupport.runtimeRoleOwnsErasureTable
-    // correct, tested and uncalled.
-    if (JdbcSupport.runtimeRoleOwnsErasureTable(dataSource)) {
-      log.warn(
-          "shredding: the database role running this application owns shredding_erasure. That"
-              + " role can ALTER TABLE ... DISABLE TRIGGER and remove the append-only protection"
-              + " (control 8). Run with a role that has only INSERT and SELECT on"
-              + " shredding_erasure, shredding_erasure_anchor and shredding_erased_subject.");
-    }
     // Design addendum 3, changes 1/2 and 8 (applied §3.1, §3.8b): every @BlindIndex must have had
     // both of its axes - tenantColumn and subjectColumn - resolved to the properties the write
     // path reads. The auto-configured model always
@@ -151,6 +142,9 @@ public final class ShreddingStartupCheck implements InitializingBean {
         model.blindIndexFields().size(),
         properties.getDataKeyCache().getTtl(),
         properties.getErasure().getBackupRetention());
+    // Read once so the field is not merely held: the gate has already refused or warned, and this
+    // is the line that ties the two log lines together for an operator reading one boot log.
+    log.debug("shredding: writing to schema {}", schemaGate.schema());
   }
 
   /**

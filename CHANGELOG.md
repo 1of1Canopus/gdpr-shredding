@@ -22,6 +22,162 @@ All notable changes to this project. The format follows
   affected. Same dependency path as above; only `gdpr-shredding-sample` resolves
   `jackson-databind` at all, now at 3.1.7.
 
+### Changed
+- **BREAKING. The application no longer creates its own database schema, and refuses to start
+  against a schema whose append-only guards it could remove itself.** Until 0.1.1 the starter ran
+  the bundled `schema-postgresql.sql` with the application's own database credentials on every
+  boot, unconditionally. Running that DDL makes the application's role the owner of the erasure
+  tables and the guard functions, and an owner can `ALTER TABLE ... DISABLE TRIGGER`, or
+  `CREATE OR REPLACE` a guard function with a body that allows everything, and then delete from
+  the erasure log. The documentation prescribed a non-owner role; the code could only start as the
+  owner. The append-only erasure log (control 8) and the erasure tombstone (control 11) therefore
+  held in no configuration an operator could actually run.
+
+  From this release the application issues no DDL by default and verifies the schema at startup
+  instead: the four tables as permanent ordinary tables with exactly the expected columns and
+  constraints, the `bigserial` sequence and its dependency edge, the three guard functions with the
+  bodies from the bundled script compared text for text, exactly the seven guard triggers each
+  pointing through `tgfoid` at the right function, each at `ENABLE ALWAYS`, and each with no `WHEN`
+  predicate and no `UPDATE OF` column list, no rewrite rule, no row-level-security flag, no policy,
+  no inheritance child, and a runtime role that owns none of the nine objects and holds no
+  privilege beyond the documented grant set. A catalogue read that cannot be performed is
+  a refusal, not a warning. **An installation that upgrades and changes nothing stops booting.**
+  Step-by-step upgrade: [docs/upgrading-0.2.0.md](docs/upgrading-0.2.0.md).
+- **Every statement this module issues is now qualified to the schema verified at boot.** An
+  unqualified name resolves through `search_path` at parse time, which any session can change with
+  no privilege at all. Three shapes were reproduced in which verification answered clean, the INFO
+  line said "schema verified", and the appends, deletes and truncates went somewhere else: a second
+  schema the runtime role owns, placed first on the path; a `pg_temp` copy created by the runtime
+  role itself while it holds `TEMPORARY`; and a plain `SET search_path` issued between two adapter
+  calls on a pooled connection. Qualification closes all three in this module's own SQL. The
+  application's own tables, reached through the entity mapping by the blind-index clear and the
+  Hibernate-rendered read-back, are deliberately left where the mapping puts them. The one
+  predicate that had no qualified spelling - the cross-tenant residual WARN's
+  `<tenant> IS DISTINCT FROM ?`, a keyword operator that reaches the type's own `=` - is now
+  written `(<tenant> IS NULL OR NOT (<tenant> OPERATOR(pg_catalog.=) ?))`, which is equivalent for
+  the non-null value it binds. No statement of this module resolves a name through `search_path`
+  any more except the application tables named above.
+- **Startup verification no longer asks the role it is judging.** A function name resolves along
+  `search_path` exactly as a relation name does, any role may `ALTER ROLE <itself> SET search_path`,
+  and an application role normally owns a schema it can define functions in - so `pg_has_role`,
+  `has_table_privilege`, `has_column_privilege`, `has_schema_privilege`, `has_database_privilege`,
+  `has_sequence_privilege`, `current_setting`, `current_schema`, `current_database`, `format_type`,
+  `pg_get_constraintdef`, `pg_get_function_result` and `count(*)` written bare were predicates the
+  subject of the check supplied the answers to. Reproduced: a role owning all nine objects and
+  holding every privilege on them booted clean, the INFO line read "owns none of the 9 objects",
+  and the same session then disabled the append-only triggers and emptied the trail; a relaxed
+  anchor `CHECK` and a widened `hash` column were hidden the same way. Verification's transaction
+  now pins its `search_path` to `pg_catalog` for its own duration and **reads the pin back**,
+  refusing with `SHRED-SCHEMA-005` when it did not take; the verified schema is captured once,
+  before the pin, and bound into every later query; and every catalogue function, catalogue
+  relation and `regclass` cast carries a `pg_catalog.` prefix regardless. The bundled script's
+  `to_regclass`, `quote_ident`, `current_schema`, `pg_advisory_xact_lock`, `pg_attribute` and
+  `pg_trigger`, and the erasure store's `count(*)`, `now()` and `pg_advisory_xact_lock(...)`, are
+  qualified for the same reason. The Hibernate-rendered independent read-back remains `count(*)` as
+  HQL renders it; it is named in SECURITY-NOTES rather than left implied.
+- **The three append-only guard functions no longer resolve a name in the session of the role they
+  constrain.** A guard function is not `SECURITY DEFINER`, so until this release its body resolved
+  its operator names along the `search_path` of whoever wrote to the table. Reproduced: a role
+  holding exactly the documented grant block, owning nothing in the schema, created
+  `=(boolean,boolean) -> true`, `<>(bigint,bigint) -> false` and `=(bpchar,bpchar) -> false` in a
+  schema of its own and rewrote `shredding_erasure_anchor`'s `row_count` from 7 to 1, replaced the
+  head hash and flipped `keyed` back to false - straight through the monotonic guard, which is the
+  control that makes the erasure log's chain head unforgeable. Fixed in both halves, because each is
+  the other's backstop: the script puts `SET search_path = pg_catalog, pg_temp` on all three
+  functions, and their bodies are written with `OPERATOR(pg_catalog....)` and explicit parentheses
+  (`IS DISTINCT FROM`, which has no qualified spelling, is rewritten as `<>` on two `NOT NULL`
+  columns, which is equivalent there). Startup verification now requires the clause as well as the
+  body: `pg_proc.proconfig` is read as a `text[]`, compared **in Java** against exactly
+  `{"search_path=pg_catalog, pg_temp"}`, and a NULL array, a second setting beside it or a different
+  spelling is `SHRED-SCHEMA-003`. The comparison is never a SQL predicate: a NULL array compared in
+  SQL evaluates to NULL rather than to false, which reports a disarmed guard as an absent one.
+- **Every operator, function, aggregate, type and cast in every statement this module builds names
+  `pg_catalog`.** Qualifying relations closed one name class; the others were still resolved by the
+  session. Order is not a defence for an operator: PostgreSQL ships no `=` with `varchar` on either
+  side, so an `=(varchar, varchar)` an unprivileged role creates in a schema it owns is an
+  exact-type match and wins at step 2 of operator resolution whatever `search_path` says.
+  Reproduced on `tenant` and `subject`, which are `varchar(255)`: with such an operator answering
+  `false`, `erase()` appended a `COMPLETE` record with `keysDestroyed = 0` while the data key was
+  still in the table, and with it answering `true` a live key read as destroyed. Now written
+  `OPERATOR(pg_catalog.=)`, `OPERATOR(pg_catalog.+)`, `OPERATOR(pg_catalog.>)`,
+  `::pg_catalog.regclass`, `::pg_catalog.oid`, `::pg_catalog.text` and `pg_catalog.`-prefixed
+  functions throughout the two adapters, all of `SchemaVerification`, and the bundled script -
+  including the script's nine `||` concatenations and the anchor's `CHECK (id = 1)`, both of which
+  a shadow could bind at creation time. Because `OPERATOR(...)` erases precedence, an expression
+  with more than one operator token is fully parenthesised; unparenthesised, two qualified operators
+  re-associate and the honest write fails inside the trigger.
+- **The three statements the starter builds on the application's own connection are qualified too.**
+  The `IDENTITY` rebind, the subject-immutability re-read and the write-verification ledger's
+  read-back run on the application's Hibernate connection, inside the application's transaction.
+  With `=(bigint,bigint) -> true` on the path, the rebind's `WHERE id = ?` reported
+  `UPDATE <every row>` - the existing row-count check then refused the insert with the wrong reason
+  - and the ledger's `IN (?, ?, ?)` read every row of the table for a three-id chunk. `IN` cannot be
+  operator-qualified, so the ledger's predicate is now an `OR` chain of `OPERATOR(pg_catalog.=)`,
+  wrapped in one pair of parentheses by construction so it cannot bind looser than a neighbouring
+  `AND`, and a chunk with no ids is refused rather than left to emit `WHERE ()`. These three get
+  qualification and **no** session mechanism on purpose: a transaction-local `set_config` there
+  would re-point every later statement of the application's transaction, including statements of
+  entities this module knows nothing about.
+- **The verified schema's identity is captured on the pinned side of the transaction.** Verification
+  read the schema name and its namespace oid in one statement whose `n.nspname =
+  pg_catalog.current_schema()` comparison ran before the `search_path` pin. A role owning a schema
+  ahead of `pg_catalog` defines its own `=(name, name)` there and splits the two: the gate verifies
+  one schema while every write goes to another. Measured - the single statement answered name `app`
+  with oid `2200` (`public`). Now three statements: the facts with no operator in them, the pin, and
+  then the oid read under the pin from a bound parameter with the comparison qualified as well.
+  Verification's own pin is `pg_catalog, pg_temp` rather than `pg_catalog`, the same value used
+  everywhere else in the module, because the *implicit* `pg_temp` otherwise precedes the path for
+  relation names and a role holding `TEMPORARY` can put a `pg_class` there.
+- A drift gate in the test suite reads every statement this module builds - by reachability to a
+  statement call, not by looking for SQL keywords - and refuses any name in it that a session could
+  resolve: an operator outside the exact six-token `OPERATOR(pg_catalog....)` sequence, a keyword
+  operator, an unqualified function or type, an unqualified relation, a character its lexer does not
+  classify, and two operator tokens at one nesting depth with no parentheses between them. A
+  statement whose text the gate cannot resolve fails the gate rather than being skipped.
+- `schema-postgresql.sql` sets all seven guard triggers to `ENABLE ALWAYS`, unconditionally and
+  idempotently, every time it runs. `CREATE TRIGGER` leaves a trigger at `O`, which does not fire
+  for a replication apply worker, for a superuser session in `session_replication_role = replica`,
+  or under `pg_restore --disable-triggers`. It also gives the script, for the first time, a way to
+  repair a trigger someone disabled: the `CREATE TRIGGER` blocks are all guarded by "if not
+  exists", so a disabled trigger used to stay disabled through every re-apply. `ENABLE ALWAYS` does
+  **not** defend against the table's owner, who does not need replica mode.
+- The append-only guard functions now name the table they refused with `TG_TABLE_NAME`. A refused
+  write on `shredding_erased_subject` reported `shredding_erasure is append-only`, which during an
+  incident points the responder at the wrong table.
+- Two new properties, both secure by default, each WARNing at **every** startup when set to the
+  weaker value and naming the legs that fired: `shredding.jdbc.initialize-schema` (default `false`)
+  and `shredding.jdbc.allow-privileged-runtime-role` (default `false`). Neither ever suppresses
+  `SHRED-SCHEMA-007`, a privilege the adapters actually need: an application that cannot write the
+  erasure log is broken, not differently configured.
+- `SECURITY-NOTES.md` gains a "Database roles" section with the complete, copy-pasteable grant
+  block, the `REVOKE`s that `GRANT` alone does not cover, and a statement of what startup
+  verification does and does not prove. The previous prescription - "a role that has INSERT and
+  SELECT on `shredding_erasure`" - was incomplete in both directions: it omitted `USAGE` on the
+  `bigserial` sequence behind `shredding_erasure.seq` and the column-level `UPDATE` grants the row
+  locks need, so a role granted exactly what was documented failed every erasure write and every
+  key mint; and it granted table-wide `UPDATE` where one column is enough.
+- The sample's `application.yml` sets both new properties to the weaker value **explicitly**, with
+  a comment saying so, rather than inheriting it by omission: reading that file now tells you which
+  controls are off in the demo.
+
+### Removed
+- **BREAKING.** `JdbcSupport.runtimeRoleOwnsErasureTable`, public since 0.1.0. Its query had no
+  `schemaname` predicate, so it answered about whichever copy of `shredding_erasure` `pg_tables`
+  listed first, and it tested ownership of one table when owning one guard function is enough to
+  replace every guard. Startup verification replaces it and refuses rather than warning.
+- **BREAKING.** `JdbcKeyProvider` and `JdbcErasureStore` take a `VerifiedSchema`, which only
+  `JdbcSupport.verifySchema` produces. There is no constructor left that takes a bare `DataSource`:
+  that would be the one path back to relation names a `search_path` decides.
+- The startup warning about the runtime role owning `shredding_erasure`, and the grant list inside
+  it. The list was wrong, and an operator who followed the log line rather than the document landed
+  in a role that could not start the application.
+
+### Added
+- `JdbcSupport.verifySchema(DataSource)` and `verifySchema(DataSource, boolean)`, public core API,
+  so a caller that does not use Spring makes the same assertion at its own startup.
+- Error codes `SHRED-SCHEMA-001` to `SHRED-SCHEMA-007`, documented in
+  [docs/upgrading-0.2.0.md](docs/upgrading-0.2.0.md) with the upgrade step each one points at.
+
 ## [0.1.1] - 2026-09-22
 
 ## [0.1.0] - 2026-09-15

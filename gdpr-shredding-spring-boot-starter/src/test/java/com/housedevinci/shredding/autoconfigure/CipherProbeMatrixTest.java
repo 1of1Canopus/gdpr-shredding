@@ -50,6 +50,8 @@ class CipherProbeMatrixTest {
   @DynamicPropertySource
   static void secrets(DynamicPropertyRegistry r) {
     r.add("shredding.master-key", () -> b64("starter-integration-master-key32"));
+    r.add("shredding.jdbc.initialize-schema", () -> "true");
+    r.add("shredding.jdbc.allow-privileged-runtime-role", () -> "true");
     r.add("shredding.erasure-log.hmac-secret", () -> b64("starter-integration-chain-secret"));
     r.add("shredding.blind-index.hmac-secret", () -> b64("starter-integration-index-secret"));
     r.add("spring.jpa.hibernate.ddl-auto", () -> "create-drop");

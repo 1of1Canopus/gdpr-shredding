@@ -297,17 +297,17 @@ class CipherProbeReadBackIndependenceTest {
      */
     @Bean
     com.housedevinci.shredding.adapter.jdbc.JdbcErasureStore shreddingErasureStore(
-        DataSource dataSource,
+        ShreddingSchemaGate gate,
         com.housedevinci.shredding.domain.ErasureChain chain,
         ShreddedModel model,
         jakarta.persistence.EntityManagerFactory entityManagerFactory) {
-      com.housedevinci.shredding.adapter.jdbc.JdbcSupport.initializeSchema(dataSource);
       var decoys =
           model.blindIndexColumns().stream()
               .map(CipherProbeReadBackIndependenceTest::decoy)
               .toList();
       return new com.housedevinci.shredding.adapter.jdbc.JdbcErasureStore(
-          dataSource,
+          gate.dataSource(),
+          gate.schema(),
           chain,
           decoys,
           new HibernateBlindIndexResidual(
@@ -390,6 +390,8 @@ class CipherProbeReadBackIndependenceTest {
         .web(WebApplicationType.NONE)
         .properties(
             "shredding.master-key=" + b64("readback-master-key-32-bytes!!!!"),
+            "shredding.jdbc.initialize-schema=true",
+            "shredding.jdbc.allow-privileged-runtime-role=true",
             "shredding.erasure-log.hmac-secret=" + b64("readback-chain-secret-32-bytes!!"),
             "shredding.blind-index.hmac-secret=" + b64("readback-index-secret-32-bytes!!"),
             "spring.datasource.url=" + POSTGRES.getJdbcUrl(),

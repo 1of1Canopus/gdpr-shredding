@@ -65,6 +65,8 @@ class CipherProbeJdbcTest {
 
   private static HikariDataSource dataSource;
 
+  private static com.housedevinci.shredding.adapter.jdbc.VerifiedSchema schema;
+
   private JdbcKeyProvider keys;
   private DataKeyCache cache;
   private FieldCipher cipher;
@@ -100,6 +102,10 @@ class CipherProbeJdbcTest {
               + " shredding_data_key, shredding_erased_subject, customer CASCADE");
     }
     JdbcSupport.initializeSchema(dataSource);
+    // The container role is the owner here - one role, one container - so verification is asked to
+    // allow a privileged runtime role. The hardened two-role posture has its own class,
+    // SchemaVerificationTest.
+    schema = JdbcSupport.verifySchema(dataSource, true).schema();
     try (Connection c = dataSource.getConnection();
         var st = c.createStatement()) {
       st.execute(
@@ -113,6 +119,7 @@ class CipherProbeJdbcTest {
     keys =
         new JdbcKeyProvider(
             dataSource,
+            schema,
             MasterKey.fromBytes(new byte[32]),
             RandomSource.secure(),
             Clock.systemUTC());
@@ -123,7 +130,8 @@ class CipherProbeJdbcTest {
   }
 
   private JdbcErasureStore store(List<BlindIndexColumn> columns) {
-    return new JdbcErasureStore(dataSource, ErasureChain.keyed(SECRET, "k1"), columns, RESIDUAL);
+    return new JdbcErasureStore(
+        dataSource, schema, ErasureChain.keyed(SECRET, "k1"), columns, RESIDUAL);
   }
 
   /**
@@ -661,7 +669,9 @@ class CipherProbeJdbcTest {
     service(store).erase(new ErasureRequest(TENANT, s, "dpo", "art 17"));
 
     assertThatThrownBy(
-            () -> new JdbcErasureStore(dataSource, ErasureChain.unkeyed(), List.of(), RESIDUAL))
+            () ->
+                new JdbcErasureStore(
+                    dataSource, schema, ErasureChain.unkeyed(), List.of(), RESIDUAL))
         .isInstanceOf(ShreddingException.class)
         .extracting(e -> ((ShreddingException) e).code())
         .isEqualTo(ErrorCodes.ERASURE_KEY_MISMATCH);

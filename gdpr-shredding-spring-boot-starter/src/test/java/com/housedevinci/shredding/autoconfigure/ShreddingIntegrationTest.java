@@ -70,6 +70,8 @@ class ShreddingIntegrationTest {
 
   @DynamicPropertySource
   static void secrets(DynamicPropertyRegistry registry) {
+    registry.add("shredding.jdbc.initialize-schema", () -> "true");
+    registry.add("shredding.jdbc.allow-privileged-runtime-role", () -> "true");
     registry.add(
         "shredding.master-key",
         () ->

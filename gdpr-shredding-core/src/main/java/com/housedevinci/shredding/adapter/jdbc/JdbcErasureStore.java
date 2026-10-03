@@ -53,6 +53,10 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
   private final ErasureChain chain;
   private final List<BlindIndexColumn> blindIndexColumns;
   private final BlindIndexResidual residual;
+  private final String dataKeyTable;
+  private final String erasedSubjectTable;
+  private final String erasureTable;
+  private final String anchorTable;
 
   /**
    * @param residual the independent read-back (design addendum 4, §4.5). It is not optional and has
@@ -61,10 +65,20 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
    */
   public JdbcErasureStore(
       DataSource dataSource,
+      VerifiedSchema schema,
       ErasureChain chain,
       List<BlindIndexColumn> blindIndexColumns,
       BlindIndexResidual residual) {
     this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+    Objects.requireNonNull(schema, "schema");
+    // Design §16: the four relation names are built once, from the schema that was verified at
+    // boot, and no statement below names a relation any other way. The blind-index statements are
+    // deliberately not qualified here - they address the application's own tables through the
+    // persister's TableRef, which carries whatever schema the mapping carries.
+    this.dataKeyTable = schema.qualify(SchemaExpectations.DATA_KEY);
+    this.erasedSubjectTable = schema.qualify(SchemaExpectations.ERASED_SUBJECT);
+    this.erasureTable = schema.qualify(SchemaExpectations.ERASURE);
+    this.anchorTable = schema.qualify(SchemaExpectations.ANCHOR);
     this.chain = Objects.requireNonNull(chain, "chain");
     this.blindIndexColumns = List.copyOf(blindIndexColumns);
     this.residual = Objects.requireNonNull(residual, "residual");
@@ -109,7 +123,8 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
 
   private ErasureRecord appendInTransaction(Connection c, ErasureRecord record)
       throws SQLException {
-    try (PreparedStatement lock = c.prepareStatement("SELECT pg_advisory_xact_lock(?)")) {
+    try (PreparedStatement lock =
+        c.prepareStatement("SELECT pg_catalog.pg_advisory_xact_lock(?)")) {
       lock.setLong(1, LOCK_KEY);
       lock.execute();
     }
@@ -118,7 +133,9 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
     boolean anchored = false;
     try (PreparedStatement ps =
             c.prepareStatement(
-                "SELECT head_hash, row_count, keyed FROM shredding_erasure_anchor WHERE id = 1");
+                "SELECT head_hash, row_count, keyed FROM "
+                    + anchorTable
+                    + " WHERE (id OPERATOR(pg_catalog.=) 1)");
         ResultSet rs = ps.executeQuery()) {
       if (rs.next()) {
         prev = rs.getString(1);
@@ -133,7 +150,9 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
     ErasureRecord linked = chain.link(record, prev);
     try (PreparedStatement ps =
         c.prepareStatement(
-            "INSERT INTO shredding_erasure_anchor (id, head_hash, row_count, updated_at, keyed)"
+            "INSERT INTO "
+                + anchorTable
+                + " (id, head_hash, row_count, updated_at, keyed)"
                 + " VALUES (1, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET"
                 + " head_hash = EXCLUDED.head_hash, row_count = EXCLUDED.row_count,"
                 + " updated_at = EXCLUDED.updated_at")) {
@@ -145,7 +164,9 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
     }
     try (PreparedStatement ps =
         c.prepareStatement(
-            "INSERT INTO shredding_erasure (ts, tenant, subject_pseudonym, requested_by, reason,"
+            "INSERT INTO "
+                + erasureTable
+                + " (ts, tenant, subject_pseudonym, requested_by, reason,"
                 + " keys_destroyed, entity_count, field_count, blind_index_cleared, outcome,"
                 + " hook_outcomes, backup_clear_at, chain_version, key_id, prev_hash, hash)"
                 + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING seq")) {
@@ -173,12 +194,15 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
     }
   }
 
-  private static List<Integer> lockKeyRows(Connection c, TenantId tenant, SubjectId subject)
+  private List<Integer> lockKeyRows(Connection c, TenantId tenant, SubjectId subject)
       throws SQLException {
     var versions = new ArrayList<Integer>();
     try (PreparedStatement ps =
         c.prepareStatement(
-            "SELECT version FROM shredding_data_key WHERE tenant = ? AND subject = ?"
+            "SELECT version FROM "
+                + dataKeyTable
+                + " WHERE (tenant OPERATOR(pg_catalog.=) ?)"
+                + " AND (subject OPERATOR(pg_catalog.=) ?)"
                 + " ORDER BY version FOR UPDATE")) {
       ps.setString(1, tenant.value());
       ps.setString(2, subject.value());
@@ -195,23 +219,27 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
    * Records that this subject is erased. The key rows are gone; this row holds no key material and
    * exists so a later write cannot mint a fresh key and quietly undo the erasure (control 11).
    */
-  private static void tombstone(Connection c, TenantId tenant, SubjectId subject)
-      throws SQLException {
+  private void tombstone(Connection c, TenantId tenant, SubjectId subject) throws SQLException {
     try (PreparedStatement ps =
         c.prepareStatement(
-            "INSERT INTO shredding_erased_subject (tenant, subject, erased_at)"
-                + " VALUES (?,?,now()) ON CONFLICT (tenant, subject) DO NOTHING")) {
+            "INSERT INTO "
+                + erasedSubjectTable
+                + " (tenant, subject, erased_at)"
+                + " VALUES (?,?,pg_catalog.now()) ON CONFLICT (tenant, subject) DO NOTHING")) {
       ps.setString(1, tenant.value());
       ps.setString(2, subject.value());
       ps.executeUpdate();
     }
   }
 
-  private static boolean alreadyErased(Connection c, TenantId tenant, SubjectId subject)
+  private boolean alreadyErased(Connection c, TenantId tenant, SubjectId subject)
       throws SQLException {
     try (PreparedStatement ps =
         c.prepareStatement(
-            "SELECT 1 FROM shredding_erased_subject WHERE tenant = ? AND subject = ?")) {
+            "SELECT 1 FROM "
+                + erasedSubjectTable
+                + " WHERE (tenant OPERATOR(pg_catalog.=) ?)"
+                + " AND (subject OPERATOR(pg_catalog.=) ?)")) {
       ps.setString(1, tenant.value());
       ps.setString(2, subject.value());
       try (ResultSet rs = ps.executeQuery()) {
@@ -220,12 +248,15 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
     }
   }
 
-  private static int deleteKeyRows(Connection c, TenantId tenant, SubjectId subject)
-      throws SQLException {
+  private int deleteKeyRows(Connection c, TenantId tenant, SubjectId subject) throws SQLException {
     // A DELETE, not an overwrite followed by a delete: under MVCC an overwrite only writes a
     // second heap tuple that still holds the same key, so the assurance it implies is false.
     try (PreparedStatement ps =
-        c.prepareStatement("DELETE FROM shredding_data_key WHERE tenant = ? AND subject = ?")) {
+        c.prepareStatement(
+            "DELETE FROM "
+                + dataKeyTable
+                + " WHERE (tenant OPERATOR(pg_catalog.=) ?)"
+                + " AND (subject OPERATOR(pg_catalog.=) ?)")) {
       ps.setString(1, tenant.value());
       ps.setString(2, subject.value());
       return ps.executeUpdate();
@@ -247,11 +278,11 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
               + column.table().sql()
               + " SET "
               + column.column().sql()
-              + " = NULL WHERE "
+              + " = NULL WHERE ("
               + column.tenantColumn().sql()
-              + " = ? AND "
+              + " OPERATOR(pg_catalog.=) ?) AND ("
               + column.subjectColumn().sql()
-              + " = ? AND "
+              + " OPERATOR(pg_catalog.=) ?) AND "
               + column.column().sql()
               + " IS NOT NULL";
       try (PreparedStatement ps = c.prepareStatement(sql)) {
@@ -330,13 +361,13 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
       }
       // Identifiers validated at startup (BlindIndexColumn); values are bind parameters.
       String sameText =
-          "SELECT count(*) FROM "
+          "SELECT pg_catalog.count(*) FROM "
               + column.table().sql()
-              + " WHERE "
+              + " WHERE ("
               + column.tenantColumn().sql()
-              + " = ? AND "
+              + " OPERATOR(pg_catalog.=) ?) AND ("
               + column.subjectColumn().sql()
-              + " = ? AND "
+              + " OPERATOR(pg_catalog.=) ?) AND "
               + column.column().sql()
               + " IS NOT NULL";
       try (PreparedStatement ps = c.prepareStatement(sameText)) {
@@ -360,14 +391,23 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
           }
         }
       }
+      // The tenant leg is spelled out rather than written IS DISTINCT FROM (finding C-A-6). The
+      // keyword form reaches the type's own `=` along search_path and has no
+      // OPERATOR(pg_catalog....) spelling at all, so it was the one name in this module that
+      // qualification could not reach. A bare OPERATOR(pg_catalog.<>) is not equivalent here: the
+      // tenant column is nullable and `NULL <> ?` is NULL, which drops exactly the rows this WARN
+      // exists to find. `(<tenant> IS NULL OR NOT (<tenant> = ?))` is equivalent for the non-null
+      // bound value this always passes, and every name in it is pg_catalog's.
       String elsewhere =
-          "SELECT count(*) FROM "
+          "SELECT pg_catalog.count(*) FROM "
               + column.table().sql()
-              + " WHERE "
+              + " WHERE ("
               + column.subjectColumn().sql()
-              + " = ? AND "
+              + " OPERATOR(pg_catalog.=) ?) AND ("
               + column.tenantColumn().sql()
-              + " IS DISTINCT FROM ? AND "
+              + " IS NULL OR NOT ("
+              + column.tenantColumn().sql()
+              + " OPERATOR(pg_catalog.=) ?)) AND "
               + column.column().sql()
               + " IS NOT NULL";
       try (PreparedStatement ps = c.prepareStatement(elsewhere)) {
@@ -401,7 +441,10 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
               c.prepareStatement(
                   "SELECT "
                       + COLUMNS
-                      + " FROM shredding_erasure WHERE tenant = ? AND subject_pseudonym = ?"
+                      + " FROM "
+                      + erasureTable
+                      + " WHERE (tenant OPERATOR(pg_catalog.=) ?)"
+                      + " AND (subject_pseudonym OPERATOR(pg_catalog.=) ?)"
                       // CIPHER-15: the log is append-only and seq is its own monotonic bigserial;
                       // ts is clock.instant() from the application and a backwards clock step
                       // (NTP, a container resume, two nodes disagreeing) between two appends could
@@ -425,7 +468,9 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
         c -> {
           try (PreparedStatement ps =
                   c.prepareStatement(
-                      "SELECT head_hash, row_count, keyed FROM shredding_erasure_anchor WHERE id = 1");
+                      "SELECT head_hash, row_count, keyed FROM "
+                          + anchorTable
+                          + " WHERE (id OPERATOR(pg_catalog.=) 1)");
               ResultSet rs = ps.executeQuery()) {
             return rs.next()
                 ? Optional.of(new Anchor(rs.getString(1), rs.getLong(2), rs.getBoolean(3)))
@@ -444,7 +489,9 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
               c.prepareStatement(
                   "SELECT "
                       + COLUMNS
-                      + " FROM shredding_erasure WHERE seq > ? ORDER BY seq ASC LIMIT ?")) {
+                      + " FROM "
+                      + erasureTable
+                      + " WHERE (seq OPERATOR(pg_catalog.>) ?) ORDER BY seq ASC LIMIT ?")) {
             ps.setLong(1, afterSequence);
             ps.setInt(2, capped);
             try (ResultSet rs = ps.executeQuery()) {
@@ -462,13 +509,14 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
 
   private TrailState trailState(Connection c) throws SQLException {
     try (PreparedStatement ps =
-            c.prepareStatement("SELECT keyed FROM shredding_erasure_anchor WHERE id = 1");
+            c.prepareStatement(
+                "SELECT keyed FROM " + anchorTable + " WHERE (id OPERATOR(pg_catalog.=) 1)");
         ResultSet rs = ps.executeQuery()) {
       if (rs.next()) {
         return new TrailState(true, rs.getBoolean(1), true);
       }
     }
-    try (PreparedStatement ps = c.prepareStatement("SELECT 1 FROM shredding_erasure LIMIT 1");
+    try (PreparedStatement ps = c.prepareStatement("SELECT 1 FROM " + erasureTable + " LIMIT 1");
         ResultSet rs = ps.executeQuery()) {
       return new TrailState(false, false, rs.next());
     }

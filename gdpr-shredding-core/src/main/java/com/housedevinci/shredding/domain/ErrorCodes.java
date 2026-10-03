@@ -111,6 +111,52 @@ public final class ErrorCodes {
   public static final String READ_UNVERIFIED = "SHRED-READ-UNVERIFIED";
 
   /**
+   * C-12-1, startup schema verification. None of the module's four tables exist in the resolved
+   * schema. The module never creates them with the application's own credentials: a role that can
+   * run DDL owns the erasure tables and the guard functions, and an owner can disable or replace
+   * its own guards, so control 8 would not hold against the application in any configuration.
+   */
+  public static final String SCHEMA_ABSENT = "SHRED-SCHEMA-001";
+
+  /**
+   * The objects exist but are missing or wrong in shape: a table, a column, the sequence or a
+   * constraint.
+   */
+  public static final String SCHEMA_INCOMPLETE = "SHRED-SCHEMA-002";
+
+  /**
+   * A guard is not load-bearing: a trigger missing, extra, disabled, not {@code ENABLE ALWAYS} or
+   * pointing at the wrong function; a guard function body that differs from the bundled script; or
+   * a rule, a row-level-security flag or a policy on one of the four tables. Control 8 (append-only
+   * erasure log) and control 11 (erasure tombstone) do not hold.
+   */
+  public static final String SCHEMA_UNGUARDED = "SHRED-SCHEMA-003";
+
+  /**
+   * The runtime database role is privileged over the module's objects; see the message for the
+   * legs.
+   */
+  public static final String RUNTIME_ROLE_PRIVILEGED = "SHRED-SCHEMA-004";
+
+  /**
+   * Verification could not complete: a catalogue read was refused, the connection was lost, or the
+   * bundled schema resource was unreadable. Never a pass and never a warning - unverifiable is not
+   * clean.
+   */
+  public static final String SCHEMA_UNVERIFIABLE = "SHRED-SCHEMA-005";
+
+  /** {@code shredding.jdbc.initialize-schema=true} and the DDL failed. */
+  public static final String SCHEMA_CREATION_FAILED = "SHRED-SCHEMA-006";
+
+  /**
+   * A privilege the adapters need is missing. Never downgraded by {@code
+   * shredding.jdbc.allow-privileged-runtime-role}: an application that cannot write the erasure log
+   * is broken, not differently configured, and boot is a better place to learn that than the first
+   * erasure request.
+   */
+  public static final String RUNTIME_ROLE_UNDERPRIVILEGED = "SHRED-SCHEMA-007";
+
+  /**
    * C-20: a Spring Data repository call was bracketed, but the module could not establish that
    * every {@code EntityManagerFactory} bean in the application is the one instance {@code
    * ShreddingIntegrator} is wired to. A bracket that cannot tell which Hibernate session it is
