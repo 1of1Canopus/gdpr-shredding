@@ -514,10 +514,12 @@ class CipherProbeWindowPr14Test {
   }
 
   /**
-   * T3c and T2e, at the SQL level, which is where this statement's exposure can be seen at all: the
-   * cross-tenant WARN count's {@code IS DISTINCT FROM} reaches the type's own {@code =} and has no
-   * {@code OPERATOR(pg_catalog....)} spelling. The shape below is the one {@code verifyCleared}
-   * builds, with the same conjuncts and the same bind positions.
+   * T3c and T2e, at the SQL level, which is where the exposure of the <em>earlier</em> spelling of
+   * the cross-tenant WARN count could be seen at all: {@code IS DISTINCT FROM} reaches the type's
+   * own {@code =} and has no {@code OPERATOR(pg_catalog....)} spelling. That is a historical shape,
+   * kept as a measurement of what the window does for a name qualification cannot reach. It is not
+   * what {@code verifyCleared} builds today: since C-A-6 the count is written with {@code
+   * OPERATOR(pg_catalog.=)} and, since C-18-6, runs outside any window.
    *
    * <p>Two parameter typings, because they do not answer the same (and the design page claimed only
    * the first): with {@code stringtype=varchar} the driver declares the parameter {@code varchar},

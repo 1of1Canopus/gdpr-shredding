@@ -167,9 +167,10 @@ class CipherProbeWindowPr14StarterTest {
   }
 
   /**
-   * The cross-tenant WARN count, which gets its own window (M9, ruled the review's way): it is the
-   * one statement this module builds that contains a name qualification cannot reach, {@code IS
-   * DISTINCT FROM}, which is the type's own {@code =} behind a grammar keyword.
+   * The cross-tenant WARN count. It runs outside any window since C-18-6: every name in it is
+   * {@code pg_catalog}'s and its relation is two-part. It was once the one statement this module
+   * built with a name qualification could not reach, {@code IS DISTINCT FROM}, the type's own
+   * {@code =} behind a grammar keyword; C-A-6 removed that spelling.
    *
    * <p><b>What this case can and cannot show, measured here rather than assumed.</b> The wrong
    * answer T3c measured (2 where the truth is 1) is <em>not</em> reachable end to end, and that is
@@ -181,9 +182,9 @@ class CipherProbeWindowPr14StarterTest {
    * the SQL level with the parameter typed both ways, by {@code
    * CipherProbeWindowPr14Test#probe_the_cross_tenant_shape_is_only_correct_inside_the_window}.
    *
-   * <p>What this case holds is the other half: the second window must not change the erasure's
-   * behaviour or the WARN's content. It is green before and after, and red if the window swallows
-   * the count, loses the WARN, or re-points the connection it was handed.
+   * <p>What this case holds is the other half: the count must report only the rows under other
+   * tenants and must not change the erasure's behaviour. It is red if the count is lost, counts the
+   * wrong rows, or re-points the connection it was handed.
    */
   @Test
   void probe_the_cross_tenant_warn_counts_only_the_rows_under_other_tenants() {
