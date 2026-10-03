@@ -45,7 +45,12 @@ All notable changes to this project. The format follows
   role itself while it holds `TEMPORARY`; and a plain `SET search_path` issued between two adapter
   calls on a pooled connection. Qualification closes all three in this module's own SQL. The
   application's own tables, reached through the entity mapping by the blind-index clear and the
-  Hibernate-rendered read-back, are deliberately left where the mapping puts them.
+  Hibernate-rendered read-back, are deliberately left where the mapping puts them. The one
+  predicate that had no qualified spelling - the cross-tenant residual WARN's
+  `<tenant> IS DISTINCT FROM ?`, a keyword operator that reaches the type's own `=` - is now
+  written `(<tenant> IS NULL OR NOT (<tenant> OPERATOR(pg_catalog.=) ?))`, which is equivalent for
+  the non-null value it binds. No statement of this module resolves a name through `search_path`
+  any more except the application tables named above.
 - **Startup verification no longer asks the role it is judging.** A function name resolves along
   `search_path` exactly as a relation name does, any role may `ALTER ROLE <itself> SET search_path`,
   and an application role normally owns a schema it can define functions in - so `pg_has_role`,
