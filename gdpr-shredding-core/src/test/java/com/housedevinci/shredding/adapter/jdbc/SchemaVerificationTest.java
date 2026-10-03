@@ -1271,7 +1271,7 @@ class SchemaVerificationTest {
       "CREATE FUNCTION "
           + schema
           + ".current_setting(text) RETURNS text"
-          + " AS $$ SELECT 'on'::text $$ LANGUAGE sql",
+          + " AS $$ SELECT 'on'::pg_catalog.text $$ LANGUAGE sql",
       "CREATE FUNCTION "
           + schema
           + ".has_schema_privilege(name, oid, text) RETURNS boolean"
@@ -1295,15 +1295,15 @@ class SchemaVerificationTest {
       "CREATE FUNCTION "
           + schema
           + ".format_type(oid, integer) RETURNS text"
-          + " AS $$ SELECT 'not the type you expected'::text $$ LANGUAGE sql",
+          + " AS $$ SELECT 'not the type you expected'::pg_catalog.text $$ LANGUAGE sql",
       "CREATE FUNCTION "
           + schema
           + ".pg_get_constraintdef(oid) RETURNS text"
-          + " AS $$ SELECT 'CHECK (true)'::text $$ LANGUAGE sql",
+          + " AS $$ SELECT 'CHECK (true)'::pg_catalog.text $$ LANGUAGE sql",
       "CREATE FUNCTION "
           + schema
           + ".pg_get_function_result(oid) RETURNS text"
-          + " AS $$ SELECT 'void'::text $$ LANGUAGE sql",
+          + " AS $$ SELECT 'void'::pg_catalog.text $$ LANGUAGE sql",
       "CREATE FUNCTION "
           + schema
           + ".current_schema() RETURNS name"

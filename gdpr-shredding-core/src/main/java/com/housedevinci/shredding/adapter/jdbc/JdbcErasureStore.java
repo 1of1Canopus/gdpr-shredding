@@ -391,14 +391,23 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
           }
         }
       }
+      // The tenant leg is spelled out rather than written IS DISTINCT FROM (finding C-A-6). The
+      // keyword form reaches the type's own `=` along search_path and has no
+      // OPERATOR(pg_catalog....) spelling at all, so it was the one name in this module that
+      // qualification could not reach. A bare OPERATOR(pg_catalog.<>) is not equivalent here: the
+      // tenant column is nullable and `NULL <> ?` is NULL, which drops exactly the rows this WARN
+      // exists to find. `(<tenant> IS NULL OR NOT (<tenant> = ?))` is equivalent for the non-null
+      // bound value this always passes, and every name in it is pg_catalog's.
       String elsewhere =
           "SELECT pg_catalog.count(*) FROM "
               + column.table().sql()
               + " WHERE ("
               + column.subjectColumn().sql()
-              + " OPERATOR(pg_catalog.=) ?) AND "
+              + " OPERATOR(pg_catalog.=) ?) AND ("
               + column.tenantColumn().sql()
-              + " IS DISTINCT FROM ? AND "
+              + " IS NULL OR NOT ("
+              + column.tenantColumn().sql()
+              + " OPERATOR(pg_catalog.=) ?)) AND "
               + column.column().sql()
               + " IS NOT NULL";
       try (PreparedStatement ps = c.prepareStatement(elsewhere)) {
