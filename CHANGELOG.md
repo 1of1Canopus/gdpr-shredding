@@ -15,6 +15,12 @@ All notable changes to this project. The format follows
   core and starter modules have no dependency path to it. Spring Boot 4.1.1 is the latest
   4.1.x patch and does not yet ship the fix, so the property is overridden directly rather than
   waiting on a BOM bump.
+- Bumped the same `jackson-bom.version` pin from 3.1.6 to 3.1.7 for two further HIGH advisories
+  published after the pin above landed: GHSA-cxp5-3px4-pw24 (quadratic forward-reference
+  completion) and GHSA-wv8q-qhhj-9h54 (retains every unknown raw type ID), both affecting
+  `tools.jackson.core:jackson-databind` <= 3.1.6 and fixed in 3.1.7. The 3.1.6 pin was itself
+  affected. Same dependency path as above; only `gdpr-shredding-sample` resolves
+  `jackson-databind` at all, now at 3.1.7.
 
 ### Changed
 - **BREAKING. The application no longer creates its own database schema, and refuses to start
