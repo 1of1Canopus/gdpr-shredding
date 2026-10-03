@@ -344,7 +344,11 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
    */
   private void verifyCleared(Connection c, TenantId tenant, SubjectId subject) throws SQLException {
     for (BlindIndexColumn column : blindIndexColumns) {
-      long independent = residual.count(c, column, tenant, subject);
+      // C-13-14: the one statement of this erasure whose text this module did not write. It is
+      // rendered by Hibernate from the entity mapping, so there is no name in it to qualify, and
+      // the only mechanism left is the session's own candidate set. One statement, its own window.
+      long independent =
+          JdbcSupport.inOneStatementWindow(c, () -> residual.count(c, column, tenant, subject));
       if (independent > 0) {
         throw new ShreddingException(
             ErrorCodes.ERASURE_INDEX_RESIDUAL,
@@ -401,24 +405,35 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
               + " IS DISTINCT FROM ? AND "
               + column.column().sql()
               + " IS NOT NULL";
-      try (PreparedStatement ps = c.prepareStatement(elsewhere)) {
-        ps.setString(1, subject.value());
-        ps.setString(2, tenant.value());
-        try (ResultSet rs = ps.executeQuery()) {
-          long other = rs.next() ? rs.getLong(1) : 0L;
-          if (other > 0) {
-            log.warn(
-                "shredding: this subject also has {} blind index value(s) in {}.{} under other"
-                    + " tenant values, which this erasure does not destroy. That is legitimate when"
-                    + " another tenant uses the same subject identifier for a different person, and"
-                    + " is a leftover when it is the same person - a row whose tenant column was"
-                    + " changed by a bulk update outside Hibernate keeps an index derived under its"
-                    + " former tenant. Erase that tenant too, or re-derive the index.",
-                other,
-                column.table(),
-                column.column().sql());
-          }
-        }
+      // Its own window, not a wider one shared with the read-back above (M9, ruled by the second
+      // design review). `IS DISTINCT FROM` is the type's own `=` behind a grammar keyword: it has
+      // no OPERATOR(pg_catalog....) spelling, and the tenant column is nullable, so `<>` is not
+      // equivalent and the statement cannot be made sound by qualification. Two more round trips
+      // on an operation that already takes an advisory lock, a SELECT ... FOR UPDATE, a DELETE and
+      // a hash-chain append, in exchange for an invariant that stays one statement wide.
+      long other =
+          JdbcSupport.inOneStatementWindow(
+              c,
+              () -> {
+                try (PreparedStatement ps = c.prepareStatement(elsewhere)) {
+                  ps.setString(1, subject.value());
+                  ps.setString(2, tenant.value());
+                  try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next() ? rs.getLong(1) : 0L;
+                  }
+                }
+              });
+      if (other > 0) {
+        log.warn(
+            "shredding: this subject also has {} blind index value(s) in {}.{} under other"
+                + " tenant values, which this erasure does not destroy. That is legitimate when"
+                + " another tenant uses the same subject identifier for a different person, and"
+                + " is a leftover when it is the same person - a row whose tenant column was"
+                + " changed by a bulk update outside Hibernate keeps an index derived under its"
+                + " former tenant. Erase that tenant too, or re-derive the index.",
+            other,
+            column.table(),
+            column.column().sql());
       }
     }
   }

@@ -60,7 +60,11 @@ final class SchemaVerification {
    * Every catalogue relation here is qualified as well, so this changes no answer today - it
    * removes the question for the next line.
    */
-  private static final String PINNED_PATH = "pg_catalog, pg_temp";
+  /**
+   * The same constant the one-statement window of {@link JdbcSupport#inOneStatementWindow} uses:
+   * one pinned value in this module, not two (design section 6).
+   */
+  private static final String PINNED_PATH = JdbcSupport.PINNED_PATH;
 
   /**
    * Verifies in <b>one read-only transaction of its own</b> (C-13-4). Without this the eleven

@@ -416,6 +416,208 @@ class CipherProbeWindowPr14Test {
     assertThat(keyRows()).isEqualTo(1);
   }
 
+  // ------------------------------------- the window itself, on its own API
+
+  /**
+   * N17 and T19. The restore sends back the bytes {@code current_setting} returned, so it is
+   * byte-exact for every shape a session can arrive carrying - including the two that do not round
+   * trip through any re-composed spelling (T18): the empty path, which reports as {@code ""}, and
+   * the stock default set as one quoted literal, which reports as {@code """$user"", public"}.
+   */
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "decoy, app, pg_catalog",
+        "''",
+        "'\"$user\", public'",
+        "\"My Shred\", \"s\"\"q\", app, pg_catalog",
+        "pg_temp, decoy, app"
+      })
+  void probe_the_window_restores_every_arrived_path_shape(String arrived) throws Exception {
+    DataSource app = freshPool(APP);
+    try (Connection c = app.getConnection()) {
+      c.setAutoCommit(false);
+      exec(c, "SET search_path = " + arrived);
+      String before = searchPathOf(c);
+
+      long answer =
+          JdbcSupport.inOneStatementWindow(
+              c, () -> one(c, "SELECT pg_catalog.count(*) FROM pg_catalog.pg_class"));
+
+      assertThat(answer).describedAs("the statement ran inside the window").isPositive();
+      assertThat(searchPathOf(c))
+          .describedAs("byte-equal, for the arrived shape <%s>", arrived)
+          .isEqualTo(before);
+      c.rollback();
+    }
+  }
+
+  /**
+   * N18, measured as T7. In auto-commit a {@code set_config(..., true)} <em>returns</em> the pinned
+   * value while the next statement sees the old path, so a window opened there would be the fiction
+   * it exists to detect. It is refused before anything on the connection is touched.
+   */
+  @Test
+  void probe_the_window_refuses_an_auto_commit_connection_and_changes_nothing() throws Exception {
+    DataSource app = freshPool(APP);
+    try (Connection c = app.getConnection()) {
+      exec(c, "SET search_path = app, pg_catalog");
+      String before = searchPathOf(c);
+
+      assertThatThrownBy(() -> JdbcSupport.inOneStatementWindow(c, () -> 1L))
+          .isInstanceOf(ShreddingException.class)
+          .hasFieldOrPropertyWithValue("code", "SHRED-SCHEMA-008")
+          .hasMessageContaining("auto-commit")
+          .hasMessageContaining("independent read-back");
+      assertThat(searchPathOf(c)).isEqualTo(before);
+    }
+  }
+
+  /**
+   * C-20, and the measurement that changed the restore. The design page expected a non-local {@code
+   * SET} inside the window to be "read by step 6 and refused by the comparison". It is not: a
+   * transaction-local {@code set_config} shadows a non-local {@code SET} for the rest of the
+   * transaction, so a local restore reads back exactly the bytes it sent and sees nothing - and at
+   * {@code COMMIT} the local value is discarded and the session keeps the attacker's. The restore
+   * is therefore sent with {@code is_local = false}, which makes it the last writer either way, and
+   * this test is what holds it there: with a local restore the final assertion reads {@code
+   * pg_temp}.
+   *
+   * <p>The only way to execute a {@code SET} inside the window at all is a plpgsql body the
+   * framework-rendered statement reaches - an RLS policy function, or a function called from a
+   * mapped view (M8).
+   */
+  @Test
+  void probe_a_non_local_set_inside_the_window_does_not_survive_the_window() throws Exception {
+    DataSource app = freshPool(APP);
+    try (Connection c = app.getConnection()) {
+      c.setAutoCommit(false);
+      String arrived = searchPathOf(c);
+
+      long answer =
+          JdbcSupport.inOneStatementWindow(
+              c,
+              () -> {
+                exec(c, "SET search_path = pg_temp");
+                return 1L;
+              });
+
+      assertThat(answer).isEqualTo(1L);
+      assertThat(searchPathOf(c)).isEqualTo(arrived);
+      c.commit();
+      assertThat(searchPathOf(c))
+          .describedAs(
+              "after the commit too: a transaction-local restore would have been discarded here and"
+                  + " the session would have kept the SET issued inside the window")
+          .isEqualTo(arrived);
+    }
+  }
+
+  /**
+   * T3c and T2e, at the SQL level, which is where this statement's exposure can be seen at all: the
+   * cross-tenant WARN count's {@code IS DISTINCT FROM} reaches the type's own {@code =} and has no
+   * {@code OPERATOR(pg_catalog....)} spelling. The shape below is the one {@code verifyCleared}
+   * builds, with the same conjuncts and the same bind positions.
+   *
+   * <p>Two parameter typings, because they do not answer the same (and the design page claimed only
+   * the first): with {@code stringtype=varchar} the driver declares the parameter {@code varchar},
+   * the shadow is an exact match and the count answers <b>2</b> where the truth is 1; with pgjdbc's
+   * default {@code unspecified} the server resolves the keyword operator to {@code pg_catalog}
+   * anyway and the count is already truthful. Inside the window both answer 1, which is the only
+   * posture that does not depend on a driver setting the application chose.
+   */
+  @Test
+  void probe_the_cross_tenant_shape_is_only_correct_inside_the_window() throws Exception {
+    var fixture = fixtureWithResidueThatCannotBeCleared();
+    shadow(
+        fixture.own,
+        "CREATE FUNCTION "
+            + OWN
+            + ".vc(pg_catalog.varchar, pg_catalog.varchar)"
+            + " RETURNS boolean AS $$ SELECT false $$ LANGUAGE sql",
+        "CREATE OPERATOR "
+            + OWN
+            + ".= (LEFTARG = pg_catalog.varchar,"
+            + " RIGHTARG = pg_catalog.varchar, FUNCTION = "
+            + OWN
+            + ".vc)");
+    exec(
+        superuserDs,
+        "INSERT INTO public.customer (tenant_id, customer_id, email_bidx)"
+            + " VALUES ('t2', 's1', 'other-tenant-residue')");
+    su("ALTER ROLE " + APP + " SET search_path = public, " + OWN + ", pg_catalog");
+    String sql =
+        "SELECT pg_catalog.count(*) FROM public.customer"
+            + " WHERE (customer_id OPERATOR(pg_catalog.=) ?)"
+            + " AND tenant_id IS DISTINCT FROM ? AND email_bidx IS NOT NULL";
+
+    for (boolean declared : List.of(true, false)) {
+      HikariDataSource ds = declared ? declaredVarcharPool() : oneConnectionPool(APP);
+      try (Connection c = ds.getConnection()) {
+        c.setAutoCommit(false);
+        long outside = crossTenant(c, sql);
+        long inside = JdbcSupport.inOneStatementWindow(c, () -> crossTenant(c, sql));
+
+        assertThat(inside)
+            .describedAs(
+                "inside the window the keyword operator can only resolve from pg_catalog, so the"
+                    + " count is the truth - one row, under t2 (declared parameter: %s)",
+                declared)
+            .isEqualTo(1L);
+        if (declared) {
+          assertThat(outside)
+              .describedAs(
+                  "with the parameter declared varchar the shadow is an exact match and the row"
+                      + " this erasure is about to clear is counted as another tenant's leftover")
+              .isEqualTo(2L);
+        }
+        c.rollback();
+      }
+    }
+  }
+
+  private static long crossTenant(Connection c, String sql) throws SQLException {
+    try (PreparedStatement ps = c.prepareStatement(sql)) {
+      ps.setString(1, SUBJECT.value());
+      ps.setString(2, TENANT.value());
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? rs.getLong(1) : 0L;
+      }
+    }
+  }
+
+  private static long one(Connection c, String sql) throws SQLException {
+    try (Statement st = c.createStatement();
+        ResultSet rs = st.executeQuery(sql)) {
+      return rs.next() ? rs.getLong(1) : 0L;
+    }
+  }
+
+  private static String searchPathOf(Connection c) throws SQLException {
+    try (Statement st = c.createStatement();
+        ResultSet rs = st.executeQuery("SELECT pg_catalog.current_setting('search_path')")) {
+      return rs.next() ? rs.getString(1) : null;
+    }
+  }
+
+  private static void exec(Connection c, String sql) throws SQLException {
+    try (Statement st = c.createStatement()) {
+      st.execute(sql);
+    }
+  }
+
+  /** A pool whose driver declares every {@code setString} parameter as {@code varchar}. */
+  private HikariDataSource declaredVarcharPool() {
+    var config = new HikariConfig();
+    config.setJdbcUrl(POSTGRES.getJdbcUrl() + "?stringtype=varchar");
+    config.setUsername(APP);
+    config.setPassword("pw");
+    config.setMaximumPoolSize(1);
+    var ds = new HikariDataSource(config);
+    perTest.add(ds);
+    return ds;
+  }
+
   // ------------------------------------------------------------------ the fixture
 
   private record Fixture(VerifiedSchema schema, HikariDataSource own) {}
