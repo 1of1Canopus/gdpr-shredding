@@ -102,7 +102,11 @@ auto-enabled `@Filter` condition, on an entity with a `@BlindIndex` field is ren
 read-back. Schema-qualify every function, relation and non-keyword type they name, for example
 `@SQLRestriction("public.pr18_visible(owner_id)")`; an unqualified name makes every erasure of that
 entity fail, loudly, and the erasure rolls back whole.
-A `LANGUAGE sql` body resolves its names at creation time and is unaffected.
+A `LANGUAGE sql` function written with a string body (`AS $$ ... $$`) is parsed again when it runs
+and fails there exactly like plpgsql; only a SQL-standard body (`BEGIN ATOMIC ... END` or
+`RETURN ...`, PostgreSQL 14 and later) binds its names when the function is created and is
+unaffected. For either kind, the remedy is the `ALTER FUNCTION` above, or rewriting the function
+with a SQL-standard body.
 
 ## Steps
 

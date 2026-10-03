@@ -1000,10 +1000,13 @@ erasure of that entity fail, loudly and with the transaction rolled back whole (
 still present afterwards), while the application itself reads and writes the entity normally. The
 remedy is to schema-qualify every function, relation and non-keyword type those fragments name, for
 example `@SQLRestriction("public.pr18_visible(owner_id)")`; a qualified function whose body resolves
-names at run time needs the remedy below as well. A `LANGUAGE sql` body resolves
-its names at creation time and is immune. If you have such a function, give it its own clause:
-`ALTER FUNCTION <fn> SET search_path = <schema>, pg_catalog` — the same mechanism this module gives
-its own guards. The failure mode is availability of that one erasure, fail-closed, and it is
+names at run time needs the remedy below as well. A string-body `LANGUAGE sql` function (`AS $$ ... $$`) is parsed again each time it runs, on the
+path in force then, so inside the window it behaves exactly like a plpgsql function and fails with
+`relation "..." does not exist`. Only a SQL-standard body (`BEGIN ATOMIC ... END` or `RETURN ...`,
+PostgreSQL 14 and later) binds its names when the function is created and is unaffected. If you
+have a function of either kind that names something unqualified, give it its own clause:
+`ALTER FUNCTION <fn> SET search_path = <schema>, pg_catalog` (the same mechanism this module gives
+its own guards), or rewrite it with a SQL-standard body. The failure mode is availability of that one erasure, fail-closed, and it is
 reported with the database's own message.
 - The **mapping admission** — whether the relation a `@Shredded` entity names is an ordinary
   permanent table, reachable, not hidden by a row-level-security policy, and whose compared columns

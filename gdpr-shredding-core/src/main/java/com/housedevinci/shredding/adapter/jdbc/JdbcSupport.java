@@ -194,8 +194,11 @@ public final class JdbcSupport {
    *
    * <p><b>What a {@code SELECT} can still run in here (M8).</b> A row-level-security policy
    * function and a function called from a mapped view resolve their own unqualified names inside
-   * this window and fail loudly; a {@code LANGUAGE sql} body resolves at creation time and is
-   * immune. The remedy is in SECURITY-NOTES: {@code ALTER FUNCTION ... SET search_path}.
+   * this window and fail loudly. So does a string-body {@code LANGUAGE sql} function ({@code AS
+   * $$ ... $$}), which is parsed again when it runs and behaves like plpgsql here; only a
+   * SQL-standard body ({@code BEGIN ATOMIC ... END} or {@code RETURN ...}) binds its names when the
+   * function is created. The remedy for either is in SECURITY-NOTES: {@code ALTER FUNCTION ... SET
+   * search_path}, or rewriting the function with a SQL-standard body.
    *
    * @throws com.housedevinci.shredding.domain.ShreddingException {@code SHRED-SCHEMA-008} when the
    *     replacement cannot be established, or when the session is not carrying the bytes it arrived
