@@ -31,12 +31,29 @@ for that state rather than for a tidy one.
 | relation names in SQL | unqualified | qualified to the schema verified at boot |
 | `JdbcSupport.runtimeRoleOwnsErasureTable` | public | **removed** |
 | `JdbcKeyProvider` / `JdbcErasureStore` constructors | `(DataSource, ...)` | `(DataSource, VerifiedSchema, ...)` |
-| guard function bodies | `RAISE EXCEPTION 'shredding_erasure is append-only ...'` | `RAISE EXCEPTION '% is append-only ...', TG_TABLE_NAME, TG_OP` |
+| guard function bodies | `RAISE EXCEPTION 'shredding_erasure is append-only ...'` | `RAISE EXCEPTION '% is append-only ...', TG_TABLE_NAME, TG_OP`, every operator written `OPERATOR(pg_catalog....)` and fully parenthesised |
+| guard function `search_path` | none, so a body resolved its operator names in the path of whoever wrote to the table | `SET search_path = pg_catalog, pg_temp` on all three, verified as an exact one-element `pg_proc.proconfig` |
+| operators, types, casts and functions in SQL | unqualified | `OPERATOR(pg_catalog....)`, `::pg_catalog....`, `pg_catalog....` - in the adapters, in the bundled script, and in the three statements the starter builds on the application's own connection |
 | trigger state | whatever `CREATE TRIGGER` left (`O`) | the script sets all seven to `ENABLE ALWAYS` |
 
 The guard-body change matters for the upgrade: from 0.2.0 the bodies are verified material, so an
 installation that upgrades the jar without re-applying the script is refused with a message naming
-the function. Re-applying the script is step 3 and it is mandatory, not cosmetic.
+the function. Re-applying the script is step 3 and it is mandatory, not cosmetic. The same is true of
+the `search_path` clause the script now puts on all three guard functions: `pg_proc.proconfig` is
+compared against exactly `{"search_path=pg_catalog, pg_temp"}`, and anything else - absent, a second
+setting beside it, or a spelling that stores different text such as
+`SET search_path TO 'pg_catalog, pg_temp'` - is `SHRED-SCHEMA-003`. The one supported producer of
+that clause is the bundled script.
+
+**A trap worth one line of your runbook, measured:** `CREATE OR REPLACE FUNCTION` with no `SET`
+clause silently resets `proconfig` to NULL, with no error. Re-applying an *older* copy of
+`schema-postgresql.sql` over a 0.2.0 schema therefore disarms the clause on all three guards and the
+next boot refuses. Re-apply the copy that ships with the jar you are deploying, and check with the
+one-liner in step 1.
+
+**An installation already running a 0.2.0 pre-release of this branch** must re-apply the script as
+the owner before booting the new code, or startup refuses with `SHRED-SCHEMA-003` naming the
+`proconfig`.
 
 ## Steps
 
@@ -52,10 +69,16 @@ SELECT tgname, tgenabled FROM pg_trigger WHERE NOT tgisinternal;
 
 SELECT proname, md5(prosrc) FROM pg_proc
  WHERE pronamespace = current_schema()::regnamespace AND proname LIKE 'shredding%';
+
+SELECT proname, proconfig FROM pg_proc
+ WHERE pronamespace = current_schema()::regnamespace AND proname LIKE 'shredding%';
 ```
 
 A `tgenabled` other than `O` or `A`, or a guard-body md5 that does not match the one published in
-the 0.1.1 release notes, means a guard has already been off or replaced. **That is an incident to
+the 0.1.1 release notes, means a guard has already been off or replaced. On a 0.1.x schema
+`proconfig` is NULL on all three, which is expected there; after step 3 it must read
+`{"search_path=pg_catalog, pg_temp"}` on all three, and a NULL at that point means an older script
+was applied last. **That is an incident to
 record now**, before a clean boot on 0.2.0 makes it invisible.
 
 ### 2. Move ownership to a role that is not the application's

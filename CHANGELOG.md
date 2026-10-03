@@ -64,6 +64,65 @@ All notable changes to this project. The format follows
   `pg_trigger`, and the erasure store's `count(*)`, `now()` and `pg_advisory_xact_lock(...)`, are
   qualified for the same reason. The Hibernate-rendered independent read-back remains `count(*)` as
   HQL renders it; it is named in SECURITY-NOTES rather than left implied.
+- **The three append-only guard functions no longer resolve a name in the session of the role they
+  constrain.** A guard function is not `SECURITY DEFINER`, so until this release its body resolved
+  its operator names along the `search_path` of whoever wrote to the table. Reproduced: a role
+  holding exactly the documented grant block, owning nothing in the schema, created
+  `=(boolean,boolean) -> true`, `<>(bigint,bigint) -> false` and `=(bpchar,bpchar) -> false` in a
+  schema of its own and rewrote `shredding_erasure_anchor`'s `row_count` from 7 to 1, replaced the
+  head hash and flipped `keyed` back to false - straight through the monotonic guard, which is the
+  control that makes the erasure log's chain head unforgeable. Fixed in both halves, because each is
+  the other's backstop: the script puts `SET search_path = pg_catalog, pg_temp` on all three
+  functions, and their bodies are written with `OPERATOR(pg_catalog....)` and explicit parentheses
+  (`IS DISTINCT FROM`, which has no qualified spelling, is rewritten as `<>` on two `NOT NULL`
+  columns, which is equivalent there). Startup verification now requires the clause as well as the
+  body: `pg_proc.proconfig` is read as a `text[]`, compared **in Java** against exactly
+  `{"search_path=pg_catalog, pg_temp"}`, and a NULL array, a second setting beside it or a different
+  spelling is `SHRED-SCHEMA-003`. The comparison is never a SQL predicate: a NULL array compared in
+  SQL evaluates to NULL rather than to false, which reports a disarmed guard as an absent one.
+- **Every operator, function, aggregate, type and cast in every statement this module builds names
+  `pg_catalog`.** Qualifying relations closed one name class; the others were still resolved by the
+  session. Order is not a defence for an operator: PostgreSQL ships no `=` with `varchar` on either
+  side, so an `=(varchar, varchar)` an unprivileged role creates in a schema it owns is an
+  exact-type match and wins at step 2 of operator resolution whatever `search_path` says.
+  Reproduced on `tenant` and `subject`, which are `varchar(255)`: with such an operator answering
+  `false`, `erase()` appended a `COMPLETE` record with `keysDestroyed = 0` while the data key was
+  still in the table, and with it answering `true` a live key read as destroyed. Now written
+  `OPERATOR(pg_catalog.=)`, `OPERATOR(pg_catalog.+)`, `OPERATOR(pg_catalog.>)`,
+  `::pg_catalog.regclass`, `::pg_catalog.oid`, `::pg_catalog.text` and `pg_catalog.`-prefixed
+  functions throughout the two adapters, all of `SchemaVerification`, and the bundled script -
+  including the script's nine `||` concatenations and the anchor's `CHECK (id = 1)`, both of which
+  a shadow could bind at creation time. Because `OPERATOR(...)` erases precedence, an expression
+  with more than one operator token is fully parenthesised; unparenthesised, two qualified operators
+  re-associate and the honest write fails inside the trigger.
+- **The three statements the starter builds on the application's own connection are qualified too.**
+  The `IDENTITY` rebind, the subject-immutability re-read and the write-verification ledger's
+  read-back run on the application's Hibernate connection, inside the application's transaction.
+  With `=(bigint,bigint) -> true` on the path, the rebind's `WHERE id = ?` reported
+  `UPDATE <every row>` - the existing row-count check then refused the insert with the wrong reason
+  - and the ledger's `IN (?, ?, ?)` read every row of the table for a three-id chunk. `IN` cannot be
+  operator-qualified, so the ledger's predicate is now an `OR` chain of `OPERATOR(pg_catalog.=)`,
+  wrapped in one pair of parentheses by construction so it cannot bind looser than a neighbouring
+  `AND`, and a chunk with no ids is refused rather than left to emit `WHERE ()`. These three get
+  qualification and **no** session mechanism on purpose: a transaction-local `set_config` there
+  would re-point every later statement of the application's transaction, including statements of
+  entities this module knows nothing about.
+- **The verified schema's identity is captured on the pinned side of the transaction.** Verification
+  read the schema name and its namespace oid in one statement whose `n.nspname =
+  pg_catalog.current_schema()` comparison ran before the `search_path` pin. A role owning a schema
+  ahead of `pg_catalog` defines its own `=(name, name)` there and splits the two: the gate verifies
+  one schema while every write goes to another. Measured - the single statement answered name `app`
+  with oid `2200` (`public`). Now three statements: the facts with no operator in them, the pin, and
+  then the oid read under the pin from a bound parameter with the comparison qualified as well.
+  Verification's own pin is `pg_catalog, pg_temp` rather than `pg_catalog`, the same value used
+  everywhere else in the module, because the *implicit* `pg_temp` otherwise precedes the path for
+  relation names and a role holding `TEMPORARY` can put a `pg_class` there.
+- A drift gate in the test suite reads every statement this module builds - by reachability to a
+  statement call, not by looking for SQL keywords - and refuses any name in it that a session could
+  resolve: an operator outside the exact six-token `OPERATOR(pg_catalog....)` sequence, a keyword
+  operator, an unqualified function or type, an unqualified relation, a character its lexer does not
+  classify, and two operator tokens at one nesting depth with no parentheses between them. A
+  statement whose text the gate cannot resolve fails the gate rather than being skipped.
 - `schema-postgresql.sql` sets all seven guard triggers to `ENABLE ALWAYS`, unconditionally and
   idempotently, every time it runs. `CREATE TRIGGER` leaves a trigger at `O`, which does not fire
   for a replication apply worker, for a superuser session in `session_replication_role = replica`,

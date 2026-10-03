@@ -557,9 +557,9 @@ only legitimate "not found" for a `@Shredded` entity is a brand-new row on inser
 reaches this method — insert has its own path (`onPreInsert`/`onPostInsert`).
 
 This module's own tables (`shredding_data_key`, `shredding_erasure`, `shredding_erasure_anchor`,
-`shredding_erased_subject`) are addressed unqualified, deliberately, and are expected on the runtime
-role's `search_path` — the same residual recorded above under "Which table this module's statements
-address".
+`shredding_erased_subject`) are addressed as `"<verified schema>"."<table>"`, and the comparison in
+this read-back names `pg_catalog` for its operator — see "What qualification covers, and what it
+does not".
 
 Probe: `CipherProbeSubjectMovedNotFoundTest.probe_the_subject_immutability_check_refuses_when_the_read_back_finds_no_row`.
 
@@ -893,8 +893,68 @@ without authentication. If you set `management.endpoint.health.show-details`, se
 ### What qualification covers, and what it does not
 
 Every statement this module issues names its relation as `"<verified schema>"."<table>"`, so none
-of them depends on `search_path` at parse time. The application's **own** tables are a different
-matter: the blind-index clear and the Hibernate-rendered read-back address the relations the entity
-mapping names, and this module neither verifies nor qualifies those on your behalf. If your own
-schema must not be shadowable either, pin `hibernate.default_schema` or map `@Table(schema = ...)`.
+of them depends on `search_path` at parse time. Relation names are not the only names a statement
+resolves, and from this release they are not the only ones qualified.
+
+**Operators, functions, aggregates, types and casts.** A `search_path` decides an *operator* name
+exactly as it decides a relation name, and order is no protection: PostgreSQL ships no `=` with
+`varchar` on either side, so an `=(varchar, varchar)` created by a role in a schema it owns is an
+exact-type match and is selected at step 2 of operator resolution whatever the path order. Measured:
+with such an operator answering `false`, an erasure recorded `COMPLETE` with `keysDestroyed = 0`
+while the data key was still in the table. Every operator in every statement this module builds is
+now written `OPERATOR(pg_catalog....)`, every function and aggregate `pg_catalog....`, every cast
+`::pg_catalog....`; the same holds in the bundled `schema-postgresql.sql`, which has no pin
+available at all (an unqualified `CREATE TABLE` targets `current_schema()`, so `pg_catalog` cannot
+be put first there), and in the three statements the starter builds on the application's **own**
+Hibernate connection — the `IDENTITY` rebind, the subject-immutability re-read and the
+write-verification ledger's read-back. Those three get qualification and no session mechanism, on
+purpose: a transaction-local `set_config` there would re-point every later statement of the
+application's transaction, including statements of entities this module knows nothing about.
+
+Because `OPERATOR(...)` erases precedence — every qualified operator takes one generic precedence —
+an expression with more than one operator token is fully parenthesised, and a drift gate in the test
+suite refuses an unparenthesised pair.
+
+**The guard functions resolve names only in `pg_catalog`.** A guard function is not `SECURITY
+DEFINER`, so without a `search_path` clause its body resolves its operator names in the session of
+whoever writes to the table — the session of the role the guard exists to constrain. Measured: a
+role holding exactly the grant block below, owning nothing in the schema, rewrote the erasure
+anchor's `row_count`, `head_hash` and `keyed` past the monotonic guard with three operators it
+defined in its own schema. From this release the three guard functions carry
+`SET search_path = pg_catalog, pg_temp`, their bodies are written with `OPERATOR(pg_catalog....)`
+and explicit parentheses, and startup verification requires **both**: the body text against the
+bundled script and `pg_proc.proconfig` against exactly `{"search_path=pg_catalog, pg_temp"}`. Each
+is the other's backstop — `CREATE OR REPLACE FUNCTION` with no `SET` clause clears `proconfig` with
+no error, which is what the exact comparison catches, and the clause says nothing about a name a
+later edit adds, which is what the body comparison catches. A mismatch is `SHRED-SCHEMA-003` and
+the remedy is to re-apply `schema-postgresql.sql` as the owner.
+
+**What is still resolved by a session, named rather than implied.**
+
+- The **independent** blind-index read-back is rendered by Hibernate, and HQL offers no way to write
+  `pg_catalog.count(*)` or an `OPERATOR(pg_catalog....)` comparison. That leg still resolves its
+  aggregate and its `=` through the session's `search_path`. It is not alone on the column: the
+  module's own same-text read-back over the same column in the same transaction is qualified and
+  refuses on its own. Closing the framework-rendered half needs a mechanism of its own — the
+  statement's `search_path` replaced for the width of that one statement and restored immediately —
+  and that is a separate change, not a correction.
+- The **cross-tenant WARN** read-back uses `IS DISTINCT FROM`, which is a keyword spelling of the
+  type's own `=` and has no `OPERATOR(pg_catalog....)` form at all. The tenant column is nullable,
+  so `<>` is not equivalent and the rewrite is not available either. On a hostile path it can
+  over-count, which costs the accuracy of a log line and never the erasure's verdict: it is a WARN,
+  and every refusing leg on the same column is qualified. It moves inside the same one-statement
+  window as the leg above.
+- The **mapping admission** — whether the relation a `@Shredded` entity names is an ordinary
+  permanent table, reachable, not hidden by a row-level-security policy, and whose compared columns
+  have a `pg_catalog` equality operator and a deterministic collation — is read from the catalogue
+  before the first erasure by a separate change. Until then an extension type such as `citext` on a
+  tenant or subject column is not refused, and a `citext` comparison is case-insensitive, which
+  makes a blind index match more rows than the erasure cleared.
+- The application's **own** tables are reached through the entity mapping by the blind-index clear
+  and by the Hibernate-rendered read-back, and this module neither verifies nor qualifies those on
+  your behalf. If your own schema must not be shadowable either, pin `hibernate.default_schema` or
+  map `@Table(schema = ...)`. Without it, this module's erasure statements and Hibernate's own
+  statements can be made to address different tables of the same name.
+- A `search_path` is still the operator's to set, and nothing here depends on it being sane. What
+  these changes remove is the module's *dependence* on it.
 
