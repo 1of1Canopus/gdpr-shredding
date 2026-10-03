@@ -297,7 +297,10 @@ class CipherProbeNamePr13eTest {
     erasureStore(shadowed, schema).append(record(SubjectId.of("s1"), 1, 0));
 
     assertThat(anchorRowCount()).describedAs("the verified schema's anchor").isEqualTo(1L);
-    assertThat(text(superuserDs, "SELECT count(*)::text FROM " + OWN + ".shredding_erasure_anchor"))
+    assertThat(
+            text(
+                superuserDs,
+                "SELECT count(*)::pg_catalog.text FROM " + OWN + ".shredding_erasure_anchor"))
         .describedAs("the role's own decoy, first on its path")
         .isEqualTo("0");
   }
@@ -630,7 +633,7 @@ class CipherProbeNamePr13eTest {
   private static String proconfig(String name) {
     return text(
         superuserDs,
-        "SELECT p.proconfig::text FROM pg_catalog.pg_proc p"
+        "SELECT p.proconfig::pg_catalog.text FROM pg_catalog.pg_proc p"
             + " JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace"
             + " WHERE n.nspname = 'public' AND p.proname = '"
             + name
@@ -639,17 +642,18 @@ class CipherProbeNamePr13eTest {
 
   private static long anchorRowCount() {
     return Long.parseLong(
-        text(superuserDs, "SELECT row_count::text FROM public.shredding_erasure_anchor"));
+        text(
+            superuserDs, "SELECT row_count::pg_catalog.text FROM public.shredding_erasure_anchor"));
   }
 
   private static int keyRows() {
     return Integer.parseInt(
-        text(superuserDs, "SELECT count(*)::text FROM public.shredding_data_key"));
+        text(superuserDs, "SELECT count(*)::pg_catalog.text FROM public.shredding_data_key"));
   }
 
   private static boolean bool(DataSource ds, String sql) {
     return Boolean.parseBoolean(
-        text(ds, "SELECT (" + sql.substring("SELECT ".length()) + ")::text"));
+        text(ds, "SELECT (" + sql.substring("SELECT ".length()) + ")::pg_catalog.text"));
   }
 
   private static String text(DataSource ds, String sql) {

@@ -45,7 +45,12 @@ All notable changes to this project. The format follows
   role itself while it holds `TEMPORARY`; and a plain `SET search_path` issued between two adapter
   calls on a pooled connection. Qualification closes all three in this module's own SQL. The
   application's own tables, reached through the entity mapping by the blind-index clear and the
-  Hibernate-rendered read-back, are deliberately left where the mapping puts them.
+  Hibernate-rendered read-back, are deliberately left where the mapping puts them. The one
+  predicate that had no qualified spelling - the cross-tenant residual WARN's
+  `<tenant> IS DISTINCT FROM ?`, a keyword operator that reaches the type's own `=` - is now
+  written `(<tenant> IS NULL OR NOT (<tenant> OPERATOR(pg_catalog.=) ?))`, which is equivalent for
+  the non-null value it binds. No statement of this module resolves a name through `search_path`
+  any more except the application tables named above.
 - **Startup verification no longer asks the role it is judging.** A function name resolves along
   `search_path` exactly as a relation name does, any role may `ALTER ROLE <itself> SET search_path`,
   and an application role normally owns a schema it can define functions in - so `pg_has_role`,
@@ -130,8 +135,12 @@ All notable changes to this project. The format follows
   erasure cannot clear: outside the window the framework-rendered leg answers 0 and only the
   module's own qualified leg refuses; inside it, the leg that is independent of the erasure's own
   identifiers is the one that refuses, which is the control S-22 exists for. The same window, its
-  own instance of it, covers the cross-tenant WARN count's `IS DISTINCT FROM`, which is the type's
-  own `=` behind a grammar keyword and has no qualified spelling either.
+  own instance of it, also wraps the cross-tenant WARN count. That leg was the reason the window was
+  built around two statements rather than one: it reached the type's own `=` through a grammar
+  keyword, which has no qualified spelling. It no longer does - it is written
+  `(<tenant> IS NULL OR NOT (<tenant> OPERATOR(pg_catalog.=) ?))` - so for that leg the window is
+  now belt and braces over names already qualified, and whether it keeps one is recorded as an open
+  question rather than decided inside a merge.
 
   Six statements, not two: capture, pin, read the pin back, the statement, restore, read the restore
   back. A pin that is not read back is a fiction - in auto-commit `set_config(..., true)` returns

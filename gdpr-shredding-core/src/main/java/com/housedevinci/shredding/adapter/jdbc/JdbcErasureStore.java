@@ -395,22 +395,38 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
           }
         }
       }
+      // The tenant leg is spelled out rather than written IS DISTINCT FROM (finding C-A-6). The
+      // keyword form reaches the type's own `=` along search_path and has no
+      // OPERATOR(pg_catalog....) spelling at all, so it was the one name in this module that
+      // qualification could not reach. A bare OPERATOR(pg_catalog.<>) is not equivalent here: the
+      // tenant column is nullable and `NULL <> ?` is NULL, which drops exactly the rows this WARN
+      // exists to find. `(<tenant> IS NULL OR NOT (<tenant> = ?))` is equivalent for the non-null
+      // bound value this always passes, and every name in it is pg_catalog's.
       String elsewhere =
           "SELECT pg_catalog.count(*) FROM "
               + column.table().sql()
               + " WHERE ("
               + column.subjectColumn().sql()
-              + " OPERATOR(pg_catalog.=) ?) AND "
+              + " OPERATOR(pg_catalog.=) ?) AND ("
               + column.tenantColumn().sql()
-              + " IS DISTINCT FROM ? AND "
+              + " IS NULL OR NOT ("
+              + column.tenantColumn().sql()
+              + " OPERATOR(pg_catalog.=) ?)) AND "
               + column.column().sql()
               + " IS NOT NULL";
       // Its own window, not a wider one shared with the read-back above (M9, ruled by the second
-      // design review). `IS DISTINCT FROM` is the type's own `=` behind a grammar keyword: it has
-      // no OPERATOR(pg_catalog....) spelling, and the tenant column is nullable, so `<>` is not
-      // equivalent and the statement cannot be made sound by qualification. Two more round trips
-      // on an operation that already takes an advisory lock, a SELECT ... FOR UPDATE, a DELETE and
-      // a hash-chain append, in exchange for an invariant that stays one statement wide.
+      // design review): one statement per window is the whole contract, and the name gate refuses
+      // a second one in either.
+      //
+      // The window on THIS leg is no longer what makes it sound. It was, while the leg was written
+      // IS DISTINCT FROM - the type's own `=` behind a grammar keyword, with no
+      // OPERATOR(pg_catalog....) spelling - which is why the window was built around it. C-A-6 then
+      // rewrote the leg so every name in it is pg_catalog's (see `elsewhere` above), and section
+      // 3.2's startup refusal makes the relation two-part. So the window here is now belt and
+      // braces over names that are already qualified, at the cost of two more round trips and, for
+      // an application with an RLS policy function that resolves unqualified names, one more place
+      // that fails loudly. Taking it off is a behaviour change to a reviewed mechanism and belongs
+      // in its own commit, not in a merge: recorded as QUESTIONS #C-24.
       long other =
           JdbcSupport.inOneStatementWindow(
               c,

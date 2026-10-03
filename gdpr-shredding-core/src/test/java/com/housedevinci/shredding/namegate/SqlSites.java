@@ -16,10 +16,23 @@ import java.util.Set;
  *
  * <p>A chain of string literals is SQL if and only if it <b>reaches a statement call</b> - {@code
  * prepareStatement}, {@code execute}, {@code executeQuery}, {@code executeUpdate}, {@code addBatch}
- * - either directly as the argument, or through a local {@code String}, or through a {@code
- * StringBuilder} whose appends are literal chains. Non-literal parts of a chain become one hole
- * token, because what they carry is a name the module holds as data (a {@code VerifiedSchema}
- * qualification, a {@code TableRef}) and not a name the server resolves.
+ * - either directly as the argument, or through a local {@code String}, a field the constructor
+ * composes, or a {@code StringBuilder} whose appends are literal chains.
+ *
+ * <p><b>Non-literal parts of a chain become a hole token, and a hole is not a clean bill (finding
+ * C-A-5).</b> Revision 1 said a hole carries "a name the module holds as data and not a name the
+ * server resolves", and used that to skip it everywhere. Half of it was false: {@code
+ * VerifiedSchema.qualify} cannot return a one-part name, but {@code TableRef.sql()} renders {@code
+ * "t"} for any mapping that names no schema, and {@code search_path} resolves that. The two are now
+ * different tokens - {@link SqlNameLexer#QUALIFIED_HOLE} for the calls listed in {@code
+ * QUALIFYING_CALLS}, {@link SqlNameLexer#HOLE} for everything else - and the lexer refuses a plain
+ * hole in relation position.
+ *
+ * <p>{@code TableRef.sql()} is in {@code QUALIFYING_CALLS} as of this PR, and only because this PR
+ * also lands design section 3.2: a {@code @Shredded} or {@code @BlindIndex} entity whose table
+ * expression names no schema is refused at startup, so the one-part rendering is unreachable for
+ * every {@code TableRef} a statement here is built from. The two move together or the gate fails
+ * (C-A-14).
  *
  * <p>The naive alternative - "a literal containing a SQL keyword" - was measured and rejected: on
  * this head it selects 31 chains that never reach a statement, 27 of them prose error messages
@@ -60,8 +73,19 @@ public final class SqlSites {
   /** The result of a scan: what was resolved, what was not, and every window that was opened. */
   public record Scan(List<Site> sites, List<Unresolved> unresolved, List<Window> windows) {}
 
-  private static final Set<String> STATEMENT_CALLS =
-      Set.of("prepareStatement", "execute", "executeQuery", "executeUpdate", "addBatch");
+  /**
+   * Package-private, not private (C-A-13): {@code NameQualificationGateTest} asserts its starter
+   * file list is closed against this exact set, so a file the gate does not read that calls one of
+   * these methods fails the gate rather than passing silently.
+   */
+  static final Set<String> STATEMENT_CALLS =
+      Set.of(
+          "prepareStatement",
+          "execute",
+          "executeQuery",
+          "executeUpdate",
+          "addBatch",
+          "prepareCall");
 
   /**
    * Statement arguments that are a file read rather than a composed string. Accepted by name, with
@@ -78,6 +102,46 @@ public final class SqlSites {
    * these sites follows the mechanism, mechanically, rather than a file, a line or an extension.
    */
   public static final Set<String> WINDOW_CALLS = Set.of("inOneStatementWindow");
+
+  /**
+   * The calls whose result <b>cannot be a one-part name</b>, so a hole they produce carries its
+   * schema (C-A-5).
+   *
+   * <p>Two entries, with two different construction rules, and the difference is why each is
+   * documented rather than listed:
+   *
+   * <ul>
+   *   <li>{@code qualify} - {@link com.housedevinci.shredding.adapter.jdbc.VerifiedSchema#qualify}
+   *       is {@code quote(name) + "." + quote(relation)} with no branch: there is no input for
+   *       which it returns one part, and the schema it names is the one {@code current_schema()}
+   *       answered on the connection verification ran on. The rule is in the method.
+   *   <li>{@code sql} - {@link com.housedevinci.shredding.domain.TableRef#sql()} <b>can</b> render
+   *       one part: {@code TableRef.schema} is an {@code Optional}. The rule is therefore not in
+   *       the method but in design section 3.2, which this PR implements: {@code ShreddedModel}
+   *       refuses at startup, with {@code SHRED-CONFIG-001}, any entity carrying {@code @Shredded}
+   *       or {@code @BlindIndex} whose table expression names no schema. Every {@code TableRef}
+   *       that reaches a statement this gate reads comes from such an entity's persister, so on a
+   *       context that booted its schema is present. The refusal is measured by {@code
+   *       CipherProbeSchemaGateTest} and by the starter's schema-requirement tests, not assumed
+   *       here; {@code NameQualificationGateTest#the_nine_refusal_carry_expires...} is what keeps
+   *       this entry and that mechanism from drifting apart (C-A-14).
+   * </ul>
+   *
+   * <p>What {@code sql} does <b>not</b> claim: {@link
+   * com.housedevinci.shredding.domain.ColumnRef#sql()} has the same method name and renders a bare
+   * column, which section 3.2 says nothing about. A hole is therefore accepted as qualified only
+   * when the call before {@code sql()} is in {@link #QUALIFYING_RECEIVERS}; {@code column().sql()}
+   * stays a plain hole, which costs nothing in column position and is still refused if a later edit
+   * puts it in a relation or a type position.
+   */
+  static final Set<String> QUALIFYING_CALLS = Set.of("qualify", "sql");
+
+  /**
+   * The accessors whose {@code sql()} is a {@link com.housedevinci.shredding.domain.TableRef} and
+   * so is covered by design section 3.2's startup refusal. Any other receiver of {@code sql()}
+   * resolves to a plain hole.
+   */
+  static final Set<String> QUALIFYING_RECEIVERS = Set.of("table", "tableName");
 
   private SqlSites() {}
 
@@ -183,6 +247,21 @@ public final class SqlSites {
         int end = terminator(toks, i + 3);
         List<Tok> expr = toks.subList(i + 3, end);
         out.put(name, resolveInitialiser(expr, out));
+      }
+      // this.<name> = <expr> ;   a field the constructor composes, which is how the adapters hold
+      // their qualified table expressions (`this.dataKeyTable = schema.qualify(...)`). Without this
+      // the field reads as a bare hole at every statement that interpolates it, and the relation
+      // leg has nothing to decide on.
+      if (t.kind == K.IDENT
+          && t.text.equals("this")
+          && i + 4 < toks.size()
+          && toks.get(i + 1).is(".")
+          && toks.get(i + 2).kind == K.IDENT
+          && toks.get(i + 3).is("=")
+          && !toks.get(i + 4).is("=")) {
+        String name = toks.get(i + 2).text;
+        int end = terminator(toks, i + 4);
+        out.put(name, resolveInitialiser(toks.subList(i + 4, end), out));
       }
       // <name>.append(<expr>) and <name>.append(<expr>).append(<expr>) ...
       if (t.kind == K.IDENT && out.containsKey(t.text) && i + 1 < toks.size()) {
@@ -291,6 +370,10 @@ public final class SqlSites {
         return bound;
       }
     }
+    List<String> chain = callChain(trimmed);
+    if (qualifies(chain)) {
+      return List.of(SqlNameLexer.QUALIFIED_HOLE);
+    }
     if (trimmed.stream().anyMatch(t -> t.kind == K.STRING)) {
       // A chain inside a shape this resolver does not model (a call argument, a stream lambda).
       // Flattened token by token rather than recursed on, so every literal in it is still lexed
@@ -310,6 +393,49 @@ public final class SqlSites {
       return List.of(flat.toString());
     }
     return List.of(SqlNameLexer.HOLE);
+  }
+
+  /**
+   * The methods invoked at the top level of an operand, in source order. {@code
+   * schema.qualify(SchemaExpectations.DATA_KEY)} answers {@code [qualify]}; {@code
+   * first.tableName().sql()} answers {@code [tableName, sql]}.
+   */
+  private static List<String> callChain(List<Tok> operand) {
+    var chain = new ArrayList<String>();
+    int depth = 0;
+    for (int i = 0; i < operand.size(); i++) {
+      Tok t = operand.get(i);
+      if (t.is("(")) {
+        depth++;
+      } else if (t.is(")")) {
+        depth--;
+      } else if (depth == 0
+          && t.kind == K.IDENT
+          && i + 1 < operand.size()
+          && operand.get(i + 1).is("(")) {
+        chain.add(t.text);
+      }
+    }
+    return chain;
+  }
+
+  /**
+   * Whether the operand's call chain is one of {@link #QUALIFYING_CALLS}, with the receiver
+   * condition {@code sql} carries: {@code sql()} qualifies only on a {@link #QUALIFYING_RECEIVERS}
+   * accessor, because {@code ColumnRef.sql()} shares the method name and renders a bare column.
+   */
+  private static boolean qualifies(List<String> chain) {
+    if (chain.isEmpty()) {
+      return false;
+    }
+    String last = chain.get(chain.size() - 1);
+    if (!QUALIFYING_CALLS.contains(last)) {
+      return false;
+    }
+    if (!last.equals("sql")) {
+      return true;
+    }
+    return chain.size() >= 2 && QUALIFYING_RECEIVERS.contains(chain.get(chain.size() - 2));
   }
 
   private static List<String> orHole(List<String> resolved) {

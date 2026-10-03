@@ -938,16 +938,26 @@ the remedy is to re-apply `schema-postgresql.sql` as the owner.
 
 **The two statements a session still resolves, and the window they run in.**
 
-Two statements of an erasure cannot be covered by qualification, for two different reasons, and both
-now run with the connection's `search_path` **replaced** by `pg_catalog, pg_temp` for the width of
-one statement and restored immediately afterwards:
+Two statements of an erasure are not covered by qualification the way the rest are, for two
+different reasons, and both now run with the connection's `search_path` **replaced** by
+`pg_catalog, pg_temp` for the width of one statement and restored immediately afterwards:
 
 - the **independent** blind-index read-back is rendered by Hibernate from the entity mapping, and
   HQL offers no way to write `pg_catalog.count(*)` or an `OPERATOR(pg_catalog....)` comparison —
-  there is no name in that text for this module to qualify;
-- the **cross-tenant WARN** read-back uses `IS DISTINCT FROM`, a keyword spelling of the type's own
-  `=` with no `OPERATOR(pg_catalog....)` form at all, on a nullable tenant column where `<>` is not
-  equivalent. It gets its **own** window rather than sharing the first one.
+  there is no name in that text for this module to qualify. For this leg the window is the only
+  mechanism there is;
+- the **cross-tenant WARN** read-back is written by this module and every name in it is qualified:
+  `(<tenant> IS NULL OR NOT (<tenant> OPERATOR(pg_catalog.=) ?))` (finding C-A-6). An earlier
+  spelling reached the type's own equality through a grammar keyword, which has no
+  `OPERATOR(pg_catalog....)` form at all and was the one name in this module qualification could
+  not reach; the window was built around that. The tenant column is nullable, so a bare
+  `OPERATOR(pg_catalog.<>)` is not equivalent either — `NULL <> ?` is `NULL`, which would drop
+  exactly the rows this WARN exists to find — and the spelled-out form above is equivalent for the
+  non-null bound value this always passes. It keeps its **own** window rather than sharing the
+  first one; for this leg the window is no longer what makes it sound, and whether it should keep
+  one at all is an open question recorded in the module's QUESTIONS. What is at risk either way is
+  the accuracy of a `WARN` line and never the erasure's verdict: every refusing leg on the same
+  column is qualified.
 
 A replacement rather than a prefix, because order is not a defence: PostgreSQL ships no `=` with
 `varchar` on either side, so an `=(varchar, varchar)` a role creates in a schema it owns is an exact
@@ -972,6 +982,13 @@ by this module — so an application trigger whose body names a relation unquali
 still succeeds. A window around the whole transaction would break that application. The test suite's
 name gate checks the invariant: it refuses a second statement of this module's own inside either
 window.
+
+**The window needs the relation to come from the mapping, which is why startup refuses a
+schema-less one.** Nothing role-writable is left on the bracketed path, so a relation name that is
+not qualified cannot resolve in there at all. Keeping the application's own schema on the bracketed
+path so an unqualified name still resolved would put that schema back in the candidate set and
+re-open the operator-shadowing hole verbatim. The two controls are therefore one: the startup
+refusal below, and this window.
 
 **What a `SELECT` can still run inside the window.** A row-level-security policy function, and a
 function called from a view an entity is mapped to, resolve their own unqualified names in there and

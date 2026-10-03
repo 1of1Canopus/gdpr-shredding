@@ -62,23 +62,60 @@ class NameQualificationGateTest {
   }
 
   /**
+   * The two starter files named below, and nothing else under {@link #starterMain}, builds a
+   * statement on the application's own connection (C-A-13's closure assertion checks the rest).
+   */
+  private static final List<String> STARTER_FILES =
+      List.of("WriteVerification.java", "ShreddingEventListener.java");
+
+  /**
    * Every Java file the gate reads: the whole JDBC adapter package, plus the two starter files that
    * build statements on the application's own connection (P2b, section 3.4). The list is a
    * directory walk and two named files rather than a list of statements, so a new adapter file is
-   * covered the day it is added.
+   * covered the day it is added, and {@link #assertStarterListIsClosed} covers a new starter file.
    */
   private static List<Path> sources() {
     try (Stream<Path> core = Files.walk(coreMain())) {
       var out =
           new ArrayList<Path>(core.filter(p -> p.toString().endsWith(".java")).sorted().toList());
-      out.add(starterMain().resolve("WriteVerification.java"));
-      out.add(starterMain().resolve("ShreddingEventListener.java"));
+      for (String name : STARTER_FILES) {
+        out.add(starterMain().resolve(name));
+      }
       for (Path p : out) {
         assertThat(p).describedAs("the gate's source list must not rot").exists();
       }
+      assertStarterListIsClosed();
       return out;
     } catch (IOException e) {
       throw new IllegalStateException("the gate could not walk " + coreMain().toAbsolutePath(), e);
+    }
+  }
+
+  /**
+   * The closure C-A-13 asks for: {@link #STARTER_FILES} is two hard-coded names with nothing that
+   * fails if a third starter file starts building a statement on the connection. Walks every other
+   * {@code .java} file under {@link #starterMain} and fails if it calls a method in {@link
+   * SqlSites#STATEMENT_CALLS} - the file would then build a statement the gate never reads.
+   */
+  private static void assertStarterListIsClosed() throws IOException {
+    try (Stream<Path> walk = Files.walk(starterMain())) {
+      for (Path p : walk.filter(path -> path.toString().endsWith(".java")).toList()) {
+        String fileName = p.getFileName().toString();
+        if (STARTER_FILES.contains(fileName)) {
+          continue;
+        }
+        String text = SqlSites.read(p);
+        for (String call : SqlSites.STATEMENT_CALLS) {
+          assertThat(text.contains(call + "("))
+              .describedAs(
+                  fileName
+                      + " calls "
+                      + call
+                      + "( and is not in NameQualificationGateTest.STARTER_FILES (C-A-13): add it"
+                      + " to the gate's source list or this closure assertion is false")
+              .isFalse();
+        }
+      }
     }
   }
 
@@ -210,6 +247,54 @@ class NameQualificationGateTest {
             "a collation is a schema object; whether a role can place one where the window would"
                 + " reach it has not been measured, and unverifiable is not clean")
         .contains("keyword operator");
+  }
+
+  /**
+   * The names in this module that qualification cannot reach: <b>none, as of this PR</b>.
+   *
+   * <p>Until this PR the list held nine entries, all the same name - the user table a blind-index
+   * statement addresses, rendered by {@code TableRef.sql()}. {@code TableRef.schema} is an {@code
+   * Optional}, and a {@code @Shredded} entity whose mapping named no schema - no
+   * {@code @Table(schema)}, no {@code hibernate.default_schema} - rendered {@code "customer"},
+   * which the server resolved along the writing session's {@code search_path}. The review measured
+   * it: as the runtime role, with {@code search_path = decoy, app, pg_catalog} and a {@code
+   * decoy.customer} it owns, {@code SELECT email_cipher FROM "customer"} read the decoy.
+   *
+   * <p><b>The mechanism that closes them is design section 3.2, and it is in this PR.</b> {@code
+   * ShreddedModel} now refuses at startup, with {@code SHRED-CONFIG-001}, any entity carrying
+   * {@code @Shredded} or {@code @BlindIndex} whose table expression names no schema. A one-part
+   * rendering is therefore unreachable for every {@code TableRef} these statements are built from,
+   * {@code TableRef.sql} has joined {@code SqlSites.QUALIFYING_CALLS}, and the nine entries are
+   * gone. Section 3.2 was put in this PR rather than the previous one because it is also what makes
+   * section 4's one-statement window sound: the window must leave no role-writable schema on the
+   * path, so the relation has to come from the mapping.
+   *
+   * <p>The list stays, empty, rather than being deleted with the carry: {@link
+   * #the_nine_refusal_carry_expires_the_day_table_ref_sql_joins_qualifying_calls} reads it in both
+   * directions, so an edit that took {@code sql} back out of {@code QUALIFYING_CALLS} without
+   * re-stating what is then unqualified fails the gate.
+   */
+  private static final List<String> OPEN_REFUSALS = List.of();
+
+  /**
+   * C-A-14: {@link #OPEN_REFUSALS} and {@code TableRef.sql} being in {@link
+   * SqlSites#QUALIFYING_CALLS} are one fact read two ways, and this is the assertion that keeps
+   * them one. The nine entries the previous PR carried existed only because the mechanism of design
+   * section 3.2 had not landed; this PR lands it, {@code sql} joins {@code QUALIFYING_CALLS}, and
+   * the list is empty. It fails on either drift: a carry still listed after the mechanism landed
+   * (the gate reporting an exposure it no longer has, and keeping the nine entries as a permanent
+   * allowlist), or the mechanism taken back out with no carry re-stating what is then unqualified
+   * (the gate reporting clean over a name the server resolves, which is what the dead leg did).
+   */
+  @Test
+  void the_nine_refusal_carry_expires_the_day_table_ref_sql_joins_qualifying_calls() {
+    boolean tableRefSqlQualifies = SqlSites.QUALIFYING_CALLS.contains("sql");
+    assertThat(tableRefSqlQualifies)
+        .describedAs(
+            "SqlSites.QUALIFYING_CALLS containing \"sql\" and OPEN_REFUSALS being non-empty must"
+                + " never both be true, and must never both be false: one is the reason for the"
+                + " other")
+        .isEqualTo(OPEN_REFUSALS.isEmpty());
   }
 
   @Test
@@ -383,8 +468,79 @@ class NameQualificationGateTest {
         .contains("unqualified relation");
     assertThat(rules("SELECT 1 FROM pg_catalog.pg_class")).isEmpty();
     assertThat(rules("SELECT 1 FROM " + hole()))
-        .describedAs("a hole is a name held as data")
+        .describedAs(
+            "a hole is NOT evidence that a relation is qualified (C-A-5): the leg used to skip it,"
+                + " and TableRef.sql() renders one part whenever the mapping names no schema")
+        .containsExactly("unqualified relation");
+    assertThat(rules("SELECT 1 FROM " + qualifiedHole()))
+        .describedAs(
+            "the one hole the leg accepts: a call that cannot return a one-part name"
+                + " (VerifiedSchema.qualify, which is quote(schema) + \".\" + quote(relation)"
+                + " with no branch)")
         .isEmpty();
+    assertThat(rules("SELECT 1 FROM \"t\""))
+        .describedAs("quoting changes case folding, not resolution")
+        .containsExactly("unqualified relation");
+    assertThat(rules("UPDATE \"t\" SET c = ?")).contains("unqualified relation");
+    assertThat(rules("SELECT 1 FROM \"s\".\"t\"")).isEmpty();
+  }
+
+  @Test
+  void a_ddl_object_name_is_decided_by_the_grammar_and_not_by_proximity() {
+    // C-A-3: the object being created is the first non-keyword identifier after the verb, and
+    // nothing further along is. The lookback it replaces read every call inside an index
+    // expression as the object being created.
+    assertThat(rules("CREATE INDEX i ON t (lower(c))"))
+        .describedAs("lower( resolves along the applying session's path")
+        .contains("unqualified function or aggregate");
+    assertThat(rules("CREATE INDEX IF NOT EXISTS i ON t (pg_catalog.lower(c))"))
+        .describedAs(
+            "the ON relation of a CREATE INDEX is the section 5.2 class: resolved in the applying"
+                + " session, covered by the index leg of schema verification, not by qualification")
+        .isEmpty();
+    assertThat(rules("CREATE TABLE IF NOT EXISTS t (a pg_catalog.text DEFAULT lower(?))"))
+        .describedAs("a call in a column default is not the object being created either")
+        .contains("unqualified function or aggregate");
+    assertThat(
+            rules(
+                "CREATE OR REPLACE FUNCTION f() RETURNS pg_catalog.text AS $$ BEGIN"
+                    + " RETURN pg_catalog.lower('a'); END $$ LANGUAGE plpgsql"))
+        .isEmpty();
+  }
+
+  @Test
+  void only_the_top_level_equals_of_a_set_clause_is_an_assignment() {
+    // C-A-4: the inner `=` of SET a = (b = c) is a resolvable operator. Nothing in this module
+    // writes that shape; the gate exists for the edit that does.
+    assertThat(rules("UPDATE \"s\".\"t\" SET a = (b = c)")).contains("unqualified operator");
+    assertThat(rules("UPDATE \"s\".\"t\" SET a = ?, b = ?")).isEmpty();
+    assertThat(rules("UPDATE \"s\".\"t\" SET a = (b OPERATOR(pg_catalog.=) c)")).isEmpty();
+    assertThat(
+            rules(
+                "UPDATE \"s\".\"t\" SET a = (a OPERATOR(pg_catalog.+) ?) WHERE"
+                    + " (b OPERATOR(pg_catalog.=) ?)"))
+        .describedAs("the shape the key adapter writes")
+        .isEmpty();
+  }
+
+  @Test
+  void a_shadowable_type_name_is_refused_in_both_positions() {
+    // C-A-1 / C-A-2: the grammar has no TEXT, BYTEA, TIMESTAMPTZ, INT2, INT4 or INT8 production,
+    // so all six are ordinary names resolved along search_path in a type position and in a call
+    // position alike. varchar(255) stays allowed: it is a production, and a syntax error in
+    // expression position.
+    for (String type : List.of("text", "bytea", "timestamptz", "int2", "int4", "int8")) {
+      assertThat(rules("SELECT ?::" + type)).describedAs("::" + type).contains("unqualified type");
+      assertThat(rules("SELECT CAST(? AS " + type + ")"))
+          .describedAs("CAST AS " + type)
+          .contains("unqualified type");
+      assertThat(rules("SELECT " + type + "(?)"))
+          .describedAs(type + "(")
+          .contains("unqualified function or aggregate");
+      assertThat(rules("SELECT ?::pg_catalog." + type)).describedAs("qualified " + type).isEmpty();
+    }
+    assertThat(rules("SELECT numeric(1)")).isEmpty();
+    assertThat(rules("SELECT ?::varchar")).isEmpty();
   }
 
   @Test
@@ -459,5 +615,9 @@ class NameQualificationGateTest {
 
   private static String hole() {
     return "\u0001HOLE\u0001";
+  }
+
+  private static String qualifiedHole() {
+    return "\u0001QHOLE\u0001";
   }
 }
