@@ -936,28 +936,26 @@ no error, which is what the exact comparison catches, and the clause says nothin
 later edit adds, which is what the body comparison catches. A mismatch is `SHRED-SCHEMA-003` and
 the remedy is to re-apply `schema-postgresql.sql` as the owner.
 
-**The two statements a session still resolves, and the window they run in.**
+**The one statement a session still resolves, and the window it runs in.**
 
-Two statements of an erasure are not covered by qualification the way the rest are, for two
-different reasons, and both now run with the connection's `search_path` **replaced** by
-`pg_catalog, pg_temp` for the width of one statement and restored immediately afterwards:
+Exactly one statement of an erasure is not covered by qualification the way the rest are: the
+**independent** blind-index read-back is rendered by Hibernate from the entity mapping, and HQL
+offers no way to write `pg_catalog.count(*)` or an `OPERATOR(pg_catalog....)` comparison - there is
+no name in that text for this module to qualify. It runs with the connection's `search_path`
+**replaced** by `pg_catalog, pg_temp` for the width of that one statement and restored immediately
+afterwards. For this leg the window is the only mechanism there is.
 
-- the **independent** blind-index read-back is rendered by Hibernate from the entity mapping, and
-  HQL offers no way to write `pg_catalog.count(*)` or an `OPERATOR(pg_catalog....)` comparison —
-  there is no name in that text for this module to qualify. For this leg the window is the only
-  mechanism there is;
-- the **cross-tenant WARN** read-back is written by this module and every name in it is qualified:
-  `(<tenant> IS NULL OR NOT (<tenant> OPERATOR(pg_catalog.=) ?))` (finding C-A-6). An earlier
-  spelling reached the type's own equality through a grammar keyword, which has no
-  `OPERATOR(pg_catalog....)` form at all and was the one name in this module qualification could
-  not reach; the window was built around that. The tenant column is nullable, so a bare
-  `OPERATOR(pg_catalog.<>)` is not equivalent either — `NULL <> ?` is `NULL`, which would drop
-  exactly the rows this WARN exists to find — and the spelled-out form above is equivalent for the
-  non-null bound value this always passes. It keeps its **own** window rather than sharing the
-  first one; for this leg the window is no longer what makes it sound, and whether it should keep
-  one at all is an open question recorded in the module's QUESTIONS. What is at risk either way is
-  the accuracy of a `WARN` line and never the erasure's verdict: every refusing leg on the same
-  column is qualified.
+The **cross-tenant WARN** read-back is written by this module and every name in it is qualified:
+`(<tenant> IS NULL OR NOT (<tenant> OPERATOR(pg_catalog.=) ?))` (finding C-A-6), over a two-part
+relation. It runs **outside** the window (finding C-18-6): the session's path decides nothing in it,
+so a window there could change no answer any test can observe, and a module-written statement
+inside one would be held to a weaker reading of the name gate. An earlier spelling reached the
+type's own equality through a grammar keyword, which has no `OPERATOR(pg_catalog....)` form, and the
+window was first built around that. The tenant column is nullable, so a bare
+`OPERATOR(pg_catalog.<>)` is not equivalent - `NULL <> ?` is `NULL`, which would drop exactly the
+rows this WARN exists to find - and the spelled-out form above is equivalent for the non-null bound
+value this always passes. What is at risk is the accuracy of a `WARN` line and never the erasure's
+verdict: every refusing leg on the same column is qualified.
 
 A replacement rather than a prefix, because order is not a defence: PostgreSQL ships no `=` with
 `varchar` on either side, so an `=(varchar, varchar)` a role creates in a schema it owns is an exact
@@ -980,8 +978,7 @@ destroyed, no index half-cleared, no record appended.
 `UPDATE` runs outside it, on the path the transaction arrived with, with every name in it qualified
 by this module — so an application trigger whose body names a relation unqualified still fires and
 still succeeds. A window around the whole transaction would break that application. The test suite's
-name gate checks the invariant: it refuses a second statement of this module's own inside either
-window.
+name gate checks the invariant: it refuses any statement of this module's own inside a window.
 
 **The window needs the relation to come from the mapping, which is why startup refuses a
 schema-less one.** Nothing role-writable is left on the bracketed path, so a relation name that is

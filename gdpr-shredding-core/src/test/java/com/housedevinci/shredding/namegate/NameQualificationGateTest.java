@@ -137,7 +137,7 @@ class NameQualificationGateTest {
     var refusals = new ArrayList<String>();
     for (var site : scan.sites()) {
       for (String variant : site.variants()) {
-        for (var refusal : SqlNameLexer.refusals(variant, site.window())) {
+        for (var refusal : SqlNameLexer.refusals(variant)) {
           refusals.add(site.file() + ":" + site.line() + " " + refusal);
         }
       }
@@ -147,46 +147,43 @@ class NameQualificationGateTest {
             "every operator, function, aggregate, type, cast and relation name in a statement this"
                 + " module builds must name its schema (design section 3.1). A column reference"
                 + " resolves against the FROM list and is not a name; a bind parameter is never a"
-                + " name. There is no open refusal and no allowlist: the one name qualification"
-                + " cannot reach - the keyword operator of the cross-tenant read-back - is admitted"
-                + " by the mechanism that closes it, the one-statement window, and only inside it.")
+                + " name. There is no open refusal, no allowlist and no relaxation: a keyword"
+                + " operator is refused wherever it appears (finding C-18-6).")
         .isEmpty();
   }
 
   /**
-   * The invariant the window's javadoc states and this is what checks it (design section 4.3, M9):
-   * <b>one statement per window</b>. Everything that makes the window acceptable rests on it - the
-   * erasure's own {@code UPDATE} running outside it on the arrived path, the application's trigger
-   * still firing (T17), and the fact that no exception can be swallowed with the path still
-   * replaced. The cross-tenant WARN count therefore gets its own window rather than sharing the
-   * read-back's.
+   * The invariant the window's javadoc states and this is what checks it (design section 4.3, M9,
+   * as tightened by finding C-18-6): <b>no statement this module writes sits inside a window</b>.
+   * The window exists for text this module cannot qualify, which is the framework-rendered
+   * read-back and nothing else; a statement of the module's own in there would be a control that no
+   * test can show working, and would put module-written text under a weaker reading of the gate.
+   * Everything else that makes the window acceptable also rests on its width: the erasure's own
+   * {@code UPDATE} runs outside it on the arrived path, the application's trigger still fires
+   * (T17), and no exception can be swallowed with the path still replaced.
    *
-   * <p>"At most one" and not "exactly one" for one reason, stated so nobody reads it as slack: the
-   * framework-rendered read-back's statement is issued by Hibernate, not by a {@code
+   * <p>The framework-rendered read-back's statement is issued by Hibernate, not by a {@code
    * prepareStatement} in this module's source, so a text gate cannot see it at all. That window's
    * one-statement property rests on {@code StatelessSession} being unable to flush, on {@code
    * HibernateBlindIndexResidual}'s contract, and on the behavioural probes - not on this assertion.
-   * What this assertion closes is the other direction: a second statement of the module's own,
-   * added into either window by a later edit.
    */
   @Test
-  void every_window_holds_at_most_one_statement_of_this_modules_own() {
+  void every_window_holds_zero_statements_of_this_modules_own() {
     var scan = SqlSites.scan(sources());
 
     assertThat(scan.windows())
-        .describedAs("the two windows of section 4.3 must be found at all")
-        .hasSizeGreaterThanOrEqualTo(2);
-    assertThat(scan.windows().stream().filter(w -> w.statements() > 1).toList())
+        .describedAs("the framework read-back's window must be found at all")
+        .isNotEmpty();
+    assertThat(scan.windows().stream().filter(w -> w.statements() > 0).toList())
         .describedAs(
-            "a second statement inside one window is how the window becomes a transaction again by"
-                + " accident, and it is the one place an exception could be swallowed with the"
-                + " search_path still replaced")
+            "a statement this module wrote, inside a window: the window is for text the module"
+                + " cannot qualify, and the gate holds this module's own text to the full rule")
         .isEmpty();
   }
 
   /**
    * The negative of the rule above, on a synthetic source rather than on this module's own: the
-   * gate has to be able to see a second statement in a window, or the assertion above is
+   * gate has to be able to see a module-written statement in a window, or the assertion above is
    * decoration.
    */
   @Test
@@ -212,40 +209,20 @@ class NameQualificationGateTest {
 
     assertThat(scan.windows()).hasSize(1);
     assertThat(scan.windows().get(0).statements()).isEqualTo(2);
-    assertThat(scan.sites()).allMatch(SqlSites.Site::window);
+    assertThat(scan.sites()).hasSize(2);
   }
 
   /**
-   * The admission itself, and its limits. Inside the window a keyword operator is admitted - {@code
-   * IS DISTINCT FROM} and {@code LIKE} have no {@code OPERATOR(pg_catalog....)} spelling at all,
-   * and inside the window they can only resolve from {@code pg_catalog}, because operator, function
-   * and aggregate names are never consulted in {@code pg_temp} (T8a, T8b). Every other name class
-   * keeps its refusal: each of them has a qualified spelling, and {@code pg_temp} <em>is</em>
-   * consulted for relation names.
+   * There is no admission: a keyword operator ({@code IS DISTINCT FROM}, {@code LIKE}, ...) has no
+   * {@code OPERATOR(pg_catalog....)} spelling, and since finding C-18-6 no statement this module
+   * writes is run inside the window that used to excuse it. It is refused everywhere.
    */
   @Test
-  void the_window_admits_a_keyword_operator_and_nothing_else() {
-    String distinct = "SELECT pg_catalog.count(*) FROM s.t WHERE a IS DISTINCT FROM ?";
-    assertThat(SqlNameLexer.refusals(distinct, true))
-        .describedAs("the one name qualification cannot reach, inside the mechanism that can")
-        .isEmpty();
-    assertThat(rules(distinct)).containsExactly("keyword operator");
-
-    assertThat(rules("SELECT 1 FROM s.t WHERE a LIKE ?", true)).isEmpty();
-
-    assertThat(rules("SELECT 1 FROM s.t WHERE (a = ?)", true))
-        .describedAs("a symbolic operator has a qualified spelling; the window is not an excuse")
-        .containsExactly("unqualified operator");
-    assertThat(rules("SELECT pg_catalog.count(*) FROM t", true))
-        .describedAs("pg_temp IS consulted for relation names, so this one matters most in there")
-        .containsExactly("unqualified relation");
-    assertThat(rules("SELECT count(*) FROM s.t", true))
-        .containsExactly("unqualified function or aggregate");
-    assertThat(rules("SELECT 'pg_class'::regclass", true)).containsExactly("unqualified type");
-    assertThat(rules("SELECT 1 FROM s.t WHERE (a OPERATOR(pg_catalog.=) ? COLLATE ci)", true))
-        .describedAs(
-            "a collation is a schema object; whether a role can place one where the window would"
-                + " reach it has not been measured, and unverifiable is not clean")
+  void a_keyword_operator_is_refused_everywhere() {
+    assertThat(rules("SELECT pg_catalog.count(*) FROM s.t WHERE a IS DISTINCT FROM ?"))
+        .containsExactly("keyword operator");
+    assertThat(rules("SELECT 1 FROM s.t WHERE a LIKE ?")).containsExactly("keyword operator");
+    assertThat(rules("SELECT 1 FROM s.t WHERE (a OPERATOR(pg_catalog.=) ? COLLATE ci)"))
         .contains("keyword operator");
   }
 
@@ -331,11 +308,7 @@ class NameQualificationGateTest {
   // --------------------------------------------- one negative per rule class
 
   private static List<String> rules(String sql) {
-    return rules(sql, false);
-  }
-
-  private static List<String> rules(String sql, boolean insideWindow) {
-    return SqlNameLexer.refusals(sql, insideWindow).stream()
+    return SqlNameLexer.refusals(sql).stream()
         .map(SqlNameLexer.Refusal::rule)
         .toList();
   }

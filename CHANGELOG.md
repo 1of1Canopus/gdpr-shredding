@@ -140,13 +140,11 @@ All notable changes to this project. The format follows
   restored to the bytes it arrived with. Measured with the shadow installed and a residue the
   erasure cannot clear: outside the window the framework-rendered leg answers 0 and only the
   module's own qualified leg refuses; inside it, the leg that is independent of the erasure's own
-  identifiers is the one that refuses, which is the control S-22 exists for. The same window, its
-  own instance of it, also wraps the cross-tenant WARN count. That leg was the reason the window was
-  built around two statements rather than one: it reached the type's own `=` through a grammar
-  keyword, which has no qualified spelling. It no longer does - it is written
-  `(<tenant> IS NULL OR NOT (<tenant> OPERATOR(pg_catalog.=) ?))` - so for that leg the window is
-  now belt and braces over names already qualified, and whether it keeps one is recorded as an open
-  question rather than decided inside a merge.
+  identifiers is the one that refuses, which is the control S-22 exists for. The cross-tenant WARN
+  count is written by this module with every name qualified -
+  `(<tenant> IS NULL OR NOT (<tenant> OPERATOR(pg_catalog.=) ?))` - and its relation is two-part, so
+  it runs **outside** the window: a window around it could change no answer any test can observe
+  (security review finding C-18-6).
 
   Six statements, not two: capture, pin, read the pin back, the statement, restore, read the restore
   back. A pin that is not read back is a fiction - in auto-commit `set_config(..., true)` returns
@@ -163,10 +161,10 @@ All notable changes to this project. The format follows
   The window is **one statement wide** and that is a property of the design, not a style: the
   erasure's own `UPDATE` runs outside it, on the arrived path, with every name qualified, so an
   application trigger whose body names a relation unqualified still fires and still succeeds. The
-  name gate refuses a second statement of this module's own inside either window. What a `SELECT`
-  can still run in there - a row-level-security policy function, a function called from a mapped
-  view - resolves its unqualified names inside the window and fails loudly; the remedy, `ALTER
-  FUNCTION ... SET search_path`, is in SECURITY-NOTES and in the upgrade note.
+  name gate refuses any statement of this module's own inside a window. What a `SELECT` can still
+  run in there - a row-level-security policy function, a function called from a mapped view -
+  resolves its unqualified names inside the window and fails loudly; the remedy, `ALTER FUNCTION ...
+  SET search_path`, is in SECURITY-NOTES and in the upgrade note.
 - New error code `SHRED-SCHEMA-008`: the module could not isolate the name resolution of its
   independent read-back. The one `SHRED-SCHEMA-*` code that is never a startup condition and never
   means "re-apply the script" - it means the connection was in auto-commit, or something moved
@@ -188,12 +186,10 @@ All notable changes to this project. The format follows
   resolve: an operator outside the exact six-token `OPERATOR(pg_catalog....)` sequence, a keyword
   operator, an unqualified function or type, an unqualified relation, a character its lexer does not
   classify, and two operator tokens at one nesting depth with no parentheses between them. A
-  statement whose text the gate cannot resolve fails the gate rather than being skipped. Its one
-  exception follows the mechanism rather than a file or a line: a keyword operator is admitted for a
-  statement call that sits inside the one-statement window, which is the only place a name with no
-  qualified spelling can be reached at all, and inside the window every other class - a symbolic
-  operator, a function, a type, a relation, `COLLATE` - keeps its refusal. The gate also checks the
-  window's own invariant: at most one statement of this module's own per window.
+  statement whose text the gate cannot resolve fails the gate rather than being skipped. It has no
+  exception: a keyword operator is refused wherever it appears, because no statement this module
+  writes runs inside the window. The gate also checks the window's own invariant: zero statements of
+  this module's own per window (finding C-18-6).
 - `schema-postgresql.sql` sets all seven guard triggers to `ENABLE ALWAYS`, unconditionally and
   idempotently, every time it runs. `CREATE TRIGGER` leaves a trigger at `O`, which does not fire
   for a replication apply worker, for a superuser session in `session_replication_role = replica`,

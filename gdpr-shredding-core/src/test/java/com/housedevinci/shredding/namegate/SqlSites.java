@@ -48,16 +48,8 @@ import java.util.Set;
  */
 public final class SqlSites {
 
-  /**
-   * One resolved statement site. {@code variants} is more than one when a ternary is in the chain.
-   *
-   * @param window true when this statement call sits lexically inside the argument list of a {@link
-   *     #WINDOW_CALLS} call, which is the only way a statement of this module reaches the server
-   *     with the session's {@code search_path} replaced by {@code pg_catalog, pg_temp}. The lexer
-   *     admits a keyword operator - a name with no {@code OPERATOR(pg_catalog....)} spelling at all
-   *     - only there.
-   */
-  public record Site(String file, int line, List<String> variants, boolean window) {}
+  /** One resolved statement site. {@code variants} is more than one when a ternary is in the chain. */
+  public record Site(String file, int line, List<String> variants) {}
 
   /**
    * One {@link #WINDOW_CALLS} call site, with how many text-carrying statement calls it encloses.
@@ -98,8 +90,9 @@ public final class SqlSites {
    * The one-statement window of {@code JdbcSupport.inOneStatementWindow} (design section 4). A
    * statement call lexically inside this call's argument list is a statement that reaches the
    * server with the path replaced, and nothing else is: the helper opens the window itself, runs
-   * the unit of work, and closes it in a {@code finally}. So the admission the lexer makes for
-   * these sites follows the mechanism, mechanically, rather than a file, a line or an extension.
+   * the unit of work, and closes it in a {@code finally}. The gate counts the statements this
+   * module writes inside each such call and requires zero (finding C-18-6); it admits no name
+   * because of where a statement sits.
    */
   public static final Set<String> WINDOW_CALLS = Set.of("inOneStatementWindow");
 
@@ -195,7 +188,7 @@ public final class SqlSites {
       if (window >= 0) {
         statementsPerWindow[window]++;
       }
-      sites.add(new Site(name, line(source, t.at), variants, window >= 0));
+      sites.add(new Site(name, line(source, t.at), variants));
     }
     for (int w = 0; w < windowRanges.size(); w++) {
       windows.add(new Window(name, line(source, windowRanges.get(w)[2]), statementsPerWindow[w]));

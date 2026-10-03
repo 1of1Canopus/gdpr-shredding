@@ -307,7 +307,6 @@ public final class SqlNameLexer {
           "concurrently");
 
   private final String sql;
-  private final boolean window;
   private final List<Refusal> refusals = new ArrayList<>();
 
   /** Token indices this statement creates a name at rather than resolves one at (C-A-3). */
@@ -324,38 +323,18 @@ public final class SqlNameLexer {
   /** Token indices that are the operator class of a {@code CREATE INDEX} column (C-A-11). */
   private Set<Integer> operatorClassPositions = Set.of();
 
-  private SqlNameLexer(String sql, boolean window) {
+  private SqlNameLexer(String sql) {
     this.sql = sql;
-    this.window = window;
-  }
-
-  /** Every name in {@code sql} the gate refuses; empty means the statement resolves no name. */
-  public static List<Refusal> refusals(String sql) {
-    return refusals(sql, false);
   }
 
   /**
-   * As {@link #refusals(String)}, with one relaxation when {@code insideWindow} is true: a
-   * <b>keyword operator</b> is admitted.
-   *
-   * <p>The relaxation is exactly the class of names that has no qualified spelling at all. {@code
-   * IS DISTINCT FROM} is the type's own {@code =} behind a grammar keyword and {@code LIKE} is
-   * {@code ~~}; neither can be written {@code OPERATOR(pg_catalog....)}, so for these names
-   * qualification is not a mechanism that exists. Inside the one-statement window of {@code
-   * JdbcSupport.inOneStatementWindow} the session's path is {@code pg_catalog, pg_temp}, and
-   * operator, function and aggregate names are never consulted in {@code pg_temp} even when it is
-   * named first (T8a, T8b) - so a keyword operator in there can only resolve from {@code
-   * pg_catalog}, which is the property qualification would have given it.
-   *
-   * <p>Nothing else is relaxed, on purpose. A symbolic operator, a function, a type, a cast and a
-   * relation all have a qualified spelling, the module writes it, and the window does not excuse
-   * leaving one out - a relation especially, since {@code pg_temp} <em>is</em> consulted for
-   * relation names. {@code COLLATE} stays refused too: a collation is a schema object, whether a
-   * role can place one where the window would reach it has not been measured, and unverifiable is
-   * not clean.
+   * Every name in {@code sql} the gate refuses; empty means the statement resolves no name. A
+   * keyword operator is refused everywhere: no statement this module writes sits inside the
+   * one-statement window, so there is no place left where a name with no qualified spelling is
+   * admitted (finding C-18-6).
    */
-  public static List<Refusal> refusals(String sql, boolean insideWindow) {
-    var lexer = new SqlNameLexer(sql, insideWindow);
+  public static List<Refusal> refusals(String sql) {
+    var lexer = new SqlNameLexer(sql);
     lexer.run();
     return List.copyOf(lexer.refusals);
   }
@@ -393,7 +372,7 @@ public final class SqlNameLexer {
       if (t.kind() == Kind.DOLLAR_BODY) {
         // The guard bodies: lexed with the same rules, which is what holds the parentheses of E3a
         // in place and what refuses a backslash inside a body (revision 1's R4 residual).
-        refusals.addAll(refusals(t.text(), window));
+        refusals.addAll(refusals(t.text()));
       }
     }
   }
@@ -746,12 +725,7 @@ public final class SqlNameLexer {
     Token tok = t.get(i);
     String word = tok.text().toLowerCase(Locale.ROOT);
     if (KEYWORD_OPERATORS.contains(word)) {
-      // COLLATE is never admitted, window or not: see refusals(String, boolean).
-      if (word.equals("collate")) {
-        refuse("keyword operator", tok.text(), context(tok.at()));
-      } else {
-        refuseKeywordOperator(tok.text(), tok.at());
-      }
+      refuseKeywordOperator(tok.text(), tok.at());
       return;
     }
     if (word.equals("similar") && next(t, i, "to")) {
@@ -1216,14 +1190,8 @@ public final class SqlNameLexer {
     refusals.add(new Refusal(rule, token, context(at)));
   }
 
-  /**
-   * A keyword operator: refused everywhere except inside the one-statement window, which is the
-   * only place this module has a mechanism for a name with no qualified spelling.
-   */
+  /** A keyword operator has no qualified spelling, and this module writes none: always refused. */
   private void refuseKeywordOperator(String token, int at) {
-    if (window) {
-      return;
-    }
     refusals.add(new Refusal("keyword operator", token, context(at)));
   }
 

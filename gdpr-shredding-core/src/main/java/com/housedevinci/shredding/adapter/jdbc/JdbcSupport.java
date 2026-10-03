@@ -179,11 +179,12 @@ public final class JdbcSupport {
    * module; an application trigger whose body names a relation unqualified therefore still fires
    * and still succeeds (T17), where revision 1's transaction-wide pin broke it (T15b). A second
    * statement inside one window is how the window becomes a transaction again by accident, and it
-   * is the one place an exception could be swallowed with the path still replaced. The cross-tenant
-   * WARN count gets its <em>own</em> window for exactly that reason (M9) rather than sharing a
-   * wider one with the read-back. The name gate ({@code NameQualificationGateTest}) refuses a
-   * second text-carrying statement call inside one window, so the invariant is checked and not
-   * merely written down here.
+   * is the one place an exception could be swallowed with the path still replaced. The window is for
+   * text this module cannot qualify, which is the framework-rendered read-back and nothing else:
+   * the cross-tenant WARN count is module-written, fully qualified, and runs outside it (C-18-6).
+   * The name gate ({@code NameQualificationGateTest}) refuses any text-carrying statement call of
+   * this module's own inside a window, so the invariant is checked and not merely written down
+   * here.
    *
    * <p><b>Six statements, three of them read-backs, because a pin that is not read back is a
    * fiction.</b> In auto-commit, {@code set_config(..., true)} <em>returns</em> the pinned value
