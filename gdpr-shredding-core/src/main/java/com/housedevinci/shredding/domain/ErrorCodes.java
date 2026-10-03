@@ -176,6 +176,24 @@ public final class ErrorCodes {
   public static final String SCHEMA_NAME_ISOLATION = "SHRED-SCHEMA-008";
 
   /**
+   * Mapping admission (name-resolution design, addendum section A.7): a {@code @Shredded} entity's
+   * table, or a column of it the module compares or assigns, has a shape the erasure cannot be
+   * trusted on - a view, a foreign table, row level security this role is subject to, a temporary
+   * relation, a missing privilege, an equality operator outside {@code pg_catalog}, a
+   * non-deterministic collation, a NOT NULL or generated blind-index column. Every one of these
+   * makes the erasure and both of its read-backs agree on an answer that is false, or fail.
+   *
+   * <p><b>Raised from two positions.</b> At startup, for a table that exists and is inadmissible:
+   * the context refuses to start. Before an erasure's first statement, inside its transaction and
+   * under its lock, for a table that is inadmissible or absent at that moment: that one erasure is
+   * refused and nothing is destroyed, cleared or recorded. A table absent at startup is a WARN, not
+   * this code, because a table created after the context refreshes is an honest deployment. The
+   * remedy is always the mapping or the table, never a retry. A catalogue that cannot be read is
+   * {@link #SCHEMA_UNVERIFIABLE}, not this code.
+   */
+  public static final String MAPPING_INADMISSIBLE = "SHRED-SCHEMA-009";
+
+  /**
    * C-20: a Spring Data repository call was bracketed, but the module could not establish that
    * every {@code EntityManagerFactory} bean in the application is the one instance {@code
    * ShreddingIntegrator} is wired to. A bracket that cannot tell which Hibernate session it is

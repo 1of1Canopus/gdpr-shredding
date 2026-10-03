@@ -14,6 +14,7 @@ import com.housedevinci.shredding.domain.ErrorCodes;
 import com.housedevinci.shredding.domain.HookOutcome;
 import com.housedevinci.shredding.domain.ShreddingException;
 import com.housedevinci.shredding.domain.SubjectId;
+import com.housedevinci.shredding.domain.TableRef;
 import com.housedevinci.shredding.domain.TenantId;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -52,6 +53,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
   private final DataSource dataSource;
   private final ErasureChain chain;
   private final List<BlindIndexColumn> blindIndexColumns;
+  private final List<MappingAdmission.Target> admissionTargets;
   private final BlindIndexResidual residual;
   private final String dataKeyTable;
   private final String erasedSubjectTable;
@@ -74,13 +76,15 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
     // Design §16: the four relation names are built once, from the schema that was verified at
     // boot, and no statement below names a relation any other way. The blind-index statements are
     // deliberately not qualified here - they address the application's own tables through the
-    // persister's TableRef, which carries whatever schema the mapping carries.
+    // persister's TableRef, which carries the schema the mapping names (section 3.2) and whose
+    // relation is checked against the catalogue before every erasure (MappingAdmission).
     this.dataKeyTable = schema.qualify(SchemaExpectations.DATA_KEY);
     this.erasedSubjectTable = schema.qualify(SchemaExpectations.ERASED_SUBJECT);
     this.erasureTable = schema.qualify(SchemaExpectations.ERASURE);
     this.anchorTable = schema.qualify(SchemaExpectations.ANCHOR);
     this.chain = Objects.requireNonNull(chain, "chain");
     this.blindIndexColumns = List.copyOf(blindIndexColumns);
+    this.admissionTargets = MappingAdmission.Target.forErasure(this.blindIndexColumns);
     this.residual = Objects.requireNonNull(residual, "residual");
     // Fail closed at startup, not on the first erasure: a rolling restart must not serve traffic
     // for a while before it discovers it disagrees with the trail.
@@ -265,6 +269,14 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
 
   private int clearBlindIndexes(Connection c, TenantId tenant, SubjectId subject)
       throws SQLException {
+    // Mapping admission, the erasure leg (name-resolution design, addendum section A.5): every
+    // table this erasure will clear is locked and then checked against the catalogue, before the
+    // first statement that touches it. All tables first, in the model's order, which is the lock
+    // order for every erasure, so two erasures cannot take the same pair of locks the other way
+    // round.
+    for (MappingAdmission.Target target : admissionTargets) {
+      admit(c, target);
+    }
     int cleared = 0;
     for (BlindIndexColumn column : blindIndexColumns) {
       // Addendum 4, S4.4: every identifier here is a TableRef or a ColumnRef, built from the
@@ -293,6 +305,79 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
     }
     verifyCleared(c, tenant, subject);
     return cleared;
+  }
+
+  /**
+   * Locks one table and checks its mapping, in that order (addendum section A.5, steps 1, 1b, 2 and
+   * 3). Never cached: a verdict taken at startup is undone by one rename and one {@code CREATE
+   * VIEW} the role is allowed to perform (D16), so the verdict that counts is the one taken here,
+   * under a lock that keeps it true until this transaction ends.
+   *
+   * <p><b>Step 1</b>, {@code ROW EXCLUSIVE}, is the lock the {@code UPDATE} takes anyway, taken
+   * before the verdict instead of after it: it conflicts with the {@code ACCESS EXCLUSIVE} that
+   * {@code DROP TABLE}, {@code ALTER TABLE ... RENAME} and every other way of swapping the relation
+   * need. <b>Step 1b</b>, {@code SHARE UPDATE EXCLUSIVE}, pins the descendant set: {@code ATTACH
+   * PARTITION}, {@code DETACH PARTITION CONCURRENTLY}, {@code CREATE TABLE ... INHERITS} and {@code
+   * ALTER TABLE ... INHERIT} all take {@code SHARE UPDATE EXCLUSIVE} on the parent, which does not
+   * conflict with step 1, so without step 1b a relation could be routed to after the verdict
+   * described the set. The design took step 1b on a partitioned table only; the build measured the
+   * two inheritance statements succeeding on an ordinary table under step 1 alone, so it is taken
+   * on every table. It does not conflict with {@code ROW EXCLUSIVE}, so the application's own
+   * writes are not blocked; it does serialise two erasures of the same table, and waits behind a
+   * manual {@code VACUUM}, {@code ANALYZE} or {@code CREATE INDEX CONCURRENTLY} on it.
+   *
+   * <p>A lock that fails because the relation does not exist, cannot be locked (a foreign table) or
+   * may not be locked by this role is the same refusal the verdict would give, reached one
+   * statement earlier (A26).
+   */
+  private static void admit(Connection c, MappingAdmission.Target target) throws SQLException {
+    TableRef table = target.table();
+    lock(c, target, "LOCK TABLE " + table.sql() + " IN ROW EXCLUSIVE MODE");
+    lock(c, target, "LOCK TABLE " + table.sql() + " IN SHARE UPDATE EXCLUSIVE MODE");
+    MappingAdmission.Verdict verdict = MappingAdmission.verdict(c, target);
+    switch (verdict) {
+      case MappingAdmission.Admitted admitted -> {
+        // Postures the erasure is sound under; startup has already warned about each of them.
+      }
+      case MappingAdmission.Absent absent -> throw refusedBeforeFirstStatement(absent.message());
+      case MappingAdmission.Refused refused -> throw refusedBeforeFirstStatement(refused.message());
+    }
+  }
+
+  private static void lock(Connection c, MappingAdmission.Target target, String sql)
+      throws SQLException {
+    try (PreparedStatement ps = c.prepareStatement(sql)) {
+      ps.execute();
+    } catch (SQLException e) {
+      String state = String.valueOf(e.getSQLState());
+      String why =
+          switch (state) {
+            case "42P01" -> "does not exist";
+            case "42809" -> "is not a relation this module can lock (a foreign table is one)";
+            case "42501" -> "may not be locked by this role, which an erasure needs";
+            default -> null;
+          };
+      if (why == null) {
+        throw e;
+      }
+      throw refusedBeforeFirstStatement(
+          "shredding: the blind-indexed table "
+              + target.table()
+              + " "
+              + why
+              + " (SQLState "
+              + state
+              + "). Create the table, map the entity to an ordinary table, or grant the runtime"
+              + " role SELECT and UPDATE on it (SECURITY-NOTES.md, \"Database roles\").");
+    }
+  }
+
+  private static ShreddingException refusedBeforeFirstStatement(String message) {
+    return new ShreddingException(
+        ErrorCodes.MAPPING_INADMISSIBLE,
+        message
+            + " This erasure is refused before its first statement: no key is destroyed, no blind"
+            + " index is touched and no record is appended.");
   }
 
   /**

@@ -32,20 +32,37 @@ public final class JdbcSupport {
     T run(Connection c) throws SQLException;
   }
 
+  /**
+   * Runs {@code work} in one transaction.
+   *
+   * <p>A failure of the rollback, or of resetting auto-commit, is added to the original failure as
+   * suppressed and never replaces it. On a connection that died mid-transaction both fail too, and
+   * letting either escape would report a refusal the work raised on purpose - {@code
+   * SHRED-SCHEMA-005} for a catalogue that could not be read, say - as a key-store outage.
+   */
   static <T> T inTransaction(DataSource ds, SqlWork<T> work) {
     try (Connection c = ds.getConnection()) {
       boolean previous = c.getAutoCommit();
       c.setAutoCommit(false);
+      T result;
       try {
-        T result = work.run(c);
+        result = work.run(c);
         c.commit();
-        return result;
       } catch (SQLException | RuntimeException e) {
-        c.rollback();
+        try {
+          c.rollback();
+        } catch (SQLException rollback) {
+          e.addSuppressed(rollback);
+        }
+        try {
+          c.setAutoCommit(previous);
+        } catch (SQLException reset) {
+          e.addSuppressed(reset);
+        }
         throw e;
-      } finally {
-        c.setAutoCommit(previous);
       }
+      c.setAutoCommit(previous);
+      return result;
     } catch (SQLException e) {
       throw unavailable(e);
     }
