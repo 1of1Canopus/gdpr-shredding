@@ -136,7 +136,8 @@ public class ShreddingAutoConfiguration {
    */
   @Bean
   public static LazyInitializationExcludeFilter shreddingSchemaGateEager() {
-    return LazyInitializationExcludeFilter.forBeanTypes(ShreddingSchemaGate.class);
+    return LazyInitializationExcludeFilter.forBeanTypes(
+        ShreddingSchemaGate.class, MappingAdmissionCheck.class);
   }
 
   @Bean
@@ -160,6 +161,19 @@ public class ShreddingAutoConfiguration {
         properties.isAllowSecondLevelCache(),
         entityManagerFactory.getProperties(),
         entityManagerFactory);
+  }
+
+  /**
+   * Mapping admission at startup (name-resolution design, addendum section A.5). Unconditional and
+   * eager like the gate: not {@code @ConditionalOnMissingBean}, because an application that
+   * replaces it would remove the only startup check, and in the lazy-initialisation exclude filter
+   * below. The erasure checks again before every erasure regardless.
+   */
+  @Bean
+  @org.springframework.boot.sql.init.dependency.DependsOnDatabaseInitialization
+  public MappingAdmissionCheck shreddingMappingAdmission(
+      ShreddedModel model, ShreddingSchemaGate gate) {
+    return new MappingAdmissionCheck(model, gate);
   }
 
   @Bean

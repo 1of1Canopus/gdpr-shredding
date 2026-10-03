@@ -736,28 +736,11 @@ public final class ShreddingEventListener
   }
 
   /**
-   * The identifier column, taken from the persister's own identifier mapping and never from {@code
-   * getIdentifierColumnNames()}, which returns a name this module would have to unquote by hand
-   * (addendum 4, §4.3). {@code ShreddedModel} refuses a composite-id {@code @Shredded} entity at
-   * startup, so both refusals below are unreachable for a mapped entity - they stay as typed
-   * refusals by their real reason (change 6) rather than as a cast or an array index.
+   * The identifier column, resolved once by {@code ShreddedModel} at startup (mapping admission,
+   * addendum section A.9) and read here, never resolved a second time.
    */
-  private static ColumnRef singleIdColumn(EntityPersister persister) {
-    var identifier = persister.getIdentifierMapping();
-    if (!(identifier instanceof org.hibernate.metamodel.mapping.BasicValuedModelPart basic)) {
-      throw new ShreddingException(
-          ErrorCodes.CONFIG,
-          "a @Shredded entity has a composite or embedded identifier ("
-              + identifier.getClass().getSimpleName()
-              + "). Every stored value is bound to its row's identifier and read back by it; a"
-              + " composite identifier has no single column for that read-back and no canonical"
-              + " byte form to bind to, so the mapping is refused at startup. Use a basic"
-              + " identifier: a numeric id, a UUID, a String or a byte[].");
-    }
-    return ColumnRefs.of(
-        basic,
-        ShreddedModel.simpleEntityName(persister.getEntityName()) + " identifier",
-        persister.getFactory().getJdbcServices().getDialect());
+  private ColumnRef singleIdColumn(EntityPersister persister) {
+    return model().idColumn(entityName(persister));
   }
 
   @Override

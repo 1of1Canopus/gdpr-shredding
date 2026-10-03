@@ -397,10 +397,13 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
    *       wrong.
    *   <li><b>The same-text one, after it.</b> The {@code UPDATE}s report a row count; a row count
    *       is what this module asked for, not evidence of what the table now holds. Between the
-   *       startup scan and this transaction the column may have gained a trigger, a rule, a
-   *       rewriting view or a new default, any of which leaves an HMAC of the erased plaintext
+   *       startup scan and this transaction the column may have gained a trigger, a rule, a view
+   *       that repopulates it or a new default, any of which leaves an HMAC of the erased plaintext
    *       behind while the erasure record claims the index was cleared. Also refuses with {@link
-   *       ErrorCodes#ERASURE_INDEX_RESIDUAL}.
+   *       ErrorCodes#ERASURE_INDEX_RESIDUAL}. It does <em>not</em> cover a view, a policy or a
+   *       foreign table that <em>hides</em> the subject's row: this read-back asks the same
+   *       relation the same way as the {@code UPDATE} and agrees with it (A6). That shape is
+   *       refused before the first statement, by {@link MappingAdmission}.
    *   <li><b>The cross-tenant one is a WARN, never a refusal.</b> An index under a
    *       <em>different</em> tenant value for the same subject id may legitimately belong to
    *       another tenant that happens to use the same subject identifier, and refusing would let

@@ -1,5 +1,6 @@
 package com.housedevinci.shredding.autoconfigure;
 
+import com.housedevinci.shredding.adapter.jdbc.MappingAdmission;
 import com.housedevinci.shredding.api.BlindIndex;
 import com.housedevinci.shredding.api.Shredded;
 import com.housedevinci.shredding.domain.BlindIndexColumn;
@@ -147,11 +148,79 @@ public final class ShreddedModel {
 
   private final List<ShreddedField> shreddedFields;
   private final List<BlindIndexField> blindIndexFields;
+  private final Map<String, ColumnRef> idColumns;
 
   private ShreddedModel(
-      List<ShreddedField> shreddedFields, List<BlindIndexField> blindIndexFields) {
+      List<ShreddedField> shreddedFields,
+      List<BlindIndexField> blindIndexFields,
+      Map<String, ColumnRef> idColumns) {
     this.shreddedFields = List.copyOf(shreddedFields);
     this.blindIndexFields = List.copyOf(blindIndexFields);
+    this.idColumns = Map.copyOf(idColumns);
+  }
+
+  /**
+   * The identifier column of a {@code @Shredded} entity, resolved once at scan time from the
+   * persister's own identifier mapping (mapping admission, addendum section A.9). The write path's
+   * rebind and re-read, {@code WriteVerification} and the admission check all read this one value:
+   * one resolution, not three inputs.
+   *
+   * @throws ShreddingException {@code SHRED-CONFIG-001} for a model scanned without an {@code
+   *     EntityManagerFactory}, which builds no SQL
+   */
+  public ColumnRef idColumn(String entityName) {
+    ColumnRef column = idColumns.get(entityName);
+    if (column == null) {
+      throw config(
+          "the identifier column of "
+              + entityName
+              + " was never resolved from Hibernate's mapping. Build the ShreddedModel with"
+              + " ShreddedModel.scan(entities, allowSecondLevelCache, properties,"
+              + " entityManagerFactory).");
+    }
+    return column;
+  }
+
+  /**
+   * What mapping admission checks, one target per {@code @Shredded} entity: its table, its
+   * identifier column (compared by the write path), and for every blind index the tenant and
+   * subject columns the erasure compares and the index column it assigns. Empty for a model scanned
+   * without an {@code EntityManagerFactory}.
+   */
+  public List<MappingAdmission.Target> admissionTargets() {
+    var out = new ArrayList<MappingAdmission.Target>();
+    var indexes = blindIndexesByEntityName();
+    for (var entry : byEntityName().entrySet()) {
+      String entity = entry.getKey();
+      ColumnRef id = idColumns.get(entity);
+      if (id == null) {
+        continue;
+      }
+      var columns = new ArrayList<MappingAdmission.Column>();
+      columns.add(
+          new MappingAdmission.Column(id, MappingAdmission.Use.COMPARED, "identifier column"));
+      for (var index : indexes.getOrDefault(entity, List.of())) {
+        BlindIndexColumn c = index.column();
+        addOnce(columns, c.tenantColumn(), "tenant column", true);
+        addOnce(columns, c.subjectColumn(), "subject column", true);
+        addOnce(columns, c.column(), "blind-index column", false);
+      }
+      out.add(
+          new MappingAdmission.Target(
+              java.util.Optional.of(entity), entry.getValue().get(0).table(), columns));
+    }
+    return out;
+  }
+
+  private static void addOnce(
+      List<MappingAdmission.Column> columns, ColumnRef ref, String role, boolean compared) {
+    var use = compared ? MappingAdmission.Use.COMPARED : MappingAdmission.Use.ASSIGNED;
+    for (var existing : columns) {
+      if (existing.ref().equals(ref) && existing.use() == use) {
+        return;
+      }
+    }
+    columns.add(new MappingAdmission.Column(ref, use, role));
   }
 
   public List<ShreddedField> shreddedFields() {
@@ -249,6 +318,7 @@ public final class ShreddedModel {
       EntityManagerFactory entityManagerFactory) {
     var shredded = new ArrayList<ShreddedField>();
     var indexes = new ArrayList<BlindIndexField>();
+    var idColumns = new LinkedHashMap<String, ColumnRef>();
     String sharedCacheMode =
         String.valueOf(emfProperties.get("jakarta.persistence.sharedCache.mode"));
     boolean globalCacheAll =
@@ -394,9 +464,10 @@ public final class ShreddedModel {
       refuseCompositeIdShreddedEntities(entityManagerFactory, shreddedFieldNamesByEntity);
       resolveTables(entityManagerFactory, shredded, indexes);
       resolveIndexColumns(entityManagerFactory, indexes);
+      resolveIdColumns(entityManagerFactory, shreddedFieldNamesByEntity.keySet(), idColumns);
     }
 
-    return new ShreddedModel(shredded, indexes);
+    return new ShreddedModel(shredded, indexes, idColumns);
   }
 
   /**
@@ -659,6 +730,49 @@ public final class ShreddedModel {
             + " nothing, every check agrees, and the record says COMPLETE. Set"
             + " spring.jpa.properties.hibernate.default_schema=<schema> for the application, or"
             + " map @Table(schema = \"<schema>\") on this entity. See docs/upgrading-0.2.0.md.");
+  }
+
+  /**
+   * Resolves each {@code @Shredded} entity's identifier column once (mapping admission, addendum
+   * section A.9; it moved here from {@code ShreddingEventListener}, whose per-event resolution does
+   * not exist yet at startup). Behaviour, error code and message are unchanged.
+   */
+  private static void resolveIdColumns(
+      EntityManagerFactory entityManagerFactory,
+      Set<String> shreddedEntityNames,
+      Map<String, ColumnRef> out) {
+    var byEntityName = persistersByEntityName(entityManagerFactory);
+    for (String entityName : shreddedEntityNames) {
+      var persister = byEntityName.get(entityName);
+      if (persister != null) {
+        out.put(entityName, singleIdColumn(persister));
+      }
+    }
+  }
+
+  /**
+   * The identifier column, taken from the persister's own identifier mapping and never from {@code
+   * getIdentifierColumnNames()}, which returns a name this module would have to unquote by hand
+   * (addendum 4, §4.3). {@code refuseCompositeIdShreddedEntities} refuses a composite-id
+   * {@code @Shredded} entity first, so the refusal below is unreachable for a mapped entity - it
+   * stays as a typed refusal by its real reason (change 6) rather than as a cast or an array index.
+   */
+  static ColumnRef singleIdColumn(org.hibernate.persister.entity.EntityPersister persister) {
+    var identifier = persister.getIdentifierMapping();
+    if (!(identifier instanceof org.hibernate.metamodel.mapping.BasicValuedModelPart basic)) {
+      throw new ShreddingException(
+          ErrorCodes.CONFIG,
+          "a @Shredded entity has a composite or embedded identifier ("
+              + identifier.getClass().getSimpleName()
+              + "). Every stored value is bound to its row's identifier and read back by it; a"
+              + " composite identifier has no single column for that read-back and no canonical"
+              + " byte form to bind to, so the mapping is refused at startup. Use a basic"
+              + " identifier: a numeric id, a UUID, a String or a byte[].");
+    }
+    return ColumnRefs.of(
+        basic,
+        simpleEntityName(persister.getEntityName()) + " identifier",
+        persister.getFactory().getJdbcServices().getDialect());
   }
 
   private static TableRef primaryTable(org.hibernate.persister.entity.EntityPersister persister) {
