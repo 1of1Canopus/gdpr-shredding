@@ -12,6 +12,13 @@ spring:
     hibernate:
       ddl-auto: update
     open-in-view: false
+    properties:
+      # Required, not decorative: a @Shredded entity's table must name its schema in the mapping,
+      # or startup refuses with SHRED-CONFIG-001. Without it the erasure's statements and the
+      # read-back Hibernate renders both leave it to the connection's search_path which table of
+      # that name they address, and a decoy relation ahead of the real one takes all of them at
+      # once. @Table(schema = "...") per entity is the other spelling. See docs/upgrading-0.2.0.md.
+      hibernate.default_schema: ${JDBC_SCHEMA:public}
 
 shredding:
   jdbc:

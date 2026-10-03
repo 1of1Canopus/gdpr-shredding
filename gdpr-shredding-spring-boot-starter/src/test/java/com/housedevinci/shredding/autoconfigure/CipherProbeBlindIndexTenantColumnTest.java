@@ -142,6 +142,7 @@ class CipherProbeBlindIndexTenantColumnTest {
                 "shredding.erasure-log.hmac-secret=" + b64("tenantcolumn-chain-secret-32byte"),
                 "shredding.blind-index.hmac-secret=" + b64("tenantcolumn-index-secret-32byte"),
                 "spring.jpa.hibernate.ddl-auto=create-drop",
+                "spring.jpa.properties.hibernate.default_schema=public",
                 "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect",
                 "spring.datasource.url=" + POSTGRES.getJdbcUrl(),
                 "spring.datasource.username=" + POSTGRES.getUsername(),

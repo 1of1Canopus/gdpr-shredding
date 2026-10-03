@@ -51,6 +51,7 @@ class SampleEndToEndTest {
     // S-25: pinned rather than resolved from the container's bootstrap connection, the same
     // reason the startup timeout above exists - resolution failing under load is
     // "Unable to determine Dialect", not a Hibernate bug.
+    registry.add("spring.jpa.properties.hibernate.default_schema", () -> "public");
     registry.add(
         "spring.jpa.properties.hibernate.dialect", () -> "org.hibernate.dialect.PostgreSQLDialect");
     registry.add(

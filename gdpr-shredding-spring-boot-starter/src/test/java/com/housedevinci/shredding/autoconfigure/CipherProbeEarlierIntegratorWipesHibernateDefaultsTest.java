@@ -114,6 +114,7 @@ class CipherProbeEarlierIntegratorWipesHibernateDefaultsTest {
                 "shredding.erasure-log.hmac-secret=" + b64("displaced-chain-secret-32-byte!!"),
                 "shredding.blind-index.hmac-secret=" + b64("displaced-index-secret-32-byte!!"),
                 "spring.jpa.hibernate.ddl-auto=create-drop",
+                "spring.jpa.properties.hibernate.default_schema=public",
                 "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect",
                 "spring.datasource.url=" + POSTGRES.getJdbcUrl(),
                 "spring.datasource.username=" + POSTGRES.getUsername(),

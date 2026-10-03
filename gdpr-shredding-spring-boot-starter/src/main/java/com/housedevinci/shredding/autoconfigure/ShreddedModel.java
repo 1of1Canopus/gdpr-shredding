@@ -458,6 +458,7 @@ public final class ShreddedModel {
                 + "\" cannot be resolved to the properties the write path reads.");
       }
       TableRef table = primaryTable(persister);
+      requireMappedSchema(table, index.entityName(), "carries a @BlindIndex");
       ColumnRef indexColumn = indexColumnOf(persister, index, where, dialect, table);
       var tenant = resolveAxis(persister, index, where, table, dialect, Axis.TENANT);
       var subject = resolveAxis(persister, index, where, table, dialect, Axis.SUBJECT);
@@ -555,6 +556,7 @@ public final class ShreddedModel {
         continue; // an entity Hibernate does not map; other checks refuse it by their own reasons
       }
       var persister = byEntityName.get(field.entityName());
+      requireMappedSchema(primary, field.entityName(), "is @Shredded");
       refuseSecondaryTableSplit(persister, field, primary);
       shredded.set(i, field.at(primary, shreddedColumnOf(persister, field, dialect)));
     }
@@ -616,6 +618,47 @@ public final class ShreddedModel {
               + " checked that way and is refused rather than silently skipped or checked against"
               + " the wrong table's row.");
     }
+  }
+
+  /**
+   * Section 3.2 of the name-resolution design (finding N-2): a {@code @Shredded} entity's table
+   * must carry a schema in its mapping.
+   *
+   * <p>With the ordinary Spring Boot mapping - no {@code @Table(schema)}, no {@code
+   * hibernate.default_schema} - every statement that addresses this table leaves it to the
+   * connection's {@code search_path} which table of that name is meant: the erasure's {@code
+   * UPDATE}, its same-text read-back and the read-back Hibernate renders are then all unqualified,
+   * a decoy relation ahead of the real one on the role's own path takes all three, they agree with
+   * each other, and the erasure reports {@code COMPLETE} over untouched residue (T1c, T4g).
+   *
+   * <p>It is also the only shape that lets the one-statement window of section 4 exist at all. The
+   * window has to leave <em>no</em> role-writable schema on the path, so the relation in the
+   * framework-rendered statement has to come from the mapping; keeping the application's schema on
+   * the bracketed path so an unqualified name still resolves would put it back in the candidate set
+   * and re-open N-1 verbatim. Inside the window an unqualified relation is an error, not a decoy
+   * read (T2f), which is the fail-closed half of the same decision.
+   *
+   * <p>This was already the documented advice in SECURITY-NOTES "Database roles" and {@code
+   * docs/index.md}; 0.2.0 promotes advice to a refusal, which is the house rule for a control whose
+   * absence is silent. {@code docs/upgrading-0.2.0.md} carries the two spellings.
+   */
+  private static void requireMappedSchema(TableRef table, String entityName, String why) {
+    if (table.schema().isPresent()) {
+      return;
+    }
+    throw config(
+        entityName
+            + " "
+            + why
+            + " and is mapped to the table \""
+            + table
+            + "\", which names no schema. The erasure's statements and the read-back Hibernate"
+            + " renders from this mapping would both leave it to the connection's search_path"
+            + " which table of that name they address, and a table of the same name in a schema"
+            + " ahead of it on that path takes all of them at once: the erasure then clears"
+            + " nothing, every check agrees, and the record says COMPLETE. Set"
+            + " spring.jpa.properties.hibernate.default_schema=<schema> for the application, or"
+            + " map @Table(schema = \"<schema>\") on this entity. See docs/upgrading-0.2.0.md.");
   }
 
   private static TableRef primaryTable(org.hibernate.persister.entity.EntityPersister persister) {

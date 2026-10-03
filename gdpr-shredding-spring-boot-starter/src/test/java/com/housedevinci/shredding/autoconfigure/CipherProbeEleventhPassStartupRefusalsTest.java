@@ -177,6 +177,15 @@ class CipherProbeEleventhPassStartupRefusalsTest {
   }
 
   private SpringApplicationBuilder builder(Class<?> app) {
+    return builderWithNoMappedSchema(app)
+        .properties("spring.jpa.properties.hibernate.default_schema=public");
+  }
+
+  /**
+   * The ordinary Spring Boot mapping: no {@code @Table(schema)} and no {@code
+   * hibernate.default_schema}, which is what section 3.2 of the name-resolution design refuses.
+   */
+  private SpringApplicationBuilder builderWithNoMappedSchema(Class<?> app) {
     return new SpringApplicationBuilder(app)
         .web(WebApplicationType.NONE)
         .properties(
@@ -190,6 +199,49 @@ class CipherProbeEleventhPassStartupRefusalsTest {
             "spring.datasource.password=" + POSTGRES.getPassword(),
             "spring.jpa.hibernate.ddl-auto=update",
             "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect");
+  }
+
+  @SpringBootConfiguration
+  @EnableAutoConfiguration
+  @EntityScan(basePackageClasses = com.housedevinci.shredding.autoconfigure.fixture.Widget.class)
+  @EnableJpaRepositories(
+      basePackageClasses = com.housedevinci.shredding.autoconfigure.fixture.WidgetRepository.class)
+  static class UnqualifiedMappingApp extends Tenant {}
+
+  /**
+   * N20, section 3.2 of the name-resolution design (finding N-2). With no schema in the mapping,
+   * the erasure's {@code UPDATE}, its same-text read-back and the read-back Hibernate renders are
+   * all unqualified: a decoy relation ahead of the real one on the role's own path takes all three,
+   * they agree with each other, and the erasure reports COMPLETE over untouched residue (T1c). It
+   * is also the shape that makes the one-statement window of section 4 impossible, because the
+   * window leaves no role-writable schema on the path for an unqualified name to resolve from.
+   *
+   * <p>0.2.0 is unreleased, so advice that was in SECURITY-NOTES and {@code docs/index.md} becomes
+   * a refusal, which is the house rule for a control whose absence is silent. The refusal names the
+   * entity and both spellings of the remedy.
+   */
+  @Test
+  void probe_a_shredded_entity_whose_mapping_names_no_schema_is_refused_at_startup() {
+    String outcome;
+    try (var ctx = builderWithNoMappedSchema(UnqualifiedMappingApp.class).run()) {
+      outcome = "STARTED";
+    } catch (RuntimeException e) {
+      outcome = "STARTUP-REFUSED " + code(e);
+    }
+    assertThat(outcome).startsWith("STARTUP-REFUSED SHRED-CONFIG-001");
+    assertThat(outcome)
+        .describedAs("the entity it refused, and both spellings of the remedy")
+        .contains("is @Shredded and is mapped to the table")
+        .contains("hibernate.default_schema")
+        .contains("@Table(schema");
+  }
+
+  /** The other half of N20: with the schema named, the same application starts. */
+  @Test
+  void probe_the_same_mapping_with_a_schema_named_starts() {
+    try (var ctx = builder(UnqualifiedMappingApp.class).run()) {
+      assertThat(ctx.isRunning()).isTrue();
+    }
   }
 
   private static String code(Throwable thrown) {

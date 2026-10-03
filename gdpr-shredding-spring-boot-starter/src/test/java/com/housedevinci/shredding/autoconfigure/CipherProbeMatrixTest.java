@@ -55,6 +55,7 @@ class CipherProbeMatrixTest {
     r.add("shredding.erasure-log.hmac-secret", () -> b64("starter-integration-chain-secret"));
     r.add("shredding.blind-index.hmac-secret", () -> b64("starter-integration-index-secret"));
     r.add("spring.jpa.hibernate.ddl-auto", () -> "create-drop");
+    r.add("spring.jpa.properties.hibernate.default_schema", () -> "public");
     r.add(
         "spring.jpa.properties.hibernate.dialect", () -> "org.hibernate.dialect.PostgreSQLDialect");
   }

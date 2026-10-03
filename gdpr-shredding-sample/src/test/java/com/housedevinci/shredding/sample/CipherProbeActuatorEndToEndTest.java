@@ -47,6 +47,7 @@ class CipherProbeActuatorEndToEndTest {
   @DynamicPropertySource
   static void secrets(DynamicPropertyRegistry registry) {
     // S-25: pinned rather than resolved from the container's bootstrap connection.
+    registry.add("spring.jpa.properties.hibernate.default_schema", () -> "public");
     registry.add(
         "spring.jpa.properties.hibernate.dialect", () -> "org.hibernate.dialect.PostgreSQLDialect");
     registry.add("shredding.master-key", () -> MASTER_KEY_BASE64);
