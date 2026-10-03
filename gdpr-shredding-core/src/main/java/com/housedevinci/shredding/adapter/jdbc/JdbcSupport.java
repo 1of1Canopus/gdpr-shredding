@@ -201,7 +201,9 @@ public final class JdbcSupport {
    * search_path}, or rewriting the function with a SQL-standard body.
    *
    * @throws com.housedevinci.shredding.domain.ShreddingException {@code SHRED-SCHEMA-008} when the
-   *     replacement cannot be established, or when the session is not carrying the bytes it arrived
+   *     arrived path cannot be captured or the replacement cannot be established (a {@code
+   *     SQLException} in steps 1 to 3, attached as the cause; the statement itself, step 4, still
+   *     surfaces its own failure), or when the session is not carrying the bytes it arrived
    *     with once the statement has succeeded. The caller's transaction is expected to roll back:
    *     there is no partial state to repair, and a {@code LOCAL} setting is discarded by {@code
    *     COMMIT} as well as by {@code ROLLBACK} (C-17), so a replaced path can never escape onto a
@@ -218,22 +220,38 @@ public final class JdbcSupport {
               + " the connection was handed over by something else.",
           null);
     }
-    String arrived = readSearchPath(c);
+    String arrived;
+    try {
+      arrived = readSearchPath(c);
+    } catch (SQLException e) {
+      throw isolationFailed(
+          "the session's search_path could not be captured (step 1). Nothing was changed on the"
+              + " connection.",
+          e);
+    }
     Throwable primary = null;
     T result = null;
     try {
-      try (Statement st = c.createStatement()) {
-        st.execute(PIN_SEARCH_PATH);
-      }
-      String pinned = readSearchPath(c);
-      if (!PINNED_PATH.equals(pinned)) {
+      // Steps 2 and 3 establish the window. A SQLException here means the window was never
+      // established: that is the isolation code (C-18-4). Only what work.run() throws, after this
+      // block, surfaces as itself (M3).
+      try {
+        try (Statement st = c.createStatement()) {
+          st.execute(PIN_SEARCH_PATH);
+        }
+        String pinned = readSearchPath(c);
+        if (!PINNED_PATH.equals(pinned)) {
+          throw isolationFailed(
+              "the independent read-back's search_path was replaced with '"
+                  + PINNED_PATH
+                  + "' and read back as '"
+                  + pinned
+                  + "'. The statement was not run.",
+              null);
+        }
+      } catch (SQLException e) {
         throw isolationFailed(
-            "the independent read-back's search_path was replaced with '"
-                + PINNED_PATH
-                + "' and read back as '"
-                + pinned
-                + "'. The statement was not run.",
-            null);
+            "the replacement search_path could not be established (steps 2 and 3).", e);
       }
       result = work.run();
     } catch (SQLException | RuntimeException | Error e) {
