@@ -60,6 +60,7 @@ class CipherProbeReverseScanTest {
                 "shredding.erasure-log.hmac-secret=" + b64("reverse-scan-chain-secret-32bytes"),
                 "shredding.blind-index.hmac-secret=" + b64("reverse-scan-index-secret-32bytes"),
                 "spring.jpa.hibernate.ddl-auto=create-drop",
+                "spring.jpa.properties.hibernate.default_schema=public",
                 "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect",
                 "spring.datasource.url=" + POSTGRES.getJdbcUrl(),
                 "spring.datasource.username=" + POSTGRES.getUsername(),

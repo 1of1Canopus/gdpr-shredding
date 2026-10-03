@@ -65,6 +65,7 @@ class CipherProbeWriteVerificationCapTest {
     registry.add(
         "shredding.blind-index.hmac-secret", () -> b64("write-verif-cap-index-secret-32b"));
     registry.add("spring.jpa.hibernate.ddl-auto", () -> "create-drop");
+    registry.add("spring.jpa.properties.hibernate.default_schema", () -> "public");
     registry.add(
         "spring.jpa.properties.hibernate.dialect", () -> "org.hibernate.dialect.PostgreSQLDialect");
     // A small cap so the probe does not need to actually insert fifty thousand rows to reach it.

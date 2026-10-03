@@ -35,6 +35,8 @@ for that state rather than for a tidy one.
 | guard function `search_path` | none, so a body resolved its operator names in the path of whoever wrote to the table | `SET search_path = pg_catalog, pg_temp` on all three, verified as an exact one-element `pg_proc.proconfig` |
 | operators, types, casts and functions in SQL | unqualified | `OPERATOR(pg_catalog....)`, `::pg_catalog....`, `pg_catalog....` - in the adapters, in the bundled script, and in the three statements the starter builds on the application's own connection |
 | trigger state | whatever `CREATE TRIGGER` left (`O`) | the script sets all seven to `ENABLE ALWAYS` |
+| a `@Shredded` entity's table | mapped with or without a schema | **must name a schema**: `spring.jpa.properties.hibernate.default_schema`, or `@Table(schema = "...")`. Without one, startup refuses with `SHRED-CONFIG-001` naming the entity |
+| the read-back Hibernate renders | resolved its `count(*)` and its `=` through the session's `search_path` | runs with `search_path` replaced by `pg_catalog, pg_temp` for that one statement and restored to the bytes it arrived with; `SHRED-SCHEMA-008` if that cannot be established |
 
 The guard-body change matters for the upgrade: from 0.2.0 the bodies are verified material, so an
 installation that upgrades the jar without re-applying the script is refused with a message naming
@@ -54,6 +56,57 @@ one-liner in step 1.
 **An installation already running a 0.2.0 pre-release of this branch** must re-apply the script as
 the owner before booting the new code, or startup refuses with `SHRED-SCHEMA-003` naming the
 `proconfig`.
+
+### Every installation: name the schema your entities live in
+
+This is the one change that needs an edit to your application's own configuration, and it is a
+startup refusal, so find out before the deploy window. Add, for the usual deployment:
+
+```yaml
+spring:
+  jpa:
+    properties:
+      hibernate.default_schema: app      # the schema your own tables live in
+```
+
+or, per entity:
+
+```java
+@Entity
+@Table(name = "customer", schema = "app")
+public class Customer { ... }
+```
+
+If neither is present, startup fails with:
+
+```
+SHRED-CONFIG-001: Customer is @Shredded and is mapped to the table "customer", which names no
+schema. ... Set spring.jpa.properties.hibernate.default_schema=<schema> for the application, or
+map @Table(schema = "<schema>") on this entity.
+```
+
+Why it is a refusal and not a warning: without a schema the erasure's `UPDATE`, this module's own
+read-back and the read-back Hibernate renders are all unqualified. A table of the same name in a
+schema ahead of yours on the connection's `search_path` takes all three at once, so they agree with
+each other, and the erasure reports `COMPLETE` over data it never touched. The schema name must be
+lowercase and must not carry a catalog, which was already true in 0.1.x.
+
+One consequence worth knowing before you hit it: one statement of each erasure - the read-back
+Hibernate renders from your mapping - now runs with `search_path` replaced by `pg_catalog, pg_temp`.
+If a row-level-security policy function on that table, or a function called from a view an entity is
+mapped to, names a relation unqualified, that statement fails with the database's own `relation
+"..." does not exist` and the erasure is refused rather than completing on an unexpected answer.
+The remedy is one line per function: `ALTER FUNCTION <fn> SET search_path = <schema>, pg_catalog`.
+The same applies to the SQL in your own mapping: the text of a `@SQLRestriction`, and of every
+auto-enabled `@Filter` condition, on an entity with a `@BlindIndex` field is rendered into that
+read-back. Schema-qualify every function, relation and non-keyword type they name, for example
+`@SQLRestriction("public.pr18_visible(owner_id)")`; an unqualified name makes every erasure of that
+entity fail, loudly, and the erasure rolls back whole.
+A `LANGUAGE sql` function written with a string body (`AS $$ ... $$`) is parsed again when it runs
+and fails there exactly like plpgsql; only a SQL-standard body (`BEGIN ATOMIC ... END` or
+`RETURN ...`, PostgreSQL 14 and later) binds its names when the function is created and is
+unaffected. For either kind, the remedy is the `ALTER FUNCTION` above, or rewriting the function
+with a SQL-standard body.
 
 ## Steps
 
@@ -167,6 +220,7 @@ no WARN. If instead you get:
 | `SHRED-SCHEMA-005` | verification could not complete. A catalogue read was refused, or a migration is in flight |
 | `SHRED-SCHEMA-006` | `initialize-schema=true` and the DDL failed. Use the owner-applied path instead |
 | `SHRED-SCHEMA-007` | a privilege the application needs is missing. Step 5 is incomplete |
+| `SHRED-CONFIG-001` naming an entity and a schema | a `@Shredded` entity's mapping names no schema. See "Every installation: name the schema your entities live in" above |
 
 Every message lists **every** problem it found, so one round of fixes is enough.
 

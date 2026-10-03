@@ -121,11 +121,18 @@ survived. `@Table(schema = ...)` and `hibernate.default_schema` are both support
 catalog-qualified table, and a table or schema whose identifier is not folded lowercase, are refused
 at startup with `SHRED-CONFIG-001` rather than addressed by a guess.
 
-**Residual.** When the mapping names no schema at all, Hibernate's own table expression is
-unqualified and so is this module's, and `search_path` decides — exactly as it does for Hibernate's
-own statements. That is the intended property: this module addresses the table Hibernate addresses.
-This module's own tables (`shredding_*`) are unqualified deliberately and are expected on the
-runtime role's `search_path`.
+**A mapping that names no schema is refused at startup.** It used to be the intended property
+("this module addresses the table Hibernate addresses"), and what it cost was measured: with no
+`@Table(schema)` and no `hibernate.default_schema`, the blind-index `UPDATE`, the module's own
+same-text read-back and the read-back Hibernate renders are all unqualified, a table of the same
+name in a schema ahead of the real one on the role's path takes all three at once, they agree with
+each other, and the erasure reports `COMPLETE` over untouched residue. Startup now refuses with
+`SHRED-CONFIG-001`, naming the entity and both spellings of the remedy. It is also what makes the
+one-statement window below possible: that window leaves no role-writable schema on the path, so the
+relation in the framework-rendered statement has to come from the mapping, and inside the window an
+unqualified relation is an error rather than a decoy read.
+
+This module's own tables (`shredding_*`) are qualified to the schema verified at boot.
 
 ### Which column this module's statements address (S-22, S-24)
 
@@ -929,36 +936,86 @@ no error, which is what the exact comparison catches, and the clause says nothin
 later edit adds, which is what the body comparison catches. A mismatch is `SHRED-SCHEMA-003` and
 the remedy is to re-apply `schema-postgresql.sql` as the owner.
 
-**What is still resolved by a session, named rather than implied.**
+**The one statement a session still resolves, and the window it runs in.**
 
-- The **independent** blind-index read-back is rendered by Hibernate, and HQL offers no way to write
-  `pg_catalog.count(*)` or an `OPERATOR(pg_catalog....)` comparison. That leg still resolves its
-  aggregate and its `=` through the session's `search_path`. It is not alone on the column: the
-  module's own same-text read-back over the same column in the same transaction is qualified and
-  refuses on its own. Closing the framework-rendered half needs a mechanism of its own — the
-  statement's `search_path` replaced for the width of that one statement and restored immediately —
-  and that is a separate change, not a correction.
-- The **cross-tenant WARN** read-back is qualified: it is written
-  `(<tenant> IS NULL OR NOT (<tenant> OPERATOR(pg_catalog.=) ?))`, which avoids the keyword
-  spelling of the type's own equality that has no `OPERATOR(pg_catalog....)` form at all and was
-  the one name in this module qualification could not reach. The tenant column is nullable, so a
-  bare `OPERATOR(pg_catalog.<>)` is not equivalent - `NULL <> ?` is `NULL`, which would drop
-  exactly the rows this WARN exists to find - and the rewrite above is the one that is equivalent
-  for the non-null bound value this always passes. On a hostile path the keyword form this module
-  no longer writes would have *suppressed* the WARN rather than inflated it, which costs the
-  accuracy of a log line and never the erasure's verdict: it is a WARN, and every refusing leg on
-  the same column is qualified. It moves inside the same one-statement window as the leg above.
+Exactly one statement of an erasure is not covered by qualification the way the rest are: the
+**independent** blind-index read-back is rendered by Hibernate from the entity mapping, and HQL
+offers no way to write `pg_catalog.count(*)` or an `OPERATOR(pg_catalog....)` comparison - there is
+no name in that text for this module to qualify. It runs with the connection's `search_path`
+**replaced** by `pg_catalog, pg_temp` for the width of that one statement and restored immediately
+afterwards. For this leg the window is the only mechanism there is.
+
+The **cross-tenant WARN** read-back is written by this module and every name in it is qualified:
+`(<tenant> IS NULL OR NOT (<tenant> OPERATOR(pg_catalog.=) ?))` (finding C-A-6), over a two-part
+relation. It runs **outside** the window (finding C-18-6): the session's path decides nothing in it,
+so a window there could change no answer any test can observe, and a module-written statement
+inside one would be held to a weaker reading of the name gate. An earlier spelling reached the
+type's own equality through a grammar keyword, which has no `OPERATOR(pg_catalog....)` form, and the
+window was first built around that. The tenant column is nullable, so a bare
+`OPERATOR(pg_catalog.<>)` is not equivalent - `NULL <> ?` is `NULL`, which would drop exactly the
+rows this WARN exists to find - and the spelled-out form above is equivalent for the non-null bound
+value this always passes. What is at risk is the accuracy of a `WARN` line and never the erasure's
+verdict: every refusing leg on the same column is qualified.
+
+A replacement rather than a prefix, because order is not a defence: PostgreSQL ships no `=` with
+`varchar` on either side, so an `=(varchar, varchar)` a role creates in a schema it owns is an exact
+match and wins at step 2 of operator resolution whatever the path says. Only removing that schema
+from the candidate set changes the answer. The window is six statements — capture, pin, read the pin
+back, the statement, restore, read the restore back — because a pin that is not read back is a
+fiction: in auto-commit `set_config(..., true)` returns the pinned value while the next statement
+sees the old path, so an auto-commit connection is refused outright with `SHRED-SCHEMA-008`. The
+restore **binds** the captured bytes: a role may put a quote and a statement terminator in its own
+`search_path`, and a restore composed into statement text then leaves the control off and sends
+attacker-supplied text as a second statement. A failure inside the window propagates itself with the
+refused restore attached as suppressed, never replaced by an isolation code.
+
+`SHRED-SCHEMA-008` is the only `SHRED-SCHEMA-*` code that is never a startup condition and never
+means "re-apply the script": it means the connection was in auto-commit, or something moved
+`search_path` inside the erasure's transaction. The erasure's whole transaction rolls back — no key
+destroyed, no index half-cleared, no record appended.
+
+**The window is one statement wide, and that is a property, not a style.** The erasure's own
+`UPDATE` runs outside it, on the path the transaction arrived with, with every name in it qualified
+by this module — so an application trigger whose body names a relation unqualified still fires and
+still succeeds. A window around the whole transaction would break that application. The test suite's
+name gate checks the invariant: it refuses any statement of this module's own inside a window.
+
+**The window needs the relation to come from the mapping, which is why startup refuses a
+schema-less one.** Nothing role-writable is left on the bracketed path, so a relation name that is
+not qualified cannot resolve in there at all. Keeping the application's own schema on the bracketed
+path so an unqualified name still resolved would put that schema back in the candidate set and
+re-open the operator-shadowing hole verbatim. The two controls are therefore one: the startup
+refusal below, and this window.
+
+**What a `SELECT` can still run inside the window.** A row-level-security policy function, and a
+function called from a view an entity is mapped to, resolve their own unqualified names in there and
+fail loudly (`relation "..." does not exist`) rather than silently. So does the mapping's own SQL:
+the text of a `@SQLRestriction` and of every auto-enabled `@Filter` condition on a `@BlindIndex`
+entity is rendered by Hibernate into the windowed read-back, and an unqualified function, relation or
+non-keyword type name in it does not resolve there. That is the commoner case, and it makes every
+erasure of that entity fail, loudly and with the transaction rolled back whole (the data key is
+still present afterwards), while the application itself reads and writes the entity normally. The
+remedy is to schema-qualify every function, relation and non-keyword type those fragments name, for
+example `@SQLRestriction("public.pr18_visible(owner_id)")`; a qualified function whose body resolves
+names at run time needs the remedy below as well. A string-body `LANGUAGE sql` function (`AS $$ ... $$`) is parsed again each time it runs, on the
+path in force then, so inside the window it behaves exactly like a plpgsql function and fails with
+`relation "..." does not exist`. Only a SQL-standard body (`BEGIN ATOMIC ... END` or `RETURN ...`,
+PostgreSQL 14 and later) binds its names when the function is created and is unaffected. If you
+have a function of either kind that names something unqualified, give it its own clause:
+`ALTER FUNCTION <fn> SET search_path = <schema>, pg_catalog` (the same mechanism this module gives
+its own guards), or rewrite it with a SQL-standard body. The failure mode is availability of that one erasure, fail-closed, and it is
+reported with the database's own message.
 - The **mapping admission** — whether the relation a `@Shredded` entity names is an ordinary
   permanent table, reachable, not hidden by a row-level-security policy, and whose compared columns
   have a `pg_catalog` equality operator and a deterministic collation — is read from the catalogue
   before the first erasure by a separate change. Until then an extension type such as `citext` on a
   tenant or subject column is not refused, and a `citext` comparison is case-insensitive, which
   makes a blind index match more rows than the erasure cleared.
-- The application's **own** tables are reached through the entity mapping by the blind-index clear
-  and by the Hibernate-rendered read-back, and this module neither verifies nor qualifies those on
-  your behalf. If your own schema must not be shadowable either, pin `hibernate.default_schema` or
-  map `@Table(schema = ...)`. Without it, this module's erasure statements and Hibernate's own
-  statements can be made to address different tables of the same name.
+- The application's **own** tables are reached through the entity mapping, and this module does not
+  validate their contents on your behalf: the role owns its own data tables and can drop them, and
+  that is not a control a library can hold. What is closed is the module's three legs and
+  Hibernate's rendering disagreeing about *which* table they are talking about — the mapping must
+  name a schema (`hibernate.default_schema`, or `@Table(schema = ...)`) or startup refuses.
 - A `search_path` is still the operator's to set, and nothing here depends on it being sane. What
   these changes remove is the module's *dependence* on it.
 

@@ -87,6 +87,7 @@ class CipherProbeCompositeIdTest {
                 "shredding.erasure-log.hmac-secret=" + b64("compositeid-chain-secret-32byte!"),
                 "shredding.blind-index.hmac-secret=" + b64("compositeid-index-secret-32byte!"),
                 "spring.jpa.hibernate.ddl-auto=create-drop",
+                "spring.jpa.properties.hibernate.default_schema=public",
                 "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect",
                 "spring.datasource.url=" + POSTGRES.getJdbcUrl(),
                 "spring.datasource.username=" + POSTGRES.getUsername(),

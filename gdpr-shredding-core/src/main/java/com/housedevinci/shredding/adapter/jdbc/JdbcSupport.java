@@ -10,15 +10,20 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import javax.sql.DataSource;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Plain-JDBC helpers shared by the adapters. No Spring. */
 public final class JdbcSupport {
+
+  private static final Logger log = LoggerFactory.getLogger(JdbcSupport.class);
 
   private JdbcSupport() {}
 
@@ -107,6 +112,225 @@ public final class JdbcSupport {
 
   private static void appendLengthPrefixed(StringBuilder sb, String value) {
     sb.append('|').append(value.getBytes(StandardCharsets.UTF_8).length).append(':').append(value);
+  }
+
+  /**
+   * The value the window of {@link #inOneStatementWindow} replaces the session's {@code
+   * search_path} with, and the same constant {@code SchemaVerification} pins for its own catalogue
+   * reads: one pinned value in this module, not two.
+   *
+   * <p>{@code pg_temp} is named for a measured reason (T10): the temporary schema precedes the path
+   * <em>implicitly</em> for relation references, and naming it late is the only way to demote it.
+   * It is safe to name - a role holding {@code TEMPORARY} can create {@code
+   * pg_temp.=(varchar,varchar)} and a {@code pg_temp.count(*)}, and neither is ever consulted, even
+   * with {@code pg_temp} named first (T8a, T8b): the temporary schema is consulted for relation
+   * names only.
+   */
+  static final String PINNED_PATH = "pg_catalog, pg_temp";
+
+  private static final String READ_SEARCH_PATH = "SELECT pg_catalog.current_setting('search_path')";
+
+  private static final String PIN_SEARCH_PATH =
+      "SELECT pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true)";
+
+  /**
+   * The restore. Two properties, both load-bearing.
+   *
+   * <p><b>The captured bytes are bound, never composed into this text (M2).</b> A role may set its
+   * own {@code search_path} to a value containing a quote and a statement terminator, {@code
+   * current_setting} returns those bytes verbatim, and a composed restore then either fails to
+   * parse or sets the path to the attacker's first token and sends a second statement (A23).
+   *
+   * <p><b>{@code is_local = false}, which is one deviation from section 4.2's step 5 and was forced
+   * by a measurement the design page did not have.</b> A transaction-local restore <em>shadows</em>
+   * a non-local {@code SET} issued inside the window for the rest of the transaction - so the
+   * step-6 read-back sees the bytes it just sent and nothing else - and at {@code COMMIT} the local
+   * value is discarded and the session is left carrying the non-local one. The only way to execute
+   * a {@code SET} in there is a plpgsql body the framework-rendered statement reaches (M8), but
+   * "the read-back cannot see it" is not a property this restore may have. Sent non-locally, the
+   * restore is the last writer either way: on {@code COMMIT} the session carries the bytes it
+   * arrived with, and on {@code ROLLBACK} the whole transaction's settings are discarded, which
+   * reaches the same place.
+   */
+  private static final String RESTORE_SEARCH_PATH =
+      "SELECT pg_catalog.set_config('search_path', ?, false)";
+
+  /** One statement, run inside the window. */
+  @FunctionalInterface
+  interface WindowWork<T> {
+    T run() throws SQLException;
+  }
+
+  /**
+   * Runs <b>exactly one statement</b> with this connection's {@code search_path} replaced by {@link
+   * #PINNED_PATH} for the duration of that statement, and restores the session to the exact bytes
+   * it arrived with (name-resolution design section 4.2, finding C-13-14).
+   *
+   * <p><b>Why a replacement and not a prefix.</b> PostgreSQL's operator resolution is not ordered
+   * by {@code search_path}: it ships no {@code =} with {@code varchar} on either side, so an
+   * application-defined {@code =(varchar, varchar)} is an <em>exact</em> match and is selected at
+   * step 2 whatever the order (N-1). Only removing the role-writable schema from the candidate set
+   * changes the answer, and only a replacement does that. For a relation the same replacement turns
+   * a silent decoy read into an error (N-2, T2f), which is fail-closed and loud.
+   *
+   * <p><b>The invariant, and it is not a recommendation: the unit of work is one statement.</b>
+   * Everything that makes this window acceptable rests on it. The erasure's own {@code UPDATE} runs
+   * outside it, on the path the transaction arrived with, with every name in it qualified by this
+   * module; an application trigger whose body names a relation unqualified therefore still fires
+   * and still succeeds (T17), where revision 1's transaction-wide pin broke it (T15b). A second
+   * statement inside one window is how the window becomes a transaction again by accident, and it
+   * is the one place an exception could be swallowed with the path still replaced. The window is
+   * for text this module cannot qualify, which is the framework-rendered read-back and nothing
+   * else: the cross-tenant WARN count is module-written, fully qualified, and runs outside it
+   * (C-18-6). The name gate ({@code NameQualificationGateTest}) refuses any text-carrying statement
+   * call of this module's own inside a window, so the invariant is checked and not merely written
+   * down here.
+   *
+   * <p><b>Six statements, three of them read-backs, because a pin that is not read back is a
+   * fiction.</b> In auto-commit, {@code set_config(..., true)} <em>returns</em> the pinned value
+   * while the next statement sees the old path (T7), so a form that compared {@code set_config}'s
+   * own return value would be exactly the lie it exists to detect. An auto-commit connection is
+   * therefore refused before anything is changed, and both the pin and the restore are read back
+   * with a separate statement.
+   *
+   * <p><b>What a {@code SELECT} can still run in here (M8).</b> A row-level-security policy
+   * function and a function called from a mapped view resolve their own unqualified names inside
+   * this window and fail loudly. So does a string-body {@code LANGUAGE sql} function ({@code AS $$
+   * ... $$}), which is parsed again when it runs and behaves like plpgsql here; only a SQL-standard
+   * body ({@code BEGIN ATOMIC ... END} or {@code RETURN ...}) binds its names when the function is
+   * created. The remedy for either is in SECURITY-NOTES: {@code ALTER FUNCTION ... SET
+   * search_path}, or rewriting the function with a SQL-standard body.
+   *
+   * @throws com.housedevinci.shredding.domain.ShreddingException {@code SHRED-SCHEMA-008} when the
+   *     arrived path cannot be captured or the replacement cannot be established (a {@code
+   *     SQLException} in steps 1 to 3, attached as the cause; the statement itself, step 4, still
+   *     surfaces its own failure), or when the session is not carrying the bytes it arrived with
+   *     once the statement has succeeded. The caller's transaction is expected to roll back: there
+   *     is no partial state to repair, and a {@code LOCAL} setting is discarded by {@code COMMIT}
+   *     as well as by {@code ROLLBACK} (C-17), so a replaced path can never escape onto a pooled
+   *     connection either way.
+   */
+  static <T> T inOneStatementWindow(Connection c, WindowWork<T> work) throws SQLException {
+    if (c.getAutoCommit()) {
+      throw isolationFailed(
+          "the connection reached the independent read-back in auto-commit, so the"
+              + " transaction-local search_path this module replaces for that one statement would"
+              + " be discarded before the statement ran and the statement would resolve its names"
+              + " on the session's own path. Nothing was changed on the connection. Every erasure"
+              + " runs inside JdbcSupport.inTransaction, which sets auto-commit off, so this means"
+              + " the connection was handed over by something else.",
+          null);
+    }
+    String arrived;
+    try {
+      arrived = readSearchPath(c);
+    } catch (SQLException e) {
+      throw isolationFailed(
+          "the session's search_path could not be captured (step 1). Nothing was changed on the"
+              + " connection.",
+          e);
+    }
+    Throwable primary = null;
+    T result = null;
+    try {
+      // Steps 2 and 3 establish the window. A SQLException here means the window was never
+      // established: that is the isolation code (C-18-4). Only what work.run() throws, after this
+      // block, surfaces as itself (M3).
+      try {
+        try (Statement st = c.createStatement()) {
+          st.execute(PIN_SEARCH_PATH);
+        }
+        String pinned = readSearchPath(c);
+        if (!PINNED_PATH.equals(pinned)) {
+          throw isolationFailed(
+              "the independent read-back's search_path was replaced with '"
+                  + PINNED_PATH
+                  + "' and read back as '"
+                  + pinned
+                  + "'. The statement was not run.",
+              null);
+        }
+      } catch (SQLException e) {
+        throw isolationFailed(
+            "the replacement search_path could not be established (steps 2 and 3).", e);
+      }
+      result = work.run();
+    } catch (SQLException | RuntimeException | Error e) {
+      primary = e;
+      throw e;
+    } finally {
+      Throwable closing = closeWindow(c, arrived);
+      if (closing != null) {
+        if (primary == null) {
+          throw closing instanceof ShreddingException refusal
+              ? refusal
+              : isolationFailed(
+                  "the session's search_path could not be restored after the independent"
+                      + " read-back, and the read-back itself had succeeded, so the replacement"
+                      + " may still be in force inside a transaction that is about to commit.",
+                  closing);
+        }
+        // M3: the statement inside the window failed, which aborts the transaction, so the restore
+        // is refused with 25P02 - expected, and the rollback is the restore. The failure that
+        // actually happened is the one the caller needs; this one is attached to it.
+        primary.addSuppressed(closing);
+        log.debug(
+            "shredding: the search_path restore was refused after a failure inside the"
+                + " one-statement window; the transaction is rolling back, which restores it",
+            closing);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Steps 5 and 6: the restore and its read-back. Returns the failure rather than throwing it, so
+   * the caller decides whether it replaces the original exception or is suppressed by it (M3).
+   */
+  private static Throwable closeWindow(Connection c, String arrived) {
+    try {
+      try (PreparedStatement ps = c.prepareStatement(RESTORE_SEARCH_PATH)) {
+        ps.setString(1, arrived);
+        ps.execute();
+      }
+      String restored = readSearchPath(c);
+      if (!arrived.equals(restored)) {
+        return isolationFailed(
+            "the session's search_path arrived as '"
+                + arrived
+                + "' and reads as '"
+                + restored
+                + "' after the independent read-back. Something moved it inside this"
+                + " transaction.",
+            null);
+      }
+      return null;
+    } catch (SQLException | RuntimeException e) {
+      return e;
+    }
+  }
+
+  private static String readSearchPath(Connection c) throws SQLException {
+    try (Statement st = c.createStatement();
+        ResultSet rs = st.executeQuery(READ_SEARCH_PATH)) {
+      if (!rs.next()) {
+        throw isolationFailed("current_setting('search_path') returned no row", null);
+      }
+      return rs.getString(1);
+    }
+  }
+
+  private static ShreddingException isolationFailed(String what, Throwable cause) {
+    String message =
+        "shredding: the module could not isolate the name resolution of its independent"
+            + " read-back - "
+            + what
+            + " The erasure's transaction is rolled back whole: no key is destroyed, no blind"
+            + " index is left half-cleared and no record is appended. This is never a schema"
+            + " condition and never means re-apply schema-postgresql.sql.";
+    return cause == null
+        ? new ShreddingException(ErrorCodes.SCHEMA_NAME_ISOLATION, message)
+        : new ShreddingException(ErrorCodes.SCHEMA_NAME_ISOLATION, message, cause);
   }
 
   static OffsetDateTime ts(Instant i) {

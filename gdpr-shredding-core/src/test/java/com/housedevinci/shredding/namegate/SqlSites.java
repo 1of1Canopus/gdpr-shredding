@@ -28,6 +28,12 @@ import java.util.Set;
  * QUALIFYING_CALLS}, {@link SqlNameLexer#HOLE} for everything else - and the lexer refuses a plain
  * hole in relation position.
  *
+ * <p>{@code TableRef.sql()} is in {@code QUALIFYING_CALLS} as of this PR, and only because this PR
+ * also lands design section 3.2: a {@code @Shredded} or {@code @BlindIndex} entity whose table
+ * expression names no schema is refused at startup, so the one-part rendering is unreachable for
+ * every {@code TableRef} a statement here is built from. The two move together or the gate fails
+ * (C-A-14).
+ *
  * <p>The naive alternative - "a literal containing a SQL keyword" - was measured and rejected: on
  * this head it selects 31 chains that never reach a statement, 27 of them prose error messages
  * ({@code "shredding.jdbc.initialize-schema=true, and running the bundled ..."}) and 4 statement
@@ -47,11 +53,19 @@ public final class SqlSites {
    */
   public record Site(String file, int line, List<String> variants) {}
 
+  /**
+   * One {@link #WINDOW_CALLS} call site, with how many text-carrying statement calls it encloses.
+   * The window's whole contract is one statement (design section 4.3, M9), and the gate is what
+   * checks it: a second statement inside one window is how the window becomes a transaction again
+   * by accident.
+   */
+  public record Window(String file, int line, int statements) {}
+
   /** A statement call the resolver could not resolve: a gate failure by itself. */
   public record Unresolved(String file, int line, String argument) {}
 
-  /** The result of a scan: what was resolved, and what was not. */
-  public record Scan(List<Site> sites, List<Unresolved> unresolved) {}
+  /** The result of a scan: what was resolved, what was not, and every window that was opened. */
+  public record Scan(List<Site> sites, List<Unresolved> unresolved, List<Window> windows) {}
 
   /**
    * Package-private, not private (C-A-13): {@code NameQualificationGateTest} asserts its starter
@@ -75,24 +89,54 @@ public final class SqlSites {
   public static final Set<String> FILE_READ_CALLS = Set.of("schemaScript()");
 
   /**
+   * The one-statement window of {@code JdbcSupport.inOneStatementWindow} (design section 4). A
+   * statement call lexically inside this call's argument list is a statement that reaches the
+   * server with the path replaced, and nothing else is: the helper opens the window itself, runs
+   * the unit of work, and closes it in a {@code finally}. The gate counts the statements this
+   * module writes inside each such call and requires zero (finding C-18-6); it admits no name
+   * because of where a statement sits.
+   */
+  public static final Set<String> WINDOW_CALLS = Set.of("inOneStatementWindow");
+
+  /**
    * The calls whose result <b>cannot be a one-part name</b>, so a hole they produce carries its
    * schema (C-A-5).
    *
-   * <p>One entry, and it is a construction rule rather than a convention. {@link
-   * com.housedevinci.shredding.adapter.jdbc.VerifiedSchema#qualify} is {@code quote(name) + "." +
-   * quote(relation)} with no branch: there is no input for which it returns one part, and the
-   * schema it names is the one {@code current_schema()} answered on the connection verification ran
-   * on. An operand ending in this call resolves to {@link SqlNameLexer#QUALIFIED_HOLE}, which is
-   * the only hole the lexer accepts in relation position.
+   * <p>Two entries, with two different construction rules, and the difference is why each is
+   * documented rather than listed:
    *
-   * <p>{@code TableRef.sql()} is deliberately <b>not</b> here. {@code TableRef.schema} is an {@code
-   * Optional} and the method renders {@code "t"} when the mapping names no schema, so a hole it
-   * produces is exactly the case the gate must refuse; design section 3.2's startup refusal, which
-   * makes a schema-less {@code @Shredded} mapping impossible, is PR B1's and not this PR's. Until
-   * it lands the six user-table relation sites are carried as named open refusals in the gate's
-   * test, each with that mechanism named.
+   * <ul>
+   *   <li>{@code qualify} - {@link com.housedevinci.shredding.adapter.jdbc.VerifiedSchema#qualify}
+   *       is {@code quote(name) + "." + quote(relation)} with no branch: there is no input for
+   *       which it returns one part, and the schema it names is the one {@code current_schema()}
+   *       answered on the connection verification ran on. The rule is in the method.
+   *   <li>{@code sql} - {@link com.housedevinci.shredding.domain.TableRef#sql()} <b>can</b> render
+   *       one part: {@code TableRef.schema} is an {@code Optional}. The rule is therefore not in
+   *       the method but in design section 3.2, which this PR implements: {@code ShreddedModel}
+   *       refuses at startup, with {@code SHRED-CONFIG-001}, any entity carrying {@code @Shredded}
+   *       or {@code @BlindIndex} whose table expression names no schema. Every {@code TableRef}
+   *       that reaches a statement this gate reads comes from such an entity's persister, so on a
+   *       context that booted its schema is present. The refusal is measured by {@code
+   *       CipherProbeSchemaGateTest} and by the starter's schema-requirement tests, not assumed
+   *       here; {@code NameQualificationGateTest#the_nine_refusal_carry_expires...} is what keeps
+   *       this entry and that mechanism from drifting apart (C-A-14).
+   * </ul>
+   *
+   * <p>What {@code sql} does <b>not</b> claim: {@link
+   * com.housedevinci.shredding.domain.ColumnRef#sql()} has the same method name and renders a bare
+   * column, which section 3.2 says nothing about. A hole is therefore accepted as qualified only
+   * when the call before {@code sql()} is in {@link #QUALIFYING_RECEIVERS}; {@code column().sql()}
+   * stays a plain hole, which costs nothing in column position and is still refused if a later edit
+   * puts it in a relation or a type position.
    */
-  static final Set<String> QUALIFYING_CALLS = Set.of("qualify");
+  static final Set<String> QUALIFYING_CALLS = Set.of("qualify", "sql");
+
+  /**
+   * The accessors whose {@code sql()} is a {@link com.housedevinci.shredding.domain.TableRef} and
+   * so is covered by design section 3.2's startup refusal. Any other receiver of {@code sql()}
+   * resolves to a plain hole.
+   */
+  static final Set<String> QUALIFYING_RECEIVERS = Set.of("table", "tableName");
 
   private SqlSites() {}
 
@@ -104,17 +148,21 @@ public final class SqlSites {
   public static Scan scan(List<Path> files) {
     var sites = new ArrayList<Site>();
     var unresolved = new ArrayList<Unresolved>();
+    var windows = new ArrayList<Window>();
     for (Path file : files) {
-      scanOne(file, sites, unresolved);
+      scanOne(file, sites, unresolved, windows);
     }
-    return new Scan(List.copyOf(sites), List.copyOf(unresolved));
+    return new Scan(List.copyOf(sites), List.copyOf(unresolved), List.copyOf(windows));
   }
 
-  private static void scanOne(Path file, List<Site> sites, List<Unresolved> unresolved) {
+  private static void scanOne(
+      Path file, List<Site> sites, List<Unresolved> unresolved, List<Window> windows) {
     String source = read(file);
     List<Tok> toks = lexJava(source);
     Map<String, List<String>> bindings = bindings(toks);
     String name = file.getFileName().toString();
+    List<int[]> windowRanges = windowRanges(toks);
+    var statementsPerWindow = new int[windowRanges.size()];
 
     for (int i = 0; i < toks.size(); i++) {
       Tok t = toks.get(i);
@@ -138,8 +186,41 @@ public final class SqlSites {
         unresolved.add(new Unresolved(name, line(source, t.at), text));
         continue;
       }
+      int window = windowOf(windowRanges, i);
+      if (window >= 0) {
+        statementsPerWindow[window]++;
+      }
       sites.add(new Site(name, line(source, t.at), variants));
     }
+    for (int w = 0; w < windowRanges.size(); w++) {
+      windows.add(new Window(name, line(source, windowRanges.get(w)[2]), statementsPerWindow[w]));
+    }
+  }
+
+  /**
+   * Every {@link #WINDOW_CALLS} call's argument list, as {@code {from, to, at}} token indices. A
+   * statement call between {@code from} and {@code to} is inside that window: the helper's contract
+   * is that it runs its unit of work with the path replaced, so lexical containment in the argument
+   * list is containment in the window.
+   */
+  private static List<int[]> windowRanges(List<Tok> toks) {
+    var out = new ArrayList<int[]>();
+    for (int i = 0; i < toks.size() - 1; i++) {
+      Tok t = toks.get(i);
+      if (t.kind == K.IDENT && WINDOW_CALLS.contains(t.text) && toks.get(i + 1).is("(")) {
+        out.add(new int[] {i + 1, matching(toks, i + 1), t.at});
+      }
+    }
+    return out;
+  }
+
+  private static int windowOf(List<int[]> ranges, int index) {
+    for (int w = 0; w < ranges.size(); w++) {
+      if (index > ranges.get(w)[0] && index < ranges.get(w)[1]) {
+        return w;
+      }
+    }
+    return -1;
   }
 
   /**
@@ -284,7 +365,8 @@ public final class SqlSites {
         return bound;
       }
     }
-    if (QUALIFYING_CALLS.contains(lastCall(trimmed))) {
+    List<String> chain = callChain(trimmed);
+    if (qualifies(chain)) {
       return List.of(SqlNameLexer.QUALIFIED_HOLE);
     }
     if (trimmed.stream().anyMatch(t -> t.kind == K.STRING)) {
@@ -309,12 +391,12 @@ public final class SqlSites {
   }
 
   /**
-   * The name of the last method invoked in an operand, or {@code ""} when it invokes none. {@code
-   * schema.qualify(SchemaExpectations.DATA_KEY)} answers {@code qualify}; {@code
-   * first.tableName().sql()} answers {@code sql}.
+   * The methods invoked at the top level of an operand, in source order. {@code
+   * schema.qualify(SchemaExpectations.DATA_KEY)} answers {@code [qualify]}; {@code
+   * first.tableName().sql()} answers {@code [tableName, sql]}.
    */
-  private static String lastCall(List<Tok> operand) {
-    String last = "";
+  private static List<String> callChain(List<Tok> operand) {
+    var chain = new ArrayList<String>();
     int depth = 0;
     for (int i = 0; i < operand.size(); i++) {
       Tok t = operand.get(i);
@@ -326,10 +408,29 @@ public final class SqlSites {
           && t.kind == K.IDENT
           && i + 1 < operand.size()
           && operand.get(i + 1).is("(")) {
-        last = t.text;
+        chain.add(t.text);
       }
     }
-    return last;
+    return chain;
+  }
+
+  /**
+   * Whether the operand's call chain is one of {@link #QUALIFYING_CALLS}, with the receiver
+   * condition {@code sql} carries: {@code sql()} qualifies only on a {@link #QUALIFYING_RECEIVERS}
+   * accessor, because {@code ColumnRef.sql()} shares the method name and renders a bare column.
+   */
+  private static boolean qualifies(List<String> chain) {
+    if (chain.isEmpty()) {
+      return false;
+    }
+    String last = chain.get(chain.size() - 1);
+    if (!QUALIFYING_CALLS.contains(last)) {
+      return false;
+    }
+    if (!last.equals("sql")) {
+      return true;
+    }
+    return chain.size() >= 2 && QUALIFYING_RECEIVERS.contains(chain.get(chain.size() - 2));
   }
 
   private static List<String> orHole(List<String> resolved) {

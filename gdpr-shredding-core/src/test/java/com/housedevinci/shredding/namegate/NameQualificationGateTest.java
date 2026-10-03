@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * The name gate, section 3.5 of the name-resolution design (test N22).
@@ -146,72 +147,121 @@ class NameQualificationGateTest {
             "every operator, function, aggregate, type, cast and relation name in a statement this"
                 + " module builds must name its schema (design section 3.1). A column reference"
                 + " resolves against the FROM list and is not a name; a bind parameter is never a"
-                + " name. The one open refusal is named below and nothing else may join it.")
-        .containsExactlyElementsOf(OPEN_REFUSALS);
+                + " name. There is no open refusal, no allowlist and no relaxation: a keyword"
+                + " operator is refused wherever it appears (finding C-18-6).")
+        .isEmpty();
   }
 
   /**
-   * The names in this module that qualification cannot reach <b>in this PR</b>, each named with the
-   * mechanism that closes it rather than allowlisted by file, line or extension.
+   * The invariant the window's javadoc states and this is what checks it (design section 4.3, M9,
+   * as tightened by finding C-18-6): <b>no statement this module writes sits inside a window</b>.
+   * The window exists for text this module cannot qualify, which is the framework-rendered
+   * read-back and nothing else; a statement of the module's own in there would be a control that no
+   * test can show working, and would put module-written text under a weaker reading of the gate.
+   * Everything else that makes the window acceptable also rests on its width: the erasure's own
+   * {@code UPDATE} runs outside it on the arrived path, the application's trigger still fires
+   * (T17), and no exception can be swallowed with the path still replaced.
    *
-   * <p>All nine are the same name: the user table a blind-index statement addresses, rendered by
-   * {@code TableRef.sql()}. {@code TableRef.schema} is an {@code Optional}, and a {@code @Shredded}
-   * entity whose mapping names no schema - no {@code @Table(schema)}, no {@code
-   * hibernate.default_schema} - renders {@code "customer"}, which the server resolves along the
-   * writing session's {@code search_path}. The review measured it: as the runtime role, with {@code
-   * search_path = decoy, app, pg_catalog} and a {@code decoy.customer} it owns, {@code SELECT
-   * email_cipher FROM "customer"} read the decoy.
-   *
-   * <p><b>The mechanism that closes them is design section 3.2, and it is PR B1's.</b> Section 3.2
-   * refuses a schema-less {@code @Shredded} mapping at startup with {@code SHRED-CONFIG}; once it
-   * lands, {@code TableRef.sql()} cannot render one part for a shredded entity, {@code
-   * TableRef.sql} joins {@code SqlSites.QUALIFYING_CALLS}, and these nine entries are deleted by
-   * that PR. Section 3.2 exists in the design to make the candidate set of section 4's bracket
-   * sound, which is why revision 2.3 puts it in PR B1 beside the bracket and not here. Nine
-   * refusals carried with their mechanism named are the accurate state of a control whose other
-   * half is in the next PR; reporting them clean, which is what the dead leg did, is not.
-   *
-   * <p>What the exposure is bounded by, stated so nobody reads this as unguarded: it is named in
-   * SECURITY-NOTES and in the design's section 3.2, no document claims these tables are qualified,
-   * and the independent read-back of {@code JdbcErasureStore.verifyCleared} goes through
-   * Hibernate's own rendering, so an erasure whose statements addressed a shadow and cleared
-   * nothing is refused rather than recorded - the two legs would have to be shadowed consistently
-   * to agree.
-   *
-   * <p>The expectations are exact refusals, not files or lines: a tenth relation anywhere, or a
-   * keyword operator, or any other rule class, fails the gate. {@code IS DISTINCT FROM} is no
-   * longer among them - the cross-tenant WARN read-back is now written {@code (<tenant> IS NULL OR
-   * NOT (<tenant> OPERATOR(pg_catalog.=) ?))}, which is equivalent for the non-null bound value and
-   * resolves no name (finding C-A-6).
+   * <p>The framework-rendered read-back's statement is issued by Hibernate, not by a {@code
+   * prepareStatement} in this module's source, so a text gate cannot see it at all. That window's
+   * one-statement property rests on {@code StatelessSession} being unable to flush, on {@code
+   * HibernateBlindIndexResidual}'s contract, and on the behavioural probes - not on this assertion.
    */
-  private static final List<String> OPEN_REFUSALS =
-      List.of(
-          "JdbcErasureStore.java:288 unqualified relation: `<>` in ...UPDATE <> SET <> = NULL"
-              + " WHERE...",
-          "JdbcErasureStore.java:373 unqualified relation: `<>` in ...LECT pg_catalog.count(*)"
-              + " FROM <> WHERE (<> OPERATOR(...",
-          "JdbcErasureStore.java:413 unqualified relation: `<>` in ...LECT pg_catalog.count(*)"
-              + " FROM <> WHERE (<> OPERATOR(...",
-          "WriteVerification.java:259 unqualified relation: `<>` in ...SELECT <>, <> FROM <> WHERE"
-              + " (<> OPERATOR(...",
-          "WriteVerification.java:259 unqualified relation: `<>` in ...SELECT <>, <> FROM <> WHERE"
-              + " ( OR <> OPERA...",
-          "ShreddingEventListener.java:650 unqualified relation: `<>` in ...SELECT <> FROM <>"
-              + " WHERE <> OPERATOR(p...",
-          "ShreddingEventListener.java:650 unqualified relation: `<>` in ...SELECT , <> FROM <>"
-              + " WHERE <> OPERATOR(p...",
-          "ShreddingEventListener.java:873 unqualified relation: `<>` in ...SELECT <> FROM <>"
-              + " WHERE <> OPERATOR(p...",
-          "ShreddingEventListener.java:873 unqualified relation: `<>` in ...SELECT , <> FROM <>"
-              + " WHERE <> OPERATOR(p...");
+  @Test
+  void every_window_holds_zero_statements_of_this_modules_own() {
+    var scan = SqlSites.scan(sources());
+
+    assertThat(scan.windows())
+        .describedAs("the framework read-back's window must be found at all")
+        .isNotEmpty();
+    assertThat(scan.windows().stream().filter(w -> w.statements() > 0).toList())
+        .describedAs(
+            "a statement this module wrote, inside a window: the window is for text the module"
+                + " cannot qualify, and the gate holds this module's own text to the full rule")
+        .isEmpty();
+  }
 
   /**
-   * C-A-14: the nine entries of {@link #OPEN_REFUSALS} are carried only because {@code
-   * TableRef.sql()} is not yet in {@link SqlSites#QUALIFYING_CALLS} (design section 3.2, PR B1's
-   * mechanism). The day it joins, {@code TableRef.sql()} cannot render a one-part name any more and
-   * the nine refusals must be deleted; until then they must stay. This fails on either drift: the
-   * carry present after the mechanism lands, or the mechanism absent with no carry to explain why
-   * qualification does not reach these nine names.
+   * The negative of the rule above, on a synthetic source rather than on this module's own: the
+   * gate has to be able to see a module-written statement in a window, or the assertion above is
+   * decoration.
+   */
+  @Test
+  void a_window_holding_two_statements_is_seen_by_the_gate(@TempDir Path dir) throws IOException {
+    Path two = dir.resolve("TwoStatements.java");
+    Files.writeString(
+        two,
+        """
+        class TwoStatements {
+          void run() {
+            JdbcSupport.inOneStatementWindow(
+                c,
+                () -> {
+                  c.prepareStatement("SELECT pg_catalog.count(*) FROM pg_catalog.pg_class");
+                  c.prepareStatement("SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc");
+                  return 1L;
+                });
+          }
+        }
+        """);
+
+    var scan = SqlSites.scan(List.of(two));
+
+    assertThat(scan.windows()).hasSize(1);
+    assertThat(scan.windows().get(0).statements()).isEqualTo(2);
+    assertThat(scan.sites()).hasSize(2);
+  }
+
+  /**
+   * There is no admission: a keyword operator ({@code IS DISTINCT FROM}, {@code LIKE}, ...) has no
+   * {@code OPERATOR(pg_catalog....)} spelling, and since finding C-18-6 no statement this module
+   * writes is run inside the window that used to excuse it. It is refused everywhere.
+   */
+  @Test
+  void a_keyword_operator_is_refused_everywhere() {
+    assertThat(rules("SELECT pg_catalog.count(*) FROM s.t WHERE a IS DISTINCT FROM ?"))
+        .containsExactly("keyword operator");
+    assertThat(rules("SELECT 1 FROM s.t WHERE a LIKE ?")).containsExactly("keyword operator");
+    assertThat(rules("SELECT 1 FROM s.t WHERE (a OPERATOR(pg_catalog.=) ? COLLATE ci)"))
+        .contains("keyword operator");
+  }
+
+  /**
+   * The names in this module that qualification cannot reach: <b>none, as of this PR</b>.
+   *
+   * <p>Until this PR the list held nine entries, all the same name - the user table a blind-index
+   * statement addresses, rendered by {@code TableRef.sql()}. {@code TableRef.schema} is an {@code
+   * Optional}, and a {@code @Shredded} entity whose mapping named no schema - no
+   * {@code @Table(schema)}, no {@code hibernate.default_schema} - rendered {@code "customer"},
+   * which the server resolved along the writing session's {@code search_path}. The review measured
+   * it: as the runtime role, with {@code search_path = decoy, app, pg_catalog} and a {@code
+   * decoy.customer} it owns, {@code SELECT email_cipher FROM "customer"} read the decoy.
+   *
+   * <p><b>The mechanism that closes them is design section 3.2, and it is in this PR.</b> {@code
+   * ShreddedModel} now refuses at startup, with {@code SHRED-CONFIG-001}, any entity carrying
+   * {@code @Shredded} or {@code @BlindIndex} whose table expression names no schema. A one-part
+   * rendering is therefore unreachable for every {@code TableRef} these statements are built from,
+   * {@code TableRef.sql} has joined {@code SqlSites.QUALIFYING_CALLS}, and the nine entries are
+   * gone. Section 3.2 was put in this PR rather than the previous one because it is also what makes
+   * section 4's one-statement window sound: the window must leave no role-writable schema on the
+   * path, so the relation has to come from the mapping.
+   *
+   * <p>The list stays, empty, rather than being deleted with the carry: {@link
+   * #the_nine_refusal_carry_expires_the_day_table_ref_sql_joins_qualifying_calls} reads it in both
+   * directions, so an edit that took {@code sql} back out of {@code QUALIFYING_CALLS} without
+   * re-stating what is then unqualified fails the gate.
+   */
+  private static final List<String> OPEN_REFUSALS = List.of();
+
+  /**
+   * C-A-14: {@link #OPEN_REFUSALS} and {@code TableRef.sql} being in {@link
+   * SqlSites#QUALIFYING_CALLS} are one fact read two ways, and this is the assertion that keeps
+   * them one. The nine entries the previous PR carried existed only because the mechanism of design
+   * section 3.2 had not landed; this PR lands it, {@code sql} joins {@code QUALIFYING_CALLS}, and
+   * the list is empty. It fails on either drift: a carry still listed after the mechanism landed
+   * (the gate reporting an exposure it no longer has, and keeping the nine entries as a permanent
+   * allowlist), or the mechanism taken back out with no carry re-stating what is then unqualified
+   * (the gate reporting clean over a name the server resolves, which is what the dead leg did).
    */
   @Test
   void the_nine_refusal_carry_expires_the_day_table_ref_sql_joins_qualifying_calls() {

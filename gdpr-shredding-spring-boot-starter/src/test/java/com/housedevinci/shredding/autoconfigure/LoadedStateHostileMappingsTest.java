@@ -96,6 +96,7 @@ class LoadedStateHostileMappingsTest {
                 // repositories with colliding bean names, and none of them is what is being probed.
                 "spring.data.jpa.repositories.enabled=false",
                 "spring.jpa.hibernate.ddl-auto=create-drop",
+                "spring.jpa.properties.hibernate.default_schema=public",
                 "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect",
                 "spring.datasource.url=" + POSTGRES.getJdbcUrl(),
                 "spring.datasource.username=" + POSTGRES.getUsername(),

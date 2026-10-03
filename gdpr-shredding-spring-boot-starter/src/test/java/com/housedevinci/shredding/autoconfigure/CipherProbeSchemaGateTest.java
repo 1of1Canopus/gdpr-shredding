@@ -413,6 +413,7 @@ class CipherProbeSchemaGateTest {
                 "spring.datasource.username=" + user,
                 "spring.datasource.password=pw",
                 "spring.jpa.hibernate.ddl-auto=none",
+                "spring.jpa.properties.hibernate.default_schema=public",
                 "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect"));
     properties.addAll(List.of(extra));
     return new SpringApplicationBuilder(app)

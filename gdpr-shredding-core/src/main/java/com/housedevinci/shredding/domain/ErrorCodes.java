@@ -157,6 +157,25 @@ public final class ErrorCodes {
   public static final String RUNTIME_ROLE_UNDERPRIVILEGED = "SHRED-SCHEMA-007";
 
   /**
+   * C-13-14, name-resolution design section 4.4: the module could not isolate the name resolution
+   * of its independent read-back. One statement of an erasure is rendered by Hibernate from the
+   * entity mapping, so there is no name in it for this module to qualify; it runs instead with the
+   * session's {@code search_path} replaced by {@code pg_catalog, pg_temp} for that one statement
+   * and restored immediately, and this code is what the module raises when it cannot establish that
+   * the replacement was in force, or that the session was handed back carrying the exact bytes it
+   * arrived with.
+   *
+   * <p><b>Never a startup condition, and never "re-apply the script".</b> Unlike every other code
+   * in the {@code SHRED-SCHEMA} family, this one says nothing about the installed schema. It means
+   * the connection was in auto-commit when the erasure reached that statement, or something moved
+   * {@code search_path} inside the erasure's transaction. The whole transaction is rolled back, so
+   * no key is destroyed, no blind index is left half-cleared and no record is appended; callers
+   * should treat it as an outage of that operation, like {@link #KEY_UNAVAILABLE}, rather than as a
+   * misconfiguration of the database.
+   */
+  public static final String SCHEMA_NAME_ISOLATION = "SHRED-SCHEMA-008";
+
+  /**
    * C-20: a Spring Data repository call was bracketed, but the module could not establish that
    * every {@code EntityManagerFactory} bean in the application is the one instance {@code
    * ShreddingIntegrator} is wired to. A bracket that cannot tell which Hibernate session it is

@@ -79,6 +79,7 @@ class CipherProbeLedgerCapConfigTest {
                 "shredding.blind-index.hmac-secret=" + b64("starter-integration-index-secret"),
                 "shredding.write-verification.max-outstanding=" + cap,
                 "spring.jpa.hibernate.ddl-auto=create-drop",
+                "spring.jpa.properties.hibernate.default_schema=public",
                 "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect",
                 "spring.datasource.url=" + POSTGRES.getJdbcUrl(),
                 "spring.datasource.username=" + POSTGRES.getUsername(),

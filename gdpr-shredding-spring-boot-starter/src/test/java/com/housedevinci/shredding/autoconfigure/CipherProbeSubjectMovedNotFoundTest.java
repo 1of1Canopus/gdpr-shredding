@@ -72,6 +72,7 @@ class CipherProbeSubjectMovedNotFoundTest {
     registry.add(
         "shredding.blind-index.hmac-secret", () -> b64("s21b-integration-index-secret-!!"));
     registry.add("spring.jpa.hibernate.ddl-auto", () -> "create-drop");
+    registry.add("spring.jpa.properties.hibernate.default_schema", () -> "public");
     registry.add(
         "spring.jpa.properties.hibernate.dialect", () -> "org.hibernate.dialect.PostgreSQLDialect");
   }

@@ -26,7 +26,14 @@ import java.sql.Connection;
  *   <li>never begin or commit a transaction on it - that would commit a half-done erasure, with the
  *       index cleared and the key destroyed but no record appended;
  *   <li>never be able to flush pending entity state - a flush here writes a blind index back
- *       <em>after</em> the clear.
+ *       <em>after</em> the clear;
+ *   <li>allow for the window it runs in: every call to {@link #count} runs inside {@link
+ *       JdbcSupport#inOneStatementWindow}, with {@code search_path} <em>replaced</em> by {@code
+ *       pg_catalog, pg_temp} for the width of <b>one statement</b>. The implementation must issue
+ *       exactly one statement, must not change {@code search_path} (the window restores the bytes
+ *       it captured and overwrites any change), and must schema-qualify every relation, function
+ *       and type it names: an unqualified name fails inside the window, loudly, and the erasure
+ *       rolls back whole.
  * </ul>
  *
  * <p>This interface lives beside the JDBC adapter rather than in {@code application} for one

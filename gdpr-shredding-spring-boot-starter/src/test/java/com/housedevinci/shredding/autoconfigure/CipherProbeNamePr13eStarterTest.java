@@ -78,6 +78,7 @@ class CipherProbeNamePr13eStarterTest {
     registry.add(
         "shredding.blind-index.hmac-secret", () -> b64("starter-integration-index-secret"));
     registry.add("spring.jpa.hibernate.ddl-auto", () -> "create-drop");
+    registry.add("spring.jpa.properties.hibernate.default_schema", () -> "public");
     registry.add(
         "spring.jpa.properties.hibernate.dialect", () -> "org.hibernate.dialect.PostgreSQLDialect");
     // The hostile path, on every connection of the pool from the moment it is handed out:

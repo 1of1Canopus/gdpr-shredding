@@ -327,7 +327,12 @@ public final class SqlNameLexer {
     this.sql = sql;
   }
 
-  /** Every name in {@code sql} the gate refuses; empty means the statement resolves no name. */
+  /**
+   * Every name in {@code sql} the gate refuses; empty means the statement resolves no name. A
+   * keyword operator is refused everywhere: no statement this module writes sits inside the
+   * one-statement window, so there is no place left where a name with no qualified spelling is
+   * admitted (finding C-18-6).
+   */
   public static List<Refusal> refusals(String sql) {
     var lexer = new SqlNameLexer(sql);
     lexer.run();
@@ -720,23 +725,23 @@ public final class SqlNameLexer {
     Token tok = t.get(i);
     String word = tok.text().toLowerCase(Locale.ROOT);
     if (KEYWORD_OPERATORS.contains(word)) {
-      refuse("keyword operator", tok.text(), context(tok.at()));
+      refuseKeywordOperator(tok.text(), tok.at());
       return;
     }
     if (word.equals("similar") && next(t, i, "to")) {
-      refuse("keyword operator", "SIMILAR TO", context(tok.at()));
+      refuseKeywordOperator("SIMILAR TO", tok.at());
       return;
     }
     if (word.equals("at") && next(t, i, "time")) {
-      refuse("keyword operator", "AT TIME ZONE", context(tok.at()));
+      refuseKeywordOperator("AT TIME ZONE", tok.at());
       return;
     }
     if (word.equals("distinct") && i > 0 && (t.get(i - 1).isIdent("is") || isIsNot(t, i - 1))) {
-      refuse("keyword operator", "IS DISTINCT FROM", context(tok.at()));
+      refuseKeywordOperator("IS DISTINCT FROM", tok.at());
       return;
     }
     if (word.equals("in") && i + 1 < t.size() && t.get(i + 1).isPunct("(") && !isDdlIn(t, i)) {
-      refuse("keyword operator", "IN", context(tok.at()));
+      refuseKeywordOperator("IN", tok.at());
       return;
     }
     if ((word.equals("any") || word.equals("all") || word.equals("some"))
@@ -1183,6 +1188,11 @@ public final class SqlNameLexer {
 
   private void refuse(String rule, String token, int at) {
     refusals.add(new Refusal(rule, token, context(at)));
+  }
+
+  /** A keyword operator has no qualified spelling, and this module writes none: always refused. */
+  private void refuseKeywordOperator(String token, int at) {
+    refusals.add(new Refusal("keyword operator", token, context(at)));
   }
 
   private String context(int at) {

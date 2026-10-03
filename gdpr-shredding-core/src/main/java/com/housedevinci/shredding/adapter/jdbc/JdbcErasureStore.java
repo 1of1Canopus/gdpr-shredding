@@ -344,7 +344,11 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
    */
   private void verifyCleared(Connection c, TenantId tenant, SubjectId subject) throws SQLException {
     for (BlindIndexColumn column : blindIndexColumns) {
-      long independent = residual.count(c, column, tenant, subject);
+      // C-13-14: the one statement of this erasure whose text this module did not write. It is
+      // rendered by Hibernate from the entity mapping, so there is no name in it to qualify, and
+      // the only mechanism left is the session's own candidate set. One statement, its own window.
+      long independent =
+          JdbcSupport.inOneStatementWindow(c, () -> residual.count(c, column, tenant, subject));
       if (independent > 0) {
         throw new ShreddingException(
             ErrorCodes.ERASURE_INDEX_RESIDUAL,
@@ -410,24 +414,31 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
               + " OPERATOR(pg_catalog.=) ?)) AND "
               + column.column().sql()
               + " IS NOT NULL";
+      // No window around this statement (finding C-18-6).
+      // Every name in it is pg_catalog's and its relation is two-part (section 3.2), so the
+      // session's path decides nothing here and a window could change no answer any test can
+      // observe. The window is for text this module cannot qualify, which is the framework-rendered
+      // read-back above and nothing else; the name gate asserts that no window holds a statement
+      // this module wrote.
+      long other;
       try (PreparedStatement ps = c.prepareStatement(elsewhere)) {
         ps.setString(1, subject.value());
         ps.setString(2, tenant.value());
         try (ResultSet rs = ps.executeQuery()) {
-          long other = rs.next() ? rs.getLong(1) : 0L;
-          if (other > 0) {
-            log.warn(
-                "shredding: this subject also has {} blind index value(s) in {}.{} under other"
-                    + " tenant values, which this erasure does not destroy. That is legitimate when"
-                    + " another tenant uses the same subject identifier for a different person, and"
-                    + " is a leftover when it is the same person - a row whose tenant column was"
-                    + " changed by a bulk update outside Hibernate keeps an index derived under its"
-                    + " former tenant. Erase that tenant too, or re-derive the index.",
-                other,
-                column.table(),
-                column.column().sql());
-          }
+          other = rs.next() ? rs.getLong(1) : 0L;
         }
+      }
+      if (other > 0) {
+        log.warn(
+            "shredding: this subject also has {} blind index value(s) in {}.{} under other"
+                + " tenant values, which this erasure does not destroy. That is legitimate when"
+                + " another tenant uses the same subject identifier for a different person, and"
+                + " is a leftover when it is the same person - a row whose tenant column was"
+                + " changed by a bulk update outside Hibernate keeps an index derived under its"
+                + " former tenant. Erase that tenant too, or re-derive the index.",
+            other,
+            column.table(),
+            column.column().sql());
       }
     }
   }
