@@ -109,8 +109,10 @@ class NameQualificationGateTest {
             "every operator, function, aggregate, type, cast and relation name in a statement this"
                 + " module builds must name its schema (design section 3.1). A column reference"
                 + " resolves against the FROM list and is not a name; a bind parameter is never a"
-                + " name. The one open refusal is named below and nothing else may join it.")
-        .containsExactlyElementsOf(OPEN_REFUSALS);
+                + " name. There is no open refusal and no allowlist: the one name qualification"
+                + " cannot reach - the keyword operator of the cross-tenant read-back - is admitted"
+                + " by the mechanism that closes it, the one-statement window, and only inside it.")
+        .isEmpty();
   }
 
   /**
