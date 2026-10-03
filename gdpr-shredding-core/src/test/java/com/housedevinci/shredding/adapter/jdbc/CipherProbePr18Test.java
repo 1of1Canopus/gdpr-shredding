@@ -227,9 +227,9 @@ class CipherProbePr18Test {
   }
 
   /**
-   * A connection that is in a transaction, answers the capture with a path, and refuses the pin
-   * the way a dropped connection or a statement_timeout would. Every other call answers the
-   * minimum the window needs.
+   * A connection that is in a transaction, answers the capture with a path, and refuses the pin the
+   * way a dropped connection or a statement_timeout would. Every other call answers the minimum the
+   * window needs.
    */
   private static Connection connectionWhosePinFails() {
     ResultSet path =

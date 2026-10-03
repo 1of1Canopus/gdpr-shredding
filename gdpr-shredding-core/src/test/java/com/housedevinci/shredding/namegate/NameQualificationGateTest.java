@@ -308,9 +308,7 @@ class NameQualificationGateTest {
   // --------------------------------------------- one negative per rule class
 
   private static List<String> rules(String sql) {
-    return SqlNameLexer.refusals(sql).stream()
-        .map(SqlNameLexer.Refusal::rule)
-        .toList();
+    return SqlNameLexer.refusals(sql).stream().map(SqlNameLexer.Refusal::rule).toList();
   }
 
   @Test

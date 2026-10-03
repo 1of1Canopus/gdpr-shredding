@@ -13,8 +13,8 @@ import jakarta.persistence.Table;
 import org.hibernate.annotations.SQLRestriction;
 
 /**
- * C-18-2 fixture: an ordinary soft-visibility restriction that calls an application function by
- * its unqualified name - which resolves on every path the application uses, and on none inside the
+ * C-18-2 fixture: an ordinary soft-visibility restriction that calls an application function by its
+ * unqualified name - which resolves on every path the application uses, and on none inside the
  * window, where Hibernate renders it into the independent read-back.
  */
 @Entity

@@ -179,12 +179,12 @@ public final class JdbcSupport {
    * module; an application trigger whose body names a relation unqualified therefore still fires
    * and still succeeds (T17), where revision 1's transaction-wide pin broke it (T15b). A second
    * statement inside one window is how the window becomes a transaction again by accident, and it
-   * is the one place an exception could be swallowed with the path still replaced. The window is for
-   * text this module cannot qualify, which is the framework-rendered read-back and nothing else:
-   * the cross-tenant WARN count is module-written, fully qualified, and runs outside it (C-18-6).
-   * The name gate ({@code NameQualificationGateTest}) refuses any text-carrying statement call of
-   * this module's own inside a window, so the invariant is checked and not merely written down
-   * here.
+   * is the one place an exception could be swallowed with the path still replaced. The window is
+   * for text this module cannot qualify, which is the framework-rendered read-back and nothing
+   * else: the cross-tenant WARN count is module-written, fully qualified, and runs outside it
+   * (C-18-6). The name gate ({@code NameQualificationGateTest}) refuses any text-carrying statement
+   * call of this module's own inside a window, so the invariant is checked and not merely written
+   * down here.
    *
    * <p><b>Six statements, three of them read-backs, because a pin that is not read back is a
    * fiction.</b> In auto-commit, {@code set_config(..., true)} <em>returns</em> the pinned value
@@ -195,20 +195,20 @@ public final class JdbcSupport {
    *
    * <p><b>What a {@code SELECT} can still run in here (M8).</b> A row-level-security policy
    * function and a function called from a mapped view resolve their own unqualified names inside
-   * this window and fail loudly. So does a string-body {@code LANGUAGE sql} function ({@code AS
-   * $$ ... $$}), which is parsed again when it runs and behaves like plpgsql here; only a
-   * SQL-standard body ({@code BEGIN ATOMIC ... END} or {@code RETURN ...}) binds its names when the
-   * function is created. The remedy for either is in SECURITY-NOTES: {@code ALTER FUNCTION ... SET
+   * this window and fail loudly. So does a string-body {@code LANGUAGE sql} function ({@code AS $$
+   * ... $$}), which is parsed again when it runs and behaves like plpgsql here; only a SQL-standard
+   * body ({@code BEGIN ATOMIC ... END} or {@code RETURN ...}) binds its names when the function is
+   * created. The remedy for either is in SECURITY-NOTES: {@code ALTER FUNCTION ... SET
    * search_path}, or rewriting the function with a SQL-standard body.
    *
    * @throws com.housedevinci.shredding.domain.ShreddingException {@code SHRED-SCHEMA-008} when the
    *     arrived path cannot be captured or the replacement cannot be established (a {@code
    *     SQLException} in steps 1 to 3, attached as the cause; the statement itself, step 4, still
-   *     surfaces its own failure), or when the session is not carrying the bytes it arrived
-   *     with once the statement has succeeded. The caller's transaction is expected to roll back:
-   *     there is no partial state to repair, and a {@code LOCAL} setting is discarded by {@code
-   *     COMMIT} as well as by {@code ROLLBACK} (C-17), so a replaced path can never escape onto a
-   *     pooled connection either way.
+   *     surfaces its own failure), or when the session is not carrying the bytes it arrived with
+   *     once the statement has succeeded. The caller's transaction is expected to roll back: there
+   *     is no partial state to repair, and a {@code LOCAL} setting is discarded by {@code COMMIT}
+   *     as well as by {@code ROLLBACK} (C-17), so a replaced path can never escape onto a pooled
+   *     connection either way.
    */
   static <T> T inOneStatementWindow(Connection c, WindowWork<T> work) throws SQLException {
     if (c.getAutoCommit()) {

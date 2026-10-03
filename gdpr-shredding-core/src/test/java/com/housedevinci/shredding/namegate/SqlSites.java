@@ -48,7 +48,9 @@ import java.util.Set;
  */
 public final class SqlSites {
 
-  /** One resolved statement site. {@code variants} is more than one when a ternary is in the chain. */
+  /**
+   * One resolved statement site. {@code variants} is more than one when a ternary is in the chain.
+   */
   public record Site(String file, int line, List<String> variants) {}
 
   /**
