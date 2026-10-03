@@ -414,7 +414,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
               + " OPERATOR(pg_catalog.=) ?)) AND "
               + column.column().sql()
               + " IS NOT NULL";
-      // No window around this statement (finding C-18-6, which ruled the earlier QUESTIONS #C-24).
+      // No window around this statement (finding C-18-6).
       // Every name in it is pg_catalog's and its relation is two-part (section 3.2), so the
       // session's path decides nothing here and a window could change no answer any test can
       // observe. The window is for text this module cannot qualify, which is the framework-rendered
