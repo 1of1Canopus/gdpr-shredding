@@ -193,7 +193,7 @@ gate is weaker where it covers module-written text.
 - Replace `every_window_holds_at_most_one_statement_of_this_modules_own` with an assertion that
   every window holds zero statements of this module's own.
 - Update the comment in `JdbcErasureStore`, the paragraph "The two statements a session still
-  resolves" in SECURITY-NOTES, the CHANGELOG entry, and close QUESTIONS #C-24.
+  resolves" in SECURITY-NOTES, the CHANGELOG entry, and close the module's open question on it.
 
 The starter case `probe_the_cross_tenant_warn_counts_only_the_rows_under_other_tenants` must stay
 green.
@@ -296,3 +296,145 @@ green.
 Do not weaken, rename or disable any of the five probes. C-18-6's gate change must not remove the
 existing negative cases for keyword operators outside a window. After the fixes, the PR body
 records the five probes going green and the mutation table re-run with row 12 removed.
+
+## Second pass, 2026-10-03
+
+Head reviewed: `1bf1d52`. Scope: `git diff 8636b83..1bf1d52`, which is the five probes (`daed686`),
+the five fixes (`d001d4e`, `98386c4`, `bad250b`, `9356cb6`, `b4074a3`), the CHANGELOG (`9834812`), a
+formatting commit (`3d08811`) and one comment edit (`1bf1d52`). This is the last pass on this PR.
+
+### Numbers on this head
+
+| What | Result |
+| --- | --- |
+| `./mvnw -B clean verify` | green, exit 0, Docker up |
+| Tests | 500 run, 0 failures, 0 errors, 0 skipped (core 258, starter 225, sample 17), same as the PR body |
+| `CipherProbe*` classes | 63, all green, none changed except as noted below |
+| The five pass-1 probes | green: `CipherProbePr18Test` 4/4, `CipherProbePr18StarterTest` 1/1 |
+| Pass-1 probes compared with the copies kept outside the tree | identical once whitespace is ignored. `3d08811` re-wrapped two comment blocks and changed no assertion |
+| CI at `1bf1d52` | 6 of 6 green: Build & test, Cipher probes, DCO sign-off, Reference guard, Release dry run, Vulnerability scan |
+| New findings | 1 INFO (C-18-7), its probe RED on `1bf1d52` |
+
+### Pass-1 findings, closed by their probes
+
+| id | probe | result at `1bf1d52` |
+| --- | --- | --- |
+| C-18-2 | `CipherProbePr18StarterTest.probe_a_mapping_restriction_rendered_into_the_window_is_documented_and_fails_closed` | green. Fail-closed behaviour kept, both documents state it |
+| C-18-3 | `CipherProbePr18Test.probe_a_string_body_sql_function_is_not_immune_inside_the_window` | green. The three texts are corrected and the two bodies measure as before |
+| C-18-4 | `CipherProbePr18Test.probe_a_failure_to_establish_the_pin_is_reported_as_the_isolation_code` | green |
+| C-18-5 | `CipherProbePr18Test.probe_the_residual_spi_states_the_window_it_runs_in` | green |
+| C-18-6 | `CipherProbePr18Test.probe_no_statement_this_module_writes_sits_inside_the_window` | green |
+
+### Regressions checked in the C-18-4 and C-18-6 changes
+
+**The nested try in `inOneStatementWindow` (C-18-4).** Every exit path was run against a scripted
+connection. The test sat in the tree only for the run, and the tree was clean afterwards.
+
+| case | outcome |
+| --- | --- |
+| capture (step 1) fails | `-008` with the cause attached; the connection sees only the one read, and nothing is pinned or restored |
+| pin (step 2) fails, restore then refused | `-008` with the pin failure as cause and the restore failure as suppressed; the restore was attempted |
+| pin read-back (step 3) throws | `-008`; restore and its read-back both ran |
+| pin read-back mismatches | `-008`, the statement is not run, restore and read-back both ran |
+| statement fails (`SQLException` or `RuntimeException`), restore succeeds | the statement's own exception, the same instance (M3 unchanged) |
+| statement fails, restore refused | the statement's own exception, with the restore failure suppressed |
+| statement succeeds, restore throws (`SQLException` or `RuntimeException`) | `-008` with the restore failure as cause |
+| statement succeeds, restore read-back throws | `-008` with that failure as cause |
+| restore throws an `Error` | the `Error` replaces the primary. This is ordinary Java for `OutOfMemoryError` or `StackOverflowError`, and no JDBC call throws an `Error` on a normal path. Not a finding |
+
+The restore runs on every exit that is entered after step 1. When step 1 fails nothing has changed,
+so there is nothing to restore.
+
+End to end, one more case. When the pin fails because the connection is dead (`08006`), the error
+the caller sees is still `SHRED-KEY-UNAVAILABLE`. `JdbcSupport.inTransaction`'s `rollback()` fails
+on the dead connection and replaces the `-008`. That code is older than this PR, and for a dead
+connection "key store unavailable" is the right answer. A pin failure on a live connection, such as
+`57014` (statement timeout), reaches the caller as `-008`. Not a finding.
+
+**Taking the cross-tenant count out of the window (C-18-6).** Every name in the statement belongs to
+`pg_catalog`: `pg_catalog.count`, and `OPERATOR(pg_catalog.=)` on both legs. `IS NULL`, `NOT`, `AND`
+and `OR` are grammar, not name lookups. The relation is two-part under section 3.2's startup
+refusal, and the bind parameters are values, not names. A role-owned schema placed first on the
+path, or a `pg_temp` object, therefore decides nothing in it. A row-level-security function on the
+table now runs on the arrived path, as it already does for the erasure's `UPDATE` and the same-text
+count on the same table. That removes a failure point and opens nothing.
+`probe_the_cross_tenant_warn_counts_only_the_rows_under_other_tenants` is green.
+
+**Removing the gate relaxation.** `refusals(String, boolean)`, the window branch of
+`refuseKeywordOperator` and `Site#window` are gone. The negative cases for keyword operators outside a
+window remain: there are 9 `keyword operator` assertions in `NameQualificationGateTest`, the same
+count as before. `COLLATE` is still refused. The two-statement synthetic negative still counts 2.
+Nothing is admitted anywhere any more, so the change can only refuse more text.
+
+### Re-targeted mutation rows, re-run here
+
+| row | mutation as applied at `1bf1d52` | result |
+| --- | --- | --- |
+| 1 | the nested try's pin and step-3 read-back deleted | RED, 7/15 `CipherProbeWindowPr14Test` (decoy relation, shadowed `=`, shadowed `LIKE`, lying `count`, quoted-path restore x2, keyword-operator shape) |
+| 2 | prefix pin `pg_catalog, <arrived>, pg_temp`, bound, with the read-back compared against it | RED, 6/15 |
+| 7 | a module-written `SELECT` added inside the framework read-back's window | RED, 2: `every_window_holds_zero_statements_of_this_modules_own`, `probe_no_statement_this_module_writes_sits_inside_the_window` |
+| 11 | pin for the whole transaction in `inTransaction`, window turned into a pass-through | RED, 1 error of 3: trigger case, `SHRED-KEY-UNAVAILABLE` over `42P01` |
+
+All four are the same mutation as before, moved to the new code. Row 7 now mutates the invariant
+C-18-6 tightened (zero module statements per window instead of at most one), and that is the right
+target. Rows 3 and 4 stay open under the pass-1 rulings, and row 12 is correctly retired. After
+every row the tree was restored and `git status --porcelain` was empty. Row 11 needed the core jar
+installed locally, so the clean head was installed again afterwards.
+
+### Public text
+
+SECURITY-NOTES, `docs/upgrading-0.2.0.md`, CHANGELOG, README, main sources and the PR body contain
+no agent or person name in this PR's diff. They also contain no internal question number now that
+`1bf1d52` has landed. This review's own pass-1 text cited one; it is replaced above by "the
+module's open question". The `CIPHER-nn` ids in SECURITY-NOTES and CHANGELOG are finding ids that
+were already on `main`. The documentation example `public.pr18_visible` is a technical
+illustration, not an id. Not a finding.
+
+### New finding
+
+| id | severity | one line |
+| --- | --- | --- |
+| C-18-7 | INFO | two window probes still describe the removed cross-tenant window, and the `IS DISTINCT FROM` spelling, as current production |
+
+#### C-18-7 (INFO): the window probes' documentation describes a statement that no longer exists
+
+**Repro.** `CipherProbeWindowPr14Test`'s javadoc on
+`probe_the_cross_tenant_shape_is_only_correct_inside_the_window` says "the cross-tenant WARN count's
+`IS DISTINCT FROM` reaches the type's own `=` ... The shape below is the one `verifyCleared`
+builds". `CipherProbeWindowPr14StarterTest`'s javadoc on
+`probe_the_cross_tenant_warn_counts_only_the_rows_under_other_tenants` says the count "gets its own
+window (M9)", that it is "the one statement this module builds that contains a name qualification
+cannot reach", and that "the second window must not change the erasure's behaviour". Since C-A-6
+and C-18-6 none of these is true. `verifyCleared` spells the leg with `OPERATOR(pg_catalog.=)` and
+runs it outside any window. The tests are public, and a reader of the suite is told that a
+production statement is covered by a control it no longer runs under. The pass-1 prescription for
+C-18-6 listed the comments in production and docs to update, and it missed these two. The
+assertions are still correct: the core case measures a window property on a historical statement,
+and the starter case measures the WARN's content.
+
+**Fix (test documentation only, no assertion and no production change).**
+
+- `CipherProbeWindowPr14Test`: reword the javadoc on
+  `probe_the_cross_tenant_shape_is_only_correct_inside_the_window`. The `IS DISTINCT FROM` shape is
+  the statement `verifyCleared` built before C-A-6, kept as a measurement of the window's own
+  property (a keyword operator inside the window resolves only from `pg_catalog`). Production no
+  longer builds it, and since C-18-6 it no longer runs any module statement in a window.
+- `CipherProbeWindowPr14StarterTest`: reword the javadoc on
+  `probe_the_cross_tenant_warn_counts_only_the_rows_under_other_tenants`. The count is fully
+  qualified and runs outside the window (C-A-6, C-18-6). This case holds the WARN's content and the
+  erasure's behaviour. Drop "own window" and "second window".
+
+This is an INFO correction to test text, so the fix needs no third pass. The probe turning green in
+CI is the confirmation.
+
+**Probe:**
+`CipherProbePr18SecondPassTest.probe_no_window_probe_describes_the_removed_cross_tenant_window_as_current`
+(core, `adapter/jdbc`). It is kept outside the public tree like the pass-1 probes, and the fix pass
+adds it to the suite before it edits the two javadocs. RED on `1bf1d52` on the first assertion.
+
+### Verdict: MERGE WITH FIXES
+
+There is no HIGH, MEDIUM or LOW. All five pass-1 findings are closed by their probes, and neither
+mechanism change introduced a regression. Under the no-allowance rule, the one remaining item is
+C-18-7, a test-documentation correction gated by its probe. Once that probe is green in CI with the
+six checks green, the branch is mergeable without another security pass.
