@@ -1120,3 +1120,235 @@ C-A-3, C-A-4, C-A-6 (LOW) - and two INFO, C-A-7 and C-A-8. C-A-1 through C-A-5 a
 and go to the builder that wrote it; C-A-6 and C-A-8 are corrections for a fix pass. The condition
 for MERGE is the five tests of `CipherProbeNamePr13fGateTest` green, `NameQualificationGateTest`
 asserting an empty refusal set with no allowance, and the 457 unchanged with nothing skipped.
+
+---
+
+## Review of PR A, second pass (2026-10-03)
+
+Head `e918d02`, second and final pass. Scope: the builder's dispositions of C-A-1 to C-A-8, the
+rules those dispositions rewrote, the nine carried relation refusals, and the surfaces the fixes
+introduced. Measured on PostgreSQL 16.14 (`postgres@sha256:57c72f…`, the digest the module's own
+tests pin, aarch64) in the first pass's two-role fixture: `shred_app` is `NOSUPERUSER NOCREATEDB
+NOCREATEROLE`, owns schema `decoy`, owns its own `search_path = decoy, app, pg_catalog`, and
+installed every shadow below with its own credentials.
+
+### Numbers on this head
+
+| module | tests | failures | errors | skipped |
+|---|---|---|---|---|
+| core | 229 | 0 | 0 | 0 |
+| starter | 219 | 0 | 0 | 0 |
+| sample | 17 | 0 | 0 | 0 |
+| total | **465** | 0 | 0 | 0 |
+
+`./mvnw verify` green, exit 0, Docker up, nothing skipped, coverage gate met, Spotless clean,
+licence gate clean. Probe suite: 58 `CipherProbe*` classes, 259 tests, 0 failures, 0 skips. The
+hardened-guard attacks of the first pass were re-run on this head through that suite rather than by
+hand - `CipherProbeNamePr13eTest`, `CipherProbeNamePr13eStarterTest`, `CipherProbeNoDdlPr13cTest`
+and `CipherProbeNoDdlPr13dTest` all execute against a real container on the pinned digest and all
+pass.
+
+**My five probes of the first pass are green by code.** `CipherProbeNamePr13fGateTest`: 5 tests, 5
+green, none disabled, renamed or weakened (verified by reading the file and by its surefire report).
+
+**The nine carried refusals are exactly nine, and nothing else is refused or allowed.** Measured by
+running the gate's own resolver over the gate's own source list outside JUnit: 44 sites, 48 variants,
+0 unresolved, 9 refusals - `JdbcErasureStore` 288/373/413, `WriteVerification` 259 twice,
+`ShreddingEventListener` 650 twice and 873 twice - every one of them `unqualified relation` on a
+plain hole, and every one of them matching `OPEN_REFUSALS` by its full context string. The gate
+asserts `containsExactlyElementsOf`, so a tenth relation or any other rule class fails it.
+
+### C-A-1 to C-A-8, ruled
+
+| finding | ruling | evidence |
+|---|---|---|
+| C-A-1 (MEDIUM) type-position allowlist | **CLOSED**, one residual | the six are gone and all six refuse in both positions; `double` is still in the list and is not a production (C-A-9) |
+| C-A-2 (MEDIUM) call-position allowlist | **CLOSED**, one residual | `text(`, `int8(`, `bytea(`, `timestamptz(`, `int2(`, `int4(` all refuse; the `KEYWORDS.contains(word) ||` half of the same branch was not examined (C-A-9) |
+| C-A-3 (LOW) DDL object position | **CLOSED** | the position is decided forward from the verb. Eight `CREATE INDEX` forms measured: bare, `IF NOT EXISTS`, `UNIQUE CONCURRENTLY`, an operator expression, a partial-index `WHERE`, `INCLUDE`, no index name, `USING btree`. Every unqualified call in an index expression, a column default or a partial predicate refuses; the `ON` relation is now a written rule with the verification leg named, not an accident of token count |
+| C-A-4 (LOW) SET-clause assignment | **CLOSED** | seven variants measured. `SET a = (b = c)`, `SET a = ?, b = (c = d)`, `SET (a, b) = (?, ?)`, a sub-select in the value, a second statement after `;`, and `ON CONFLICT DO UPDATE SET a = (b = c)` all refuse; the two shapes the adapters write stay clean |
+| C-A-5 (MEDIUM) relation leg | **CLOSED** for the leg's five positions, two residuals | `"t"` and a plain hole now refuse in `FROM`, `JOIN`, `INSERT INTO`, `UPDATE` and `LOCK TABLE`, and `QUALIFIED_HOLE` is a construction rule rather than a convention. The positions the leg does not have are C-A-10; the type-position hole is C-A-11 |
+| C-A-6 (LOW) the allowlisted open refusal | **CLOSED, and the rewrite is stronger than what it replaced** | no main source spells `IS DISTINCT FROM`; `NameQualificationGateTest` carries no keyword-operator entry. Measured with `decoy.=(varchar, varchar)` returning false and one NULL tenant among three rows: the keyword form answered **0**, the rewrite answered **2** (the honest count), a bare `OPERATOR(pg_catalog.<>)` answered **1**. The keyword form **under**-counted, i.e. it suppressed the WARN - see C-A-12 |
+| C-A-7 (INFO) scope drift | **CLOSED** | revision 2.4 "Changes in revision 2.4" is the gate's missing design review: it names the design-stop rule, names the gate as a mechanism that never had a page, and classifies all five gate findings as the kind a paper review catches |
+| C-A-8 (INFO) `::text` in the test tree | **CLOSED** | no bare `::text` anywhere in the tree |
+
+### The carry decision: ACCEPTED, with one condition and one missing assertion
+
+Dollar's decision to carry the nine relation refusals rather than land section 3.2 here is accepted,
+and the grounds are not "115 fixture files".
+
+What makes it acceptable: the nine are **exact refusals**, not a file, line or extension allowance -
+a tenth relation, or any other rule class, or this class moving to another statement, fails the gate;
+the mechanism that deletes them exists, is specified (section 3.2), is assigned, and is in build on a
+named branch; the gate's test names that mechanism; SECURITY-NOTES and the design both name the
+exposure and no document claims these tables are qualified; and the finding C-A-5 raised was not
+"these relations are unqualified" but "the leg is dead and reports them clean", which is fixed. This
+is not the `IS DISTINCT FROM` situation the no-allowance rule refuses: that was a control the module
+could write and had not, and it is written now.
+
+**The condition, and it is blocking on the next PR.** PR 18 (`feat/read-back-bracket`) is NOT
+MERGEABLE unless `OPEN_REFUSALS` is empty, `SqlSites.QUALIFYING_CALLS` contains `sql`, and the nine
+entries are deleted rather than re-stated. I will check that by probe on PR 18, not by reading.
+
+**What is missing, and it is why a carry is risky at all (C-A-14).** Nothing in the repository makes
+the carry expire. `OPEN_REFUSALS` is a Java constant with a javadoc; if PR 18 slips, the nine become
+permanent silently and the next reader sees a green gate with nine expected refusals and no reason
+to question them. The fix is itself a test and costs one assertion: in
+`NameQualificationGateTest`, tie the non-emptiness of `OPEN_REFUSALS` to the absence of section
+3.2 - assert that `OPEN_REFUSALS.isEmpty()` whenever `SqlSites.QUALIFYING_CALLS` contains `sql`, so
+the day section 3.2 lands the gate fails until the nine are deleted. Severity LOW.
+**No probe, stated with the attempt:** the defect is the absence of an assertion, and an assertion
+that does not exist cannot be made red before it is written. A test that greps the gate's own source
+for the missing assertion is not a probe, by the same rule that refuses a workflow probe which only
+greps the YAML. Routing: Isis, one assertion.
+
+### Findings
+
+Probe file `gdpr-shredding-core/src/test/java/com/housedevinci/shredding/namegate/CipherProbeNamePr13gGateTest.java`:
+4 tests, 4 RED on this head. The branch build is therefore red from this commit on, which is the
+accurate state of a branch with six open findings; each goes green as its finding is fixed and none
+is to be disabled, renamed or weakened.
+
+**C-A-9 (LOW) - the gate's two allowlists still carry five names the server reports as usable
+function or type names, and all five hijack.** `checkFunctionCall` returns early on
+`KEYWORDS.contains(word) || GRAMMAR_TYPES.contains(word)`. The C-A-1/C-A-2 fix wrote the membership
+rule down - "every spelling here is a production in `gram.y`" - removed the six names the review
+listed, and then neither checked the remaining list against the rule nor looked at the second
+allowlist in the same expression. `pg_get_keywords()` answers the membership question exactly:
+catcode `C` is "unreserved (cannot be function or type name)", which is what makes the
+`varchar(255)` allowance sound. Of `GRAMMAR_TYPES`' sixteen entries fifteen are `C` and `double` is
+`U`; `left` and `right` are `T` ("reserved (can be function or type name)"); `replace` and `mode`
+are `U`, and all four exist in `pg_catalog` as functions. Repro, each after one
+`CREATE FUNCTION decoy."<name>"(…)` as `shred_app`: `SELECT left('abcdef',2)` -> `HIJACKED` while
+`pg_catalog.left('abcdef',2)` -> `ab`; `right(…)` -> `HIJACKED`; `replace('aaa','a','b')` ->
+`HIJACKED-replace` while the qualified form -> `bbb`; `mode(1)` -> `HIJACKED-mode`; `double(1)` ->
+`HIJACKED-double`; and after `CREATE DOMAIN decoy.double AS pg_catalog.varchar(3)`,
+`'abcdefgh'::double` -> `abc` (`1::double` is an error until the domain exists, so `double` is a
+resolvable name in the type position as well, not a production). The gate returns zero refusals for
+all seven. **LOW and not MEDIUM** because no statement on this head writes any of the five: the
+consequence is drift, the same ground C-A-3 and C-A-4 were ruled on. Fix: delete `double` from
+`GRAMMAR_TYPES`, delete `left`, `right`, `replace` and `mode` from the call-position allowance, and
+close the class rather than the five names - one container test asserting that every name in
+`GRAMMAR_TYPES` and every name `checkFunctionCall` allows has catcode `C` in `pg_get_keywords()`, so
+a hand-maintained list can no longer be wrong. Test
+`probe_the_allowlists_still_carry_names_the_server_resolves`. Routing: Thor, the run that built the
+gate (the allowance's membership rule is the mechanism, not a correction).
+
+**C-A-10 (LOW) - the relation leg reads only the first entry of a `FROM` list, on a shape the module
+ships.** `checkRelationPosition` decides the position from the single preceding token, so the second
+and third entries of a comma-separated `FROM` list are never visited. `SchemaVerification.java:508`
+is live and has exactly that shape -
+`FROM pg_catalog.pg_class s, pg_catalog.pg_class t, pg_catalog.pg_attribute a`. Repro by mutation of
+that live statement: un-qualify the second entry (`, pg_class t`), or the third
+(`, "pg_attribute" a`), or replace the second with a bare hole, and the gate stays green in all
+three; un-qualify the **first** and it refuses. Server side, as `shred_app` with a `decoy.customer`
+it owns: `SELECT b.id FROM app.customer a, customer b WHERE a.id OPERATOR(pg_catalog.=) 1` returned
+the decoy row. Four more positions the leg has no entry for, none of them live:
+`SELECT 1 FROM ONLY "t"`, `DELETE FROM pg_catalog.pg_class USING "t"`, `TRUNCATE "t"`,
+`LOCK TABLE ONLY "t"` - all zero refusals. `FROM ONLY <hole>` is the sharpest of them: one keyword
+between `FROM` and the hole and the plain-hole refusal this round added for C-A-5 is gone.
+**LOW and not MEDIUM, deliberately, with the reason stated so it cannot be read as softening:**
+C-A-5 was MEDIUM because there was a measured cross-tenant read of a decoy behind it; here there is
+none. I checked all 48 resolved variants and the bundled script: the one live comma-`FROM` statement
+has all three entries qualified, no statement uses `ONLY`, `USING`, `TRUNCATE` or a non-adjacent
+`LOCK TABLE`, so the exposure today is zero and the consequence is drift. Fix: decide the relation
+position from the clause rather than from one token - every entry of a `FROM` or `USING` list at the
+clause's own depth, and skip the grammar's own modifiers (`ONLY`, `LATERAL`) rather than returning
+early on them - and add `TRUNCATE` and the `LOCK … TABLE` spellings. Test
+`probe_the_relation_leg_reads_only_the_first_entry_of_a_from_list`. Routing: Thor.
+
+**C-A-11 (LOW) - two name positions the gate reads no evidence about.** `checkTypeName` returns on
+`Kind.HOLE` with no comment and without the `QUALIFIED_HOLE` distinction the relation leg now makes,
+so `?::<hole>` and `CAST(? AS <hole>)` are both reported clean: a type name that comes from Java is
+accepted on no evidence, while the identical token in relation position is refused on the stated
+ground that "the gate has no evidence about what it carries". The asymmetry is not stated anywhere.
+Second position, the same class: the operator class of an index column
+(`CREATE INDEX i ON t (c text_ops)`) is a schema-qualifiable name resolved along `search_path`, and
+no leg reads it. Neither is live - the module's 48 variants contain three casts, all of them
+`::pg_catalog.regclass`, `::pg_catalog.oid` and `::pg_catalog.text`, and the script's two indexes
+name no operator class - so LOW on the same ground as C-A-9 and C-A-10. Fix: accept only
+`QUALIFIED_HOLE` in a type position, with the same one-line reason the relation leg carries, and
+refuse an unqualified operator-class name after an index column. Test
+`probe_a_hole_in_a_type_position_and_an_operator_class_are_accepted_without_evidence`. Routing:
+Thor.
+
+**C-A-12 (INFO) - SECURITY-NOTES documents a residual the code no longer has, and names the wrong
+failure direction.** `SECURITY-NOTES.md` lines 941-946, under "What is still resolved by a session",
+still says the cross-tenant WARN read-back "uses `IS DISTINCT FROM`", that "the rewrite is not
+available either", and that "on a hostile path it can over-count". The first two are false since
+C-A-6 - the statement at `JdbcErasureStore.java:400-412` is exactly the rewrite that bullet says is
+unavailable - and the third is backwards: measured with `decoy.=(varchar, varchar)` returning false
+and one NULL tenant among three rows, the keyword form answered 0 where the honest count is 2. It
+**under**-counted, which silently suppresses the WARN; a reader told the failure mode is a noisy log
+line would draw the wrong conclusion about what to monitor. Fix: delete the bullet, or restate it as
+closed by the rewrite with the measured direction. Test
+`probe_security_notes_names_a_residual_the_code_no_longer_has`, which also asserts by code that no
+main source spells the keyword form any more. Routing: Isis.
+
+**C-A-13 (INFO) - the gate's starter file list is two hard-coded names and nothing asserts it is
+closed.** `sources()` walks the core `adapter/jdbc` package - so "a new adapter file is covered the
+day it is added", as its javadoc says - and then names `WriteVerification.java` and
+`ShreddingEventListener.java` by hand. Today that list is complete: six files in the whole module's
+main sources contain a statement call, and all six are scanned (measured by grep for
+`prepareStatement`, `prepareCall`, `createStatement`, `addBatch`, `executeQuery`, `executeUpdate`,
+`executeLargeUpdate` across all three modules' `src/main`). A third starter file issuing a statement
+tomorrow is not scanned and nothing fails, which is the one failure mode a drift gate may not have.
+**No probe, with the attempt stated:** the closure assertion is green on this head, so it cannot be
+made red without adding a production file, which I do not do. Fix: walk the `autoconfigure` package
+the same way the core package is walked, and assert that every `.java` file under either `src/main`
+containing one of those tokens is in the scanned list; add `prepareCall` to
+`SqlSites.STATEMENT_CALLS` while there (it is unused today and is the one JDBC entry point the set
+omits). Routing: Isis.
+
+**C-A-14 (LOW) - the carry has no expiry.** Stated in full under the carry decision above. Routing:
+Isis.
+
+### Attacked on this head, clean
+
+- A quoted keyword in a type position: `::"text"`, `::"numeric"`, `CAST(x AS "text")`,
+  `::"pg_catalog".text` - all four refused. The refusal is correct, not an over-refusal: with
+  `CREATE DOMAIN decoy."text" AS pg_catalog.varchar(3)` in place, `'abcdefgh'::"text"` answered
+  `abc` as `shred_app` while `pg_typeof` still printed `text`. `::pg_catalog."text"` is accepted,
+  which is right - the schema is named.
+- The `IS DISTINCT FROM` rewrite under the shadowing role with NULL tenants: measured correct and
+  measured stronger than both alternatives (see C-A-6). `NOT` and `IS NULL` are grammar, not
+  resolvable names, so the rewrite has nothing left to shadow. The bind value is non-null at the one
+  call site, which is what makes it equivalent, and the builder's comment says so.
+- A hole in relation position without a schema: refused in all five of the leg's positions, which is
+  the C-A-5 fix working. The one bypass is a keyword in front of it (C-A-10).
+- `SET` clause variants, seven of them, and `CREATE INDEX` forms, eight of them: listed in the
+  C-A-3/C-A-4 rulings above.
+- The qualified-operator run: `OPERATOR ( pg_catalog . = )` with whitespace,
+  `OPERATOR("pg_catalog".=)`, `OPERATOR(app.=)` - all three still refused, only the one adjacent
+  six-token spelling accepted.
+- Doubled quotes inside an identifier: `FROM "a""b"` lexes as two quoted identifiers and the first
+  refuses, so the mis-lex over-refuses rather than under-refuses; `FROM "s"."a""b"` is accepted and
+  is correct, the schema being named.
+- `ANY(?)` behind a qualified operator, `pg_catalog.array_agg(…)`, `pg_catalog.nextval('seq')`, a
+  window `OVER ()` (over-refused), `decoy.lower(…)` (refused by the non-`pg_catalog` schema rule):
+  no finding. `decoy.numeric(1)` and `decoy.left(…)` escape that rule because the allowlist branch
+  runs first; neither resolves along `search_path`, so it is not a finding on its own - the ordering
+  is part of C-A-9's fix.
+- The 44 statement sites: 0 unresolved, so "unverifiable is not clean" still holds at the resolver
+  level, and the script-identity assertion that conditions the one `FILE_READ_CALLS` entry is
+  present and green.
+
+### Verdict
+
+**MERGE**, under the option this pass was given: no HIGH, no MEDIUM, six findings closing by
+prescription with no third pass. Three LOW with probes (C-A-9, C-A-10, C-A-11), one INFO with a
+probe (C-A-12), one INFO and one LOW prescribed without a probe and with the repro attempt recorded
+(C-A-13, C-A-14).
+
+The conditions for the merge, each mechanical rather than a judgement:
+
+1. The four tests of `CipherProbeNamePr13gGateTest` green by code, none disabled, renamed or
+   weakened.
+2. The five tests of `CipherProbeNamePr13fGateTest` and `NameQualificationGateTest`'s 23 still
+   green, and `OPEN_REFUSALS` still exactly the nine.
+3. The 465 unchanged with nothing skipped, plus the new probes.
+4. Verified by Ra's numbers, not by a third Cipher pass.
+
+And the condition on the next PR, which is the carry's price: **PR 18 is NOT MERGEABLE unless
+`OPEN_REFUSALS` is empty and `SqlSites.QUALIFYING_CALLS` contains `sql`.**
+
+I do not undraft and I do not merge.
