@@ -453,7 +453,12 @@ class CipherProbeJdbcTest {
         store(
             List.of(
                 new BlindIndexColumn(
-                    com.housedevinci.shredding.domain.TableRef.of("customer"),
+                    // Section 3.2: a @Shredded entity's table carries a schema in its mapping, so
+                    // the framework-rendered read-back names one too. Unqualified, it would be
+                    // resolved by the session's search_path - and inside the one-statement window
+                    // of section 4 there is nothing on that path for it to resolve from, which is
+                    // the fail-closed half of the same decision (T2f).
+                    com.housedevinci.shredding.domain.TableRef.parse("public.customer"),
                     com.housedevinci.shredding.domain.ColumnRef.unquoted("email_bidx"),
                     com.housedevinci.shredding.domain.ColumnRef.unquoted("customer_id"),
                     com.housedevinci.shredding.domain.ColumnRef.unquoted("tenant_id"),

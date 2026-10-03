@@ -153,8 +153,16 @@ class CipherProbeWindowPr14StarterTest {
                 + " does not share an identifier with the statements the erasure built")
         .contains("read back through the entity's own mapping");
     assertThat(
-            count("SELECT count(*) FROM public.shredding_data_key WHERE subject = '" + owner + "'"))
-        .describedAs("the whole transaction rolled back, key destruction included")
+            count(
+                "SELECT pg_catalog.count(*) FROM public.shredding_data_key"
+                    + " WHERE (subject OPERATOR(pg_catalog.=) '"
+                    + owner
+                    + "')"))
+        .describedAs(
+            "the whole transaction rolled back, key destruction included. The operator is"
+                + " qualified here because the shadow this case installs is still on the path:"
+                + " a bare `=` in the assertion would answer 0 and the test would read a rollback"
+                + " that did not happen")
         .isEqualTo(1);
   }
 
