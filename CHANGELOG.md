@@ -23,6 +23,18 @@ All notable changes to this project. The format follows
   `jackson-databind` at all, now at 3.1.7.
 
 ### Changed
+- A failure to capture the path or to establish the window (a `SQLException` from the capture, the
+  pin or the pin read-back) is now reported as `SHRED-SCHEMA-008` with the `SQLException` as cause,
+  as the error-code documentation promised, instead of surfacing as `SHRED-KEY-UNAVAILABLE`. The
+  statement the window exists for still surfaces its own failure (finding C-18-4).
+- `BlindIndexResidual`'s contract now states the window every call runs in: path `pg_catalog,
+  pg_temp`, one statement, qualified names only, no `search_path` changes (finding C-18-5).
+- Documentation: the text of a `@SQLRestriction`, and of every auto-enabled `@Filter` condition, on
+  an entity with a `@BlindIndex` field is rendered into the windowed read-back; an unqualified name
+  in it fails every erasure of that entity, loudly and rolled back whole, and the remedy is to
+  schema-qualify it (finding C-18-2). A `LANGUAGE sql` function with a string body is not immune to
+  the window, only one with a SQL-standard body (`BEGIN ATOMIC`, `RETURN`) is; an earlier text said
+  otherwise (finding C-18-3).
 - **BREAKING. The application no longer creates its own database schema, and refuses to start
   against a schema whose append-only guards it could remove itself.** Until 0.1.1 the starter ran
   the bundled `schema-postgresql.sql` with the application's own database credentials on every
