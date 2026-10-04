@@ -36,6 +36,7 @@ for that state rather than for a tidy one.
 | operators, types, casts and functions in SQL | unqualified | `OPERATOR(pg_catalog....)`, `::pg_catalog....`, `pg_catalog....` - in the adapters, in the bundled script, and in the three statements the starter builds on the application's own connection |
 | trigger state | whatever `CREATE TRIGGER` left (`O`) | the script sets all seven to `ENABLE ALWAYS` |
 | a `@Shredded` entity's table | mapped with or without a schema | **must name a schema**: `spring.jpa.properties.hibernate.default_schema`, or `@Table(schema = "...")`. Without one, startup refuses with `SHRED-CONFIG-001` naming the entity |
+| a `@Shredded` entity's table and its tenant, subject, identifier and blind-index columns | never looked at | **checked against the catalogue** at startup (present and inadmissible: refusal, `SHRED-SCHEMA-009`; absent: WARN) and inside every erasure, under `LOCK TABLE ... ROW EXCLUSIVE` and `... SHARE UPDATE EXCLUSIVE` (any refusal, absent included: `SHRED-SCHEMA-009`, nothing destroyed or recorded) |
 | the read-back Hibernate renders | resolved its `count(*)` and its `=` through the session's `search_path` | runs with `search_path` replaced by `pg_catalog, pg_temp` for that one statement and restored to the bytes it arrived with; `SHRED-SCHEMA-008` if that cannot be established |
 
 The guard-body change matters for the upgrade: from 0.2.0 the bodies are verified material, so an
@@ -93,11 +94,9 @@ lowercase and must not carry a catalog, which was already true in 0.1.x.
 
 One consequence worth knowing before you hit it: one statement of each erasure - the read-back
 Hibernate renders from your mapping - now runs with `search_path` replaced by `pg_catalog, pg_temp`.
-If a row-level-security policy function on that table, or a function called from a view an entity is
-mapped to, names a relation unqualified, that statement fails with the database's own `relation
-"..." does not exist` and the erasure is refused rather than completing on an unexpected answer.
-The remedy is one line per function: `ALTER FUNCTION <fn> SET search_path = <schema>, pg_catalog`.
-The same applies to the SQL in your own mapping: the text of a `@SQLRestriction`, and of every
+A view and a row-level-security policy that applies to the runtime role are refused by mapping
+admission (next section) before that statement runs, so neither one's functions run in there. What
+does is the SQL in your own mapping: the text of a `@SQLRestriction`, and of every
 auto-enabled `@Filter` condition, on an entity with a `@BlindIndex` field is rendered into that
 read-back. Schema-qualify every function, relation and non-keyword type they name, for example
 `@SQLRestriction("public.pr18_visible(owner_id)")`; an unqualified name makes every erasure of that
@@ -105,8 +104,48 @@ entity fail, loudly, and the erasure rolls back whole.
 A `LANGUAGE sql` function written with a string body (`AS $$ ... $$`) is parsed again when it runs
 and fails there exactly like plpgsql; only a SQL-standard body (`BEGIN ATOMIC ... END` or
 `RETURN ...`, PostgreSQL 14 and later) binds its names when the function is created and is
-unaffected. For either kind, the remedy is the `ALTER FUNCTION` above, or rewriting the function
-with a SQL-standard body.
+unaffected. For either kind, the remedy is one line per function,
+`ALTER FUNCTION <fn> SET search_path = <schema>, pg_catalog`, or rewriting the function with a
+SQL-standard body.
+
+### Every installation: what your entity tables must be
+
+0.2.0 reads each `@Shredded` entity's table from the PostgreSQL catalogue before it erases from it,
+and refuses a table the erasure cannot be trusted on: the erasure and both of its read-backs would
+agree that the blind index was cleared while it was not, and the record would say `COMPLETE`. Check
+your tables before the deploy window; every refusal names the entity, the table or column, the
+catalogue fact and the remedy.
+
+| refused | why | remedy |
+|---|---|---|
+| a view, a materialized view, a foreign table | the relation can hide the subject's row from every statement the erasure issues | map the entity to the table itself; keep the view for your queries |
+| a partition or inheritance child that is a foreign table, a temporary table, or a partitioned table with no partitions | the erasure's `UPDATE` routes to it and nothing can tell whether it hid a row | every partition and child an ordinary permanent table |
+| a temporary table | nothing durable is erased | map a permanent table |
+| row level security that applies to the runtime role (it does not own the table, or the table has `FORCE ROW LEVEL SECURITY`) | a policy can hide the rows to clear | exempt the role (`BYPASSRLS` or a policy that admits it - the admission then WARNs as an advisory posture), or no RLS on that table |
+| `SELECT` without `UPDATE` for the runtime role | the erasure would fail at its first statement | the grant block in SECURITY-NOTES "Database roles" |
+| a tenant, subject or identifier column the table does not have | the mapping is wrong | correct the mapping |
+| a tenant, subject or identifier column of type `citext`, `hstore`, an array, a composite or a range, or of a domain over one | its equality is not `pg_catalog`'s, so the module's comparison and the application's disagree (`citext`: 0 rows where the application finds 1) | map them as `text` or `varchar`; a cast is not offered, because it makes the erasure case-sensitive where the application is not |
+| a column whose declared type carries its own two-sided `=` outside `pg_catalog` | the same disagreement, one type definition away from `citext` | the same |
+| a non-deterministic collation on a compared column | an erasure for `s1` also clears `S1`, another tenant's row included | a deterministic collation |
+| a blind-index column that is `NOT NULL` or generated | the erasure sets it to `NULL` | drop the constraint; index a plain column |
+
+At startup a table that is present and refused fails the context with `SHRED-SCHEMA-009`. A table
+that does not exist yet is a WARN, so `spring.jpa.defer-datasource-initialization=true`, a schema a
+test creates after the context starts, and a migration applied while the application runs all
+keep working; every erasure on that entity is refused with `SHRED-SCHEMA-009` until the table exists
+and is admissible. A catalogue that cannot be read is `SHRED-SCHEMA-005`.
+
+Admitted with a WARN at startup: an `UNLOGGED` table or partition (the erasure is sound; a crash
+empties it, residue included). Admitted: enum and domain columns whose equality is `pg_catalog`'s.
+An enum or `uuid` tenant or subject column needs the driver setting `stringtype=unspecified`, which
+an application that writes a `String` into it already has; without it every erasure fails with
+SQLState `42883`.
+
+Each erasure now takes `LOCK TABLE ... IN SHARE UPDATE EXCLUSIVE MODE` on every table it clears, so
+the set of partitions and inheritance children cannot change between the check and the `UPDATE`.
+It does not block your application's reads or writes. It does make two erasures of the same table
+run one after the other, and an erasure waits behind a manual `VACUUM`, `ANALYZE` or
+`CREATE INDEX CONCURRENTLY` on that table.
 
 ## Steps
 
