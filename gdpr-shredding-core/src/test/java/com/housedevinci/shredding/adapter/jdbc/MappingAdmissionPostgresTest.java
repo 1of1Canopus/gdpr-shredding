@@ -178,6 +178,34 @@ class MappingAdmissionPostgresTest {
         .isEqualTo(before);
   }
 
+  /**
+   * D16, and the reason the verdict is never cached (mutation 25): the table the store was built
+   * for is renamed and replaced by a hiding view of the same name, which the runtime role may do.
+   * The LOCK succeeds on a view (A26), so only the verdict read inside the erasure refuses it.
+   */
+  @Test
+  void n31b_a_table_swapped_for_a_hiding_view_after_construction_is_refused_at_erasure() {
+    plainTable("app.n31b");
+    JdbcErasureStore store = store(app, "app.n31b", honestResidual());
+    // A first erasure on the real table is admitted and completes, so a verdict remembered from
+    // construction or from an earlier erasure would be "admitted" from here on.
+    assertThat(eraseWith(store, "app.n31b").blindIndexColumnsCleared()).isEqualTo(1);
+    exec(
+        app(),
+        "INSERT INTO app.n31b VALUES (2, 'T1', 's-second', 'HMAC-RESIDUE')",
+        "ALTER TABLE app.n31b RENAME TO n31b_old",
+        "CREATE VIEW app.n31b AS SELECT * FROM app.n31b_old WHERE (subject <> 's-second')");
+
+    SubjectId second = SubjectId.of("s-second");
+    Throwable thrown =
+        catchThrowable(() -> store.erase(T1, second, (d, c) -> record(second, d, c)));
+
+    assertThat(code(thrown)).isEqualTo(ErrorCodes.MAPPING_INADMISSIBLE);
+    assertThat(thrown).hasMessageContaining("is a view");
+    assertThat(text(su, "SELECT email_idx FROM app.n31b_old WHERE id = 2"))
+        .isEqualTo("HMAC-RESIDUE");
+  }
+
   @Test
   void n39b_an_absent_table_is_read_as_absent_and_never_as_an_absent_column() {
     Verdict verdict = verdict(app, target("app.never_created"));
