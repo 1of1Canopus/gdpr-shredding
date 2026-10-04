@@ -219,3 +219,107 @@ any statement exists), `@Embeddable`, `@ElementCollection` and `@SecondaryTable`
 by earlier controls). One lead outside this PR's scope, not reproduced and not counted: an
 `@Audited` (Envers) entity copies the blind-index column into its audit table, a relation no erasure
 statement addresses. It belongs to the release-candidate whole-module pass.
+
+## Second pass (2026-10-04), head af95483
+
+**Verdict: MERGE WITH FIXES (C-19-7).** This is the last pass on this PR. One new LOW finding:
+the startup check skips clause C-i for a tenant or subject column that is also the entity's
+identifier column. The erasure leg still refuses that column, so nothing is destroyed or
+misrecorded, but the context starts green. This is the same startup-versus-erasure disagreement as
+C-19-3. Its fix is the one-line correction below, not a new mechanism, so it needs no design page.
+
+### Numbers, measured on this head
+
+| check | result |
+| --- | --- |
+| `./mvnw -B verify`, Docker up | green: core 315, starter 237, sample 17 = 569 tests, 0 failed, 0 skipped |
+| coverage (line / branch) | core 90.0 / 75.5, starter 88.1 / 74.8 |
+| `CipherProbe*` reports in that run | 66 classes, 0 failures, 0 errors, 0 skipped |
+| first-pass probes | 6 in `CipherProbePr19Test` and 1 in `CipherProbePr19StarterTest`, all green. Their bodies match the probe file as delivered (formatter reflow only) |
+| `gh pr checks 19` | 6/6 pass at af95483 |
+
+### First-pass findings closed
+
+| id | closed by | probe (green, executed) |
+| --- | --- | --- |
+| C-19-1 | 0cf7ec7, C-i | `probe_an_enum_with_a_role_owned_implicit_cast_is_admitted_and_its_erasure_clears_nothing` |
+| C-19-2 | 0cf7ec7, C-i | `probe_a_name_typed_subject_is_admitted_and_a_long_subject_is_never_erased` |
+| C-19-3 | 0cf7ec7, C-i, driver note removed | `probe_an_admitted_mapping_the_erasure_cannot_execute_is_reported_as_a_key_store_outage` |
+| C-19-4 | 1b7f9f4, visited set, bound counts distinct relations | `probe_a_diamond_inheritance_is_walked_once_per_relation` |
+| C-19-5 | 0cf7ec7, C-i | `probe_a_uuid_subject_lets_an_erasure_for_another_spelling_clear_this_subjects_index` |
+| C-19-6 | fd02c0f; the PR body and the design row say the same | `probe_the_lock_cost_statement_names_the_wraparound_autovacuum` |
+
+The `TABLE_PER_CLASS` test is adopted and green. SECURITY-NOTES no longer says `TABLE_PER_CLASS` is
+untested.
+
+### C-i attacked, holds (executed: `CipherProbePr19SecondPassTest`, 5/5)
+
+Fixture: the same runtime role as in the first pass. That role owns schema `app`, can create
+collations and domains there, and has no database `CREATE`. `citext` was installed by the superuser.
+
+- Domain over domain over `text`: admitted. Domain over `varchar(64)` with a `CHECK`: admitted. Both
+  are right, because the chase reaches oid 25 or 1043, and casts on a domain are ignored.
+- `text[]`: refused (C-c). `citext` as tenant, and a domain over `citext` as subject: refused (C-b,
+  ahead of C-i). Either clause is a refusal.
+- `char(16)` tenant and subject: admitted. Rows stored padded (`'abc'` and `'abcd'`) are cleared
+  exactly, under the driver's default and under `stringtype=unspecified`, each subject alone. Every
+  `bpchar` comparison ignores trailing blanks, and identifiers cannot contain whitespace
+  (`Identifiers.validate`), so no two subjects can collapse.
+- `varchar(4)` with a 6-byte subject: the application's write fails with `22001`, and nothing is
+  stored truncated. Non-blank excess is never silently cut, and blank excess cannot occur.
+- A nondeterministic ICU collation (`und-u-ks-level2`) on a `text` column, on a domain, on a domain
+  over that domain, and on a `char(16)` column: all refused by C-e. The harm is measured first: on
+  the domain-collated column, the module's own `UPDATE` for `alice` matches the row of `Alice`. The
+  erasure is refused, and the index stays populated.
+- The role set is closed. `"Tenant Column"`, `"tenant"`, leading or trailing space, a doubled space,
+  upper case, a no-break space and `""` are all refused when the `Column` is constructed. A
+  non-interned equal string decides C-i like the constant. `Target.forErasure` gives both compared
+  columns the C-i role.
+- Who builds a `Column` in production code: `MappingAdmission.Target.forErasure` (erasure leg) and
+  `ShreddedModel.admissionTargets` (startup leg). Neither takes the role from user input. The second
+  one is C-19-7.
+
+### Regressions in the other legs
+
+None found. The whole suite and every earlier probe run green. The visited set marks the root and
+counts only distinct relations against `MAX_DESCENDANTS`. The identifier column keeps C-b to C-h,
+with its own remedy text. `TypeFacts.oid` is read only after C-a has guaranteed a declared type.
+
+### Public text
+
+SECURITY-NOTES, `docs/upgrading-0.2.0.md`, the CHANGELOG and the PR body contain no agent or
+person name, internal path or internal document reference. Finding ids and probe names remain, as
+the convention allows.
+
+### Findings
+
+| id | severity | one line |
+| --- | --- | --- |
+| C-19-7 | LOW | a tenant or subject column that is also the identifier column is checked at startup as the identifier only, so C-i is skipped there: the context starts green and every erasure is refused with `SHRED-SCHEMA-009` |
+
+#### C-19-7 (LOW): the startup leg drops the subject role of a column that is also the identifier
+
+**Repro.** The entity has `@Id UUID id` and `@Column(name = "id", insertable = false, updatable =
+false) String subject`, and `@BlindIndex(subjectColumn = "id", tenantColumn = "tenant_id")`. The
+direct form, with no property over the identifier column, is refused by the model, and that refusal
+holds. Here one basic property maps the column, so the model accepts it. Hibernate creates `id
+uuid`. `ShreddedModel.admissionTargets` adds `Column(id, COMPARED, IDENTIFIER)` first. Then
+`addOnce` drops `Column(id, COMPARED, SUBJECT)`, because it compares the ref and the use only. The
+startup targets measured are `[id COMPARED identifier column, tenant_id COMPARED tenant column,
+email_idx ASSIGNED blind-index column]`. The identifier rules admit `uuid`, so the context starts
+with no refusal and no WARN. The row persists, and then every erasure fails as follows:
+`SHRED-SCHEMA-009 ... the subject column public.c19b_owner.id is of type uuid`. The erasure leg
+builds its targets from the blind indexes alone. The erasure is refused before it changes anything:
+the index stays populated and no record is written. The startup gate is meant to refuse what the
+erasure refuses, and it does not. This is the same class as C-19-3, and the error code is now right.
+
+**Fix.** In `ShreddedModel.addOnce` (starter), treat a column as a duplicate only when ref, use and
+role all match, so a role is never dropped. `MappingAdmission.Target.addOnce` (core) gets the same
+key for consistency. There, today, the tenant and subject roles both trigger C-i, so the change
+there alters no verdict. Do not fix this by changing the order of insertion: a later caller would
+bring the bug back. Add a unit row to `MappingAdmissionStarterTest`: the admission targets of an
+entity whose subject column is its identifier column contain a `SUBJECT` entry for that ref. Probe:
+`CipherProbePr19bStarterTest.probe_a_subject_column_that_is_also_the_identifier_skips_c_i_at_startup`,
+with entity `cipherprobe19b.idsubject.C19bOwner`. It is red on af95483 because the context starts.
+It turns green when startup fails with `SHRED-SCHEMA-009` naming `public.c19b_owner.id is of type
+uuid`. Mutation row to add: dedup by ref and use only, which must make that probe red.
