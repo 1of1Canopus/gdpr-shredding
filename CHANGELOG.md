@@ -23,6 +23,43 @@ All notable changes to this project. The format follows
   `jackson-databind` at all, now at 3.1.7.
 
 ### Changed
+- **BREAKING. Mapping admission: a `@Shredded` entity's table, and the columns of it this module
+  compares, are checked against the PostgreSQL catalogue before the first erasure, and refused when
+  the erasure could not be trusted on them.** A hiding view, a row-level-security policy the runtime
+  role is subject to, a foreign table over a remote hiding view, a `citext` or application-defined
+  equality, or a non-deterministic collation makes the erasure's `UPDATE` and both of its
+  read-backs agree on a falsehood, and the erasure was recorded `COMPLETE` over residue; no leg of
+  the erasure could see it, because every leg asks the same relation the same way. The relation must
+  be an ordinary or partitioned table that is permanent, whose every partition or inheritance child
+  is an ordinary permanent table, that the role may `SELECT` and `UPDATE`, and that no
+  row-level-security policy applies to for the role; its tenant, subject and identifier columns must
+  compare through a `pg_catalog` equality operator under a deterministic collation, its tenant and
+  subject columns must be `text`, `varchar` or `char(n)` after following domains (a UUID or numeric
+  subject id is stored in a text column; clause C-i, security review C-19-1, C-19-2, C-19-3,
+  C-19-5), and its
+  blind-index columns must be nullable and not generated. The check runs at startup, where a present
+  and inadmissible table fails the context and an absent one is a WARN, and again inside every
+  erasure's transaction, after `LOCK TABLE ... IN ROW EXCLUSIVE MODE` and `... IN SHARE UPDATE
+  EXCLUSIVE MODE` and before the first statement that touches the table, where any refusal is
+  `SHRED-SCHEMA-009` and nothing is destroyed, cleared or recorded. Never cached: a startup verdict
+  is undone by one rename and one `CREATE VIEW` the runtime role may perform. The `SHARE UPDATE
+  EXCLUSIVE` lock serialises two erasures of the same table and waits behind a manual `VACUUM`,
+  `ANALYZE` or `CREATE INDEX CONCURRENTLY` on it, and behind an autovacuum run to prevent wraparound, which does not yield (security review C-19-6); it does not block the application's writes. See
+  [docs/upgrading-0.2.0.md](docs/upgrading-0.2.0.md), "Every installation: what your entity tables
+  must be".
+- The identifier column of a `@Shredded` entity is resolved once at startup by `ShreddedModel`
+  (`idColumn(entityName)`) and read from there by the write path; error code and message unchanged.
+- A database failure inside an erasure no longer lets a failing rollback replace the error that
+  caused it: the rollback's and the auto-commit reset's own failures are attached as suppressed, so
+  a catalogue that could not be read is reported as `SHRED-SCHEMA-005` and not as a key-store
+  outage.
+- Documentation: the same-text read-back's javadoc no longer claims to cover a view in general. It
+  covers a view that repopulates the column; a view that hides the row is what mapping admission
+  refuses. The statement that a `@Shredded` field is refused anywhere in an `@Inheritance` hierarchy
+  was broader than the code: what is refused is a field inherited from an entity ancestor (S-23); a
+  field declared on the concrete subclass itself is supported, and admission checks the subclass's
+  own mapped table (measured for `JOINED`, including a renamed `@PrimaryKeyJoinColumn`, for
+  `SINGLE_TABLE` and for `TABLE_PER_CLASS`).
 - A failure to capture the path or to establish the window (a `SQLException` from the capture, the
   pin or the pin read-back) is now reported as `SHRED-SCHEMA-008` with the `SQLException` as cause,
   as the error-code documentation promised, instead of surfacing as `SHRED-KEY-UNAVAILABLE`. The
@@ -228,6 +265,27 @@ All notable changes to this project. The format follows
   a comment saying so, rather than inheriting it by omission: reading that file now tells you which
   controls are off in the demo.
 
+### Fixed (security review pass 1 of mapping admission)
+- C-19-1 MEDIUM, C-19-2 MEDIUM, C-19-3 LOW, C-19-5 LOW: an enum, `name`, `"char"`, `uuid` or
+  numeric tenant or subject column was admitted. An enum's owner could give it an implicit cast to
+  `text` that made the erasure record `COMPLETE` with nothing cleared; `name` and `"char"` truncate
+  a long subject id so it is never matched; `uuid` and numeric types let one spelling of a subject
+  clear another subject's index, or failed every erasure as a key-store outage. Clause C-i now
+  admits only `text`, `varchar` and `char(n)` for tenant and subject, by type oid after following
+  domains, and the docs' driver note is replaced by that rule.
+- C-19-4 INFO: the descendant walk visited a relation once per inheritance path; stacked diamonds
+  of plain tables made an admissible table unverifiable. Each relation is now walked once.
+- C-19-6 INFO: the lock cost statement now names the autovacuum run to prevent wraparound, which
+  does not yield to a waiting erasure.
+- `TABLE_PER_CLASS`: a leaf declaring its own `@Shredded` field is checked on its own table and
+  erases; the security review's test is adopted and the "not tested" text removed.
+
+### Fixed (security review pass 2 of mapping admission)
+- C-19-7 LOW: a tenant or subject column that is also the entity's identifier column was checked
+  at startup as the identifier only, so clause C-i was skipped for it: the application started and
+  every erasure was then refused with `SHRED-SCHEMA-009`. The startup targets now keep a column
+  once per role, so the startup check refuses what the erasure refuses.
+
 ### Removed
 - **BREAKING.** `JdbcSupport.runtimeRoleOwnsErasureTable`, public since 0.1.0. Its query had no
   `schemaname` predicate, so it answered about whichever copy of `shredding_erasure` `pg_tables`
@@ -243,6 +301,12 @@ All notable changes to this project. The format follows
 ### Added
 - `JdbcSupport.verifySchema(DataSource)` and `verifySchema(DataSource, boolean)`, public core API,
   so a caller that does not use Spring makes the same assertion at its own startup.
+- `SHRED-SCHEMA-009` (`ErrorCodes.MAPPING_INADMISSIBLE`): a `@Shredded` entity's table or a
+  compared or assigned column of it fails mapping admission. Raised at startup for a table that is
+  present and inadmissible, and before an erasure's first statement for one that is inadmissible
+  or absent at that moment.
+- `MappingAdmission` (core, `adapter.jdbc`): the catalogue check, callable without Spring, and
+  `MappingAdmissionCheck` (starter), the eager startup bean.
 - Error codes `SHRED-SCHEMA-001` to `SHRED-SCHEMA-007`, documented in
   [docs/upgrading-0.2.0.md](docs/upgrading-0.2.0.md) with the upgrade step each one points at.
 

@@ -1183,7 +1183,10 @@ class SchemaVerificationTest {
             ErasureChain.unkeyed(),
             List.of(
                 new com.housedevinci.shredding.domain.BlindIndexColumn(
-                    com.housedevinci.shredding.domain.TableRef.of("invoice"),
+                    // Qualified since mapping admission: an unqualified table is refused
+                    // (R-a) before the first statement, which the starter already makes
+                    // unreachable at startup (section 3.2). The subject here is the count.
+                    com.housedevinci.shredding.domain.TableRef.parse("public.invoice"),
                     com.housedevinci.shredding.domain.ColumnRef.unquoted("bi"),
                     com.housedevinci.shredding.domain.ColumnRef.unquoted("subject"),
                     com.housedevinci.shredding.domain.ColumnRef.unquoted("tenant"),
