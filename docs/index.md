@@ -55,7 +55,7 @@ inheriting entity (S-23). This module keys a shredded field's subject expression
 check and its `@SecondaryTable` refusal by one entity name, and an inherited field's column is shared
 by more than one, which no single converter can describe. A field declared on the concrete subclass
 itself is supported; mapping admission checks that subclass's own mapped table (measured for
-`JOINED` and `SINGLE_TABLE`). Share
+`JOINED`, `SINGLE_TABLE` and `TABLE_PER_CLASS`). Share
 the field through a plain `@MappedSuperclass` instead (not itself an `@Entity`) - that is unaffected
 and is the supported way to put the same `@Shredded` field on more than one concrete entity - or
 declare the field, its `@Convert` and its own converter directly on each concrete entity.

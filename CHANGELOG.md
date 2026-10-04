@@ -58,8 +58,8 @@ All notable changes to this project. The format follows
   refuses. The statement that a `@Shredded` field is refused anywhere in an `@Inheritance` hierarchy
   was broader than the code: what is refused is a field inherited from an entity ancestor (S-23); a
   field declared on the concrete subclass itself is supported, and admission checks the subclass's
-  own mapped table (measured for `JOINED`, including a renamed `@PrimaryKeyJoinColumn`, and for
-  `SINGLE_TABLE`).
+  own mapped table (measured for `JOINED`, including a renamed `@PrimaryKeyJoinColumn`, for
+  `SINGLE_TABLE` and for `TABLE_PER_CLASS`).
 - A failure to capture the path or to establish the window (a `SQLException` from the capture, the
   pin or the pin read-back) is now reported as `SHRED-SCHEMA-008` with the `SQLException` as cause,
   as the error-code documentation promised, instead of surfacing as `SHRED-KEY-UNAVAILABLE`. The
@@ -264,6 +264,21 @@ All notable changes to this project. The format follows
 - The sample's `application.yml` sets both new properties to the weaker value **explicitly**, with
   a comment saying so, rather than inheriting it by omission: reading that file now tells you which
   controls are off in the demo.
+
+### Fixed (security review pass 1 of mapping admission)
+- C-19-1 MEDIUM, C-19-2 MEDIUM, C-19-3 LOW, C-19-5 LOW: an enum, `name`, `"char"`, `uuid` or
+  numeric tenant or subject column was admitted. An enum's owner could give it an implicit cast to
+  `text` that made the erasure record `COMPLETE` with nothing cleared; `name` and `"char"` truncate
+  a long subject id so it is never matched; `uuid` and numeric types let one spelling of a subject
+  clear another subject's index, or failed every erasure as a key-store outage. Clause C-i now
+  admits only `text`, `varchar` and `char(n)` for tenant and subject, by type oid after following
+  domains, and the docs' driver note is replaced by that rule.
+- C-19-4 INFO: the descendant walk visited a relation once per inheritance path; stacked diamonds
+  of plain tables made an admissible table unverifiable. Each relation is now walked once.
+- C-19-6 INFO: the lock cost statement now names the autovacuum run to prevent wraparound, which
+  does not yield to a waiting erasure.
+- `TABLE_PER_CLASS`: a leaf declaring its own `@Shredded` field is checked on its own table and
+  erases; the security review's test is adopted and the "not tested" text removed.
 
 ### Removed
 - **BREAKING.** `JdbcSupport.runtimeRoleOwnsErasureTable`, public since 0.1.0. Its query had no

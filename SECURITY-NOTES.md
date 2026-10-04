@@ -604,8 +604,9 @@ field was refused anywhere in such a hierarchy. The refusal above is what the co
 declared on the concrete subclass itself is scanned once, under that subclass's own entity name, and
 is supported. Mapping admission checks the subclass's own mapped table - the table every statement
 this module builds for it addresses - and nothing else: for `JOINED` that is the leaf's table and
-its own key column (a renamed `@PrimaryKeyJoinColumn` included), for `SINGLE_TABLE` the shared table.
-Both are measured, booted and erased in the test suite; `TABLE_PER_CLASS` is not. A `JOINED` root's
+its own key column (a renamed `@PrimaryKeyJoinColumn` included), for `SINGLE_TABLE` the shared table,
+for `TABLE_PER_CLASS` the leaf's own table.
+All three are measured, booted and erased in the test suite. A `JOINED` root's
 table is addressed by no statement of this module and is not checked, even when it names no schema:
 Hibernate 7 drops the root from the read-back it renders when no root column is referenced, and if
 a later Hibernate stopped doing so the read-back would fail inside its window and the erasure would
