@@ -198,12 +198,13 @@ public final class ShreddedModel {
       }
       var columns = new ArrayList<MappingAdmission.Column>();
       columns.add(
-          new MappingAdmission.Column(id, MappingAdmission.Use.COMPARED, "identifier column"));
+          new MappingAdmission.Column(
+              id, MappingAdmission.Use.COMPARED, MappingAdmission.IDENTIFIER));
       for (var index : indexes.getOrDefault(entity, List.of())) {
         BlindIndexColumn c = index.column();
-        addOnce(columns, c.tenantColumn(), "tenant column", true);
-        addOnce(columns, c.subjectColumn(), "subject column", true);
-        addOnce(columns, c.column(), "blind-index column", false);
+        addOnce(columns, c.tenantColumn(), MappingAdmission.TENANT, true);
+        addOnce(columns, c.subjectColumn(), MappingAdmission.SUBJECT, true);
+        addOnce(columns, c.column(), MappingAdmission.BLIND_INDEX, false);
       }
       out.add(
           new MappingAdmission.Target(

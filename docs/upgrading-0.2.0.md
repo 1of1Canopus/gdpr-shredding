@@ -125,6 +125,7 @@ catalogue fact and the remedy.
 | `SELECT` without `UPDATE` for the runtime role | the erasure would fail at its first statement | the grant block in SECURITY-NOTES "Database roles" |
 | a tenant, subject or identifier column the table does not have | the mapping is wrong | correct the mapping |
 | a tenant, subject or identifier column of type `citext`, `hstore`, an array, a composite or a range, or of a domain over one | its equality is not `pg_catalog`'s, so the module's comparison and the application's disagree (`citext`: 0 rows where the application finds 1) | map them as `text` or `varchar`; a cast is not offered, because it makes the erasure case-sensitive where the application is not |
+| a tenant or subject column that is not `text`, `varchar` or `char(n)` after following domains: `uuid`, a numeric type, an enum, `name`, `"char"` | the erasure compares these columns against the request's string; other types parse it (one spelling of a subject clears another's index), truncate it, let a cast the application's role owns decide, or cannot compare with it at all | store the tenant and subject ids in a `text` or `varchar` column; a UUID or numeric subject id is stored as text |
 | a column whose declared type carries its own two-sided `=` outside `pg_catalog` | the same disagreement, one type definition away from `citext` | the same |
 | a non-deterministic collation on a compared column | an erasure for `s1` also clears `S1`, another tenant's row included | a deterministic collation |
 | a blind-index column that is `NOT NULL` or generated | the erasure sets it to `NULL` | drop the constraint; index a plain column |
@@ -136,10 +137,8 @@ keep working; every erasure on that entity is refused with `SHRED-SCHEMA-009` un
 and is admissible. A catalogue that cannot be read is `SHRED-SCHEMA-005`.
 
 Admitted with a WARN at startup: an `UNLOGGED` table or partition (the erasure is sound; a crash
-empties it, residue included). Admitted: enum and domain columns whose equality is `pg_catalog`'s.
-An enum or `uuid` tenant or subject column needs the driver setting `stringtype=unspecified`, which
-an application that writes a `String` into it already has; without it every erasure fails with
-SQLState `42883`.
+empties it, residue included). Admitted: a domain over `text` or `varchar` as tenant or subject,
+and any identifier column type whose equality is `pg_catalog`'s (numeric, `uuid`, text, an enum).
 
 Each erasure now takes `LOCK TABLE ... IN SHARE UPDATE EXCLUSIVE MODE` on every table it clears, so
 the set of partitions and inheritance children cannot change between the check and the `UPDATE`.

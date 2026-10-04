@@ -577,7 +577,7 @@ class MappingAdmissionPostgresTest {
   }
 
   @Test
-  void n43_a_domain_over_text_and_an_enum_are_admitted_and_erase_and_an_array_is_refused() {
+  void n43_a_domain_over_text_is_admitted_and_erases_and_an_enum_or_array_tenant_is_refused() {
     exec(
         app(),
         "CREATE DOMAIN app.plain_t AS text",
@@ -589,22 +589,18 @@ class MappingAdmissionPostgresTest {
             + " email_idx varchar(64))",
         "INSERT INTO app.n43e VALUES (1, 'T1', 's-app-n43e', 'HMAC-RESIDUE')",
         "CREATE TABLE app.n43a (id bigint, tenant text[], subject varchar(64),"
-            + " email_idx varchar(64))");
+            + " email_idx varchar(64))",
+        "CREATE TABLE app.n43c (id bigint, tenant char(8), subject char(32),"
+            + " email_idx varchar(64))",
+        "INSERT INTO app.n43c VALUES (1, 'T1', 's-app-n43c', 'HMAC-RESIDUE')");
     assertThat(verdict(app, target("app.n43d"))).isInstanceOf(Admitted.class);
-    assertThat(verdict(app, target("app.n43e"))).isInstanceOf(Admitted.class);
     assertThat(erase(app, "app.n43d").blindIndexColumnsCleared()).isEqualTo(1);
-    // An enum column takes a String only with stringtype=unspecified, which the application
-    // already needs to write it at all; under the driver's default (varchar) the module's own
-    // UPDATE fails loudly with 42883, and so does the application's INSERT.
-    HikariDataSource unspecified =
-        poolAt(
-            POSTGRES.getJdbcUrl()
-                + (POSTGRES.getJdbcUrl().contains("?") ? "&" : "?")
-                + "stringtype=unspecified",
-            APP,
-            2,
-            "SET search_path = public, app, pg_catalog");
-    assertThat(erase(unspecified, "app.n43e").blindIndexColumnsCleared()).isEqualTo(1);
+    assertThat(verdict(app, target("app.n43c"))).isInstanceOf(Admitted.class);
+    assertThat(erase(app, "app.n43c").blindIndexColumnsCleared()).isEqualTo(1);
+    // C-i (security review C-19-1): an enum tenant is refused at the verdict and at the erasure.
+    assertRefused(verdict(app, target("app.n43e")), "C-i", "app.tenant_e");
+    assertThat(code(catchThrowable(() -> erase(app, "app.n43e"))))
+        .isEqualTo(ErrorCodes.MAPPING_INADMISSIBLE);
     assertRefused(verdict(app, target("app.n43a")), "C-c", "text[]");
   }
 

@@ -59,7 +59,10 @@ public final class MappingAdmission {
 
   /** Whether a column is compared by an erasure or write statement, or only assigned. */
   public enum Use {
-    /** Compared with {@code OPERATOR(pg_catalog.=)}: clauses C-a to C-e and C-h apply. */
+    /**
+     * Compared with {@code OPERATOR(pg_catalog.=)}: clauses C-a to C-e and C-h apply, and C-i for a
+     * tenant or subject column.
+     */
     COMPARED,
     /** Only assigned ({@code SET <col> = NULL}): clauses C-a, C-f and C-g apply. */
     ASSIGNED
@@ -70,16 +73,59 @@ public final class MappingAdmission {
    *
    * @param ref the column exactly as the mapping renders it
    * @param use compared or assigned
-   * @param role what the column is, for messages: {@code "tenant column"}, {@code "identifier
-   *     column"} and so on
+   * @param role what the column is: one of {@link #TENANT}, {@link #SUBJECT}, {@link #IDENTIFIER}
+   *     or {@link #BLIND_INDEX}. A closed set, because clause C-i is decided by it: the tenant and
+   *     subject columns are the two this module compares against a bound {@code String}
    */
   public record Column(ColumnRef ref, Use use, String role) {
     public Column {
       Objects.requireNonNull(ref, "ref");
       Objects.requireNonNull(use, "use");
       Objects.requireNonNull(role, "role");
+      if (!List.of(TENANT, SUBJECT, IDENTIFIER, BLIND_INDEX).contains(role)) {
+        throw new ShreddingException(
+            ErrorCodes.CONFIG,
+            "a mapping admission column role must be one of \""
+                + TENANT
+                + "\", \""
+                + SUBJECT
+                + "\", \""
+                + IDENTIFIER
+                + "\" or \""
+                + BLIND_INDEX
+                + "\", was \""
+                + role
+                + "\"");
+      }
+    }
+
+    /** Clause C-i applies: a tenant or subject column, compared against a bound string. */
+    boolean comparedAsText() {
+      return use == Use.COMPARED && (TENANT.equals(role) || SUBJECT.equals(role));
     }
   }
+
+  /** The tenant column of a blind index. */
+  public static final String TENANT = "tenant column";
+
+  /** The subject column of a blind index. */
+  public static final String SUBJECT = "subject column";
+
+  /** The entity's identifier column. */
+  public static final String IDENTIFIER = "identifier column";
+
+  /** A blind-index column. */
+  public static final String BLIND_INDEX = "blind-index column";
+
+  /**
+   * Clause C-i: the built-in types a tenant or subject column may resolve to, by oid - {@code
+   * pg_catalog.text} (25), {@code pg_catalog.varchar} (1043), {@code pg_catalog.bpchar} (1042).
+   * Fixed oids assigned at initdb, never a spelling. Equality between two of these is {@code
+   * pg_catalog}'s, and the runtime role can create neither a cast nor an operator between two
+   * built-in types, so nothing outside the table lock can change what the erasure's comparison
+   * resolves to.
+   */
+  static final java.util.Set<Long> TEXT_TYPE_OIDS = java.util.Set.of(25L, 1043L, 1042L);
 
   /**
    * One mapped table and the columns of it the module's statements compare or assign.
@@ -104,9 +150,9 @@ public final class MappingAdmission {
       var byTable = new LinkedHashMap<TableRef, List<Column>>();
       for (BlindIndexColumn c : columns) {
         var list = byTable.computeIfAbsent(c.table(), t -> new ArrayList<>());
-        addOnce(list, new Column(c.tenantColumn(), Use.COMPARED, "tenant column"));
-        addOnce(list, new Column(c.subjectColumn(), Use.COMPARED, "subject column"));
-        addOnce(list, new Column(c.column(), Use.ASSIGNED, "blind-index column"));
+        addOnce(list, new Column(c.tenantColumn(), Use.COMPARED, TENANT));
+        addOnce(list, new Column(c.subjectColumn(), Use.COMPARED, SUBJECT));
+        addOnce(list, new Column(c.column(), Use.ASSIGNED, BLIND_INDEX));
       }
       var out = new ArrayList<Target>();
       byTable.forEach((table, cols) -> out.add(new Target(Optional.empty(), table, cols)));
@@ -296,6 +342,7 @@ public final class MappingAdmission {
 
   /** One type, as the type leg read it. */
   record TypeFacts(
+      long oid,
       String typtype,
       String category,
       long baseType,
@@ -522,6 +569,7 @@ public final class MappingAdmission {
       String implicit = rs.getString("binary_implicit_to");
       var facts =
           new TypeFacts(
+              oid,
               rs.getString("typtype"),
               rs.getString("typcategory"),
               rs.getLong("typbasetype"),
@@ -710,7 +758,9 @@ public final class MappingAdmission {
     TypeFacts declared = col.declared().orElseThrow();
     TypeFacts base = col.base().orElseThrow();
     String remedy =
-        " Map tenant, subject and identifier columns as text, varchar or a numeric type.";
+        column.comparedAsText()
+            ? " Map the tenant and subject columns as text, varchar or char(n)."
+            : " Map the identifier column as a numeric, uuid, text or varchar column.";
     // C-b: the base type's own default-opclass equality is not pg_catalog's.
     if (base.ownEqSchema().isPresent() && !CATALOG.equals(base.ownEqSchema().get())) {
       return Optional.of(
@@ -797,6 +847,34 @@ public final class MappingAdmission {
                   + " with search_path replaced, where the application's operator is not"
                   + " reachable at all."
                   + remedy));
+    }
+    // C-i (security review C-19-1, -2, -3, -5): a tenant or subject column is compared against a
+    // bound String. Only text, varchar and char(n) compare that string as written. Any other base
+    // type either parses it (uuid, numeric: one spelling of a subject clears another's index),
+    // truncates it (name, "char": a long subject id is never matched), lets a cast the runtime role
+    // owns decide the comparison (an enum: the erasure clears nothing and records COMPLETE), or has
+    // no operator for it at all (every erasure fails). Decided by the base type's oid, after the
+    // domain chase; no pg_cast read, because pg_cast is not pinned by the table lock.
+    if (column.comparedAsText() && !TEXT_TYPE_OIDS.contains(base.oid())) {
+      return Optional.of(
+          new Refused(
+              "C-i",
+              who
+                  + ": the "
+                  + where
+                  + " is of type "
+                  + qualifiedType(declared)
+                  + (declared.oid() == base.oid()
+                      ? ""
+                      : " (a domain over " + qualifiedType(base) + ")")
+                  + ". This module compares tenant and subject columns against the request's"
+                  + " string, and only text, varchar and char(n) compare that string as written:"
+                  + " another type parses it (a uuid or a number, so one spelling of a subject"
+                  + " clears another subject's index), truncates it (name, \"char\"), lets a cast"
+                  + " the application's role owns decide the comparison (an enum), or has no"
+                  + " comparison with a string at all."
+                  + remedy
+                  + " A UUID or numeric subject id is stored in a text column."));
     }
     return Optional.empty();
   }

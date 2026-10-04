@@ -91,8 +91,78 @@ class MappingAdmissionRulesTest {
     for (TypeFacts t : List.of(array, composite, range)) {
       assertRule(judge(table(), List.of(), facts(t, t, Optional.of(true))), "C-d");
     }
-    assertThat(judge(table(), List.of(), facts(enumType, enumType, Optional.empty())))
-        .isInstanceOf(Admitted.class);
+    // C-d admits an enum; on a tenant or subject column C-i then refuses it (C-19-1).
+    assertRule(judge(table(), List.of(), facts(enumType, enumType, Optional.empty())), "C-i");
+    var identifier =
+        new Column(ColumnRef.unquoted("id"), Use.COMPARED, MappingAdmission.IDENTIFIER);
+    var enumId =
+        new ColumnFacts(
+            identifier,
+            true,
+            false,
+            "",
+            Optional.empty(),
+            Optional.of(enumType),
+            Optional.of(enumType));
+    assertThat(judge(table(), List.of(), List.of(enumId))).isInstanceOf(Admitted.class);
+  }
+
+  /**
+   * C-i (C-19-1, -2, -3, -5): a tenant or subject column must resolve, after the domain chase, to
+   * text, varchar or char(n), decided by oid. The identifier column is not subject to it.
+   */
+  @Test
+  void c_i_admits_only_built_in_text_types_by_oid_for_tenant_and_subject() {
+    TypeFacts bpchar =
+        typeWithOid(1042L, "b", "S", "pg_catalog", "character", "pg_catalog", List.of(), null);
+    TypeFacts text =
+        typeWithOid(25L, "b", "S", "pg_catalog", "text", "pg_catalog", List.of(), null);
+    TypeFacts textDomain = typeWithOid(900_001L, "d", "S", "app", "plain_t", null, List.of(), null);
+    for (TypeFacts[] ok :
+        List.of(
+            new TypeFacts[] {VARCHAR, VARCHAR},
+            new TypeFacts[] {bpchar, bpchar},
+            new TypeFacts[] {text, text},
+            new TypeFacts[] {textDomain, text})) {
+      assertThat(judge(table(), List.of(), facts(ok[0], ok[1], Optional.of(true))))
+          .isInstanceOf(Admitted.class);
+    }
+    TypeFacts name =
+        typeWithOid(19L, "b", "S", "pg_catalog", "name", "pg_catalog", List.of(), null);
+    TypeFacts uuid =
+        typeWithOid(2950L, "b", "U", "pg_catalog", "uuid", "pg_catalog", List.of(), null);
+    TypeFacts bigint =
+        typeWithOid(20L, "b", "N", "pg_catalog", "bigint", "pg_catalog", List.of(), null);
+    TypeFacts fakeText =
+        typeWithOid(
+            900_002L,
+            "b",
+            "S",
+            "pg_catalog",
+            "text",
+            "pg_catalog",
+            List.of("pg_catalog:pg_catalog"),
+            null);
+    for (TypeFacts t : List.of(name, uuid, bigint, fakeText)) {
+      assertRule(judge(table(), List.of(), facts(t, t, Optional.empty())), "C-i");
+    }
+    var identifier =
+        new Column(ColumnRef.unquoted("id"), Use.COMPARED, MappingAdmission.IDENTIFIER);
+    for (TypeFacts t : List.of(uuid, bigint)) {
+      var id =
+          new ColumnFacts(
+              identifier, true, false, "", Optional.empty(), Optional.of(t), Optional.of(t));
+      assertThat(judge(table(), List.of(), List.of(id)))
+          .describedAs(t.spelled())
+          .isInstanceOf(Admitted.class);
+    }
+  }
+
+  @Test
+  void a_column_role_outside_the_closed_set_is_refused() {
+    org.assertj.core.api.Assertions.assertThatThrownBy(
+            () -> new Column(ColumnRef.unquoted("x"), Use.COMPARED, "tenant"))
+        .isInstanceOf(com.housedevinci.shredding.domain.ShreddingException.class);
   }
 
   /** S-5 and N44b: NULL (non-collatable) is admitted by its own branch, never read as false. */
@@ -258,7 +328,30 @@ class MappingAdmissionRulesTest {
       String ownEq,
       List<String> implicit,
       String shadow) {
+    return typeWithOid(
+        "pg_catalog".equals(schema) && "character varying".equals(spelled)
+            ? 1043L
+            : "pg_catalog".equals(schema) && "text".equals(spelled) ? 25L : 900_000L,
+        typtype,
+        category,
+        schema,
+        spelled,
+        ownEq,
+        implicit,
+        shadow);
+  }
+
+  private static TypeFacts typeWithOid(
+      long oid,
+      String typtype,
+      String category,
+      String schema,
+      String spelled,
+      String ownEq,
+      List<String> implicit,
+      String shadow) {
     return new TypeFacts(
+        oid,
         typtype,
         category,
         0L,

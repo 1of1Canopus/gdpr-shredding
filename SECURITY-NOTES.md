@@ -732,7 +732,8 @@ type or an enum whose own default equality operator is `pg_catalog`'s, or that r
 an implicit binary cast to a `pg_catalog` type whose own equality is (`varchar` does, `citext` does
 not, because its own equality is read first), their declared type must carry no two-sided `=` of
 its own outside `pg_catalog`, and their collation must be deterministic (a non-collatable type such
-as `bigint` has none and is admitted). Every blind-index column must exist, be nullable and not be
+as `bigint` has none and is admitted). The tenant and subject columns must in addition resolve to
+`text`, `varchar` or `char(n)` (below). Every blind-index column must exist, be nullable and not be
 generated.
 
 **Where it runs.** At startup, from an eager bean that runs after Hibernate's schema export, Flyway,
@@ -779,11 +780,17 @@ write-verification read-back) compare the identifier column with no verdict behi
 fails loudly on the shapes above (a row count that is not 1), and the first erasure refuses until
 the table is admissible.
 
-**A driver note.** An enum (or `uuid`) tenant or subject column is admitted, and the erasure's own
-statements bind their values as strings. With the PostgreSQL driver's default
-`stringtype=varchar` the comparison has no operator and every erasure fails loudly with SQLState
-`42883`; with `stringtype=unspecified` it resolves and erases. An application that writes a `String`
-property into such a column already needs that setting.
+**Tenant and subject columns are text-typed (clause C-i).** The erasure compares the tenant and
+subject columns against the request's string. Only `text`, `varchar` and `char(n)` (the built-in
+types, identified by oid, after following domains) compare that string as written, so those are
+the only types admitted for them. Measured on the types the other rules admit: an enum's owner can
+give it an implicit cast to `text` with its own function, after which the erasure, both read-backs
+and the record agree on `COMPLETE` with nothing cleared; `name` and `"char"` truncate their input, so
+a subject id longer than 63 bytes is never matched; `uuid` and numeric types parse the string, so
+under `stringtype=unspecified` an erasure requested as `A0EEBC99-...` or `0042` clears the index of
+the subject stored as `a0eebc99-...` or `42`, whose key survives, and under the driver's default
+every erasure fails. A UUID or numeric subject id is stored in a text column. The identifier column
+is compared with Hibernate's own typed binds and is held to the other rules only.
 
 ## Threats the module does close, and how
 

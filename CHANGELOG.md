@@ -33,7 +33,10 @@ All notable changes to this project. The format follows
   be an ordinary or partitioned table that is permanent, whose every partition or inheritance child
   is an ordinary permanent table, that the role may `SELECT` and `UPDATE`, and that no
   row-level-security policy applies to for the role; its tenant, subject and identifier columns must
-  compare through a `pg_catalog` equality operator under a deterministic collation, and its
+  compare through a `pg_catalog` equality operator under a deterministic collation, its tenant and
+  subject columns must be `text`, `varchar` or `char(n)` after following domains (a UUID or numeric
+  subject id is stored in a text column; clause C-i, security review C-19-1, C-19-2, C-19-3,
+  C-19-5), and its
   blind-index columns must be nullable and not generated. The check runs at startup, where a present
   and inadmissible table fails the context and an absent one is a WARN, and again inside every
   erasure's transaction, after `LOCK TABLE ... IN ROW EXCLUSIVE MODE` and `... IN SHARE UPDATE

@@ -218,7 +218,7 @@ There is no fail-open property anywhere in this module.
 | `SHRED-SCHEMA-005` | verification could not complete - a refused catalogue read, a lost connection, an unreadable bundled resource, or a migration in flight. Never a pass and never a warning |
 | `SHRED-SCHEMA-006` | `shredding.jdbc.initialize-schema=true` and the DDL failed. Carries the SQLState only |
 | `SHRED-SCHEMA-007` | a privilege the adapters need is missing. Never downgraded by `allow-privileged-runtime-role` |
-| `SHRED-SCHEMA-009` | mapping admission: a `@Shredded` entity's table is not an ordinary permanent table this role can address unhidden, or a tenant, subject or identifier column does not compare through a `pg_catalog` equality under a deterministic collation, or a blind-index column is `NOT NULL` or generated. A startup refusal for a table that is present; before an erasure's first statement for one that is inadmissible or absent then, with nothing destroyed or recorded. See [upgrading-0.2.0.md](upgrading-0.2.0.md), "what your entity tables must be" |
+| `SHRED-SCHEMA-009` | mapping admission: a `@Shredded` entity's table is not an ordinary permanent table this role can address unhidden, or a tenant, subject or identifier column does not compare through a `pg_catalog` equality under a deterministic collation, or a tenant or subject column is not `text`, `varchar` or `char(n)`, or a blind-index column is `NOT NULL` or generated. A startup refusal for a table that is present; before an erasure's first statement for one that is inadmissible or absent then, with nothing destroyed or recorded. See [upgrading-0.2.0.md](upgrading-0.2.0.md), "what your entity tables must be" |
 | `SHRED-SCHEMA-008` | the module could not isolate the name resolution of its independent read-back: the connection was in auto-commit, or something moved `search_path` inside the erasure's transaction. The one `SHRED-SCHEMA-*` code that is never a startup condition and never means "re-apply the script"; treat it as an outage of that operation. The erasure's whole transaction rolls back |
 
 Every `SHRED-SCHEMA-*` code except `-008` is a startup refusal (`-009` also refuses an erasure): the application context fails to build, so nothing
@@ -393,7 +393,8 @@ Cluster-wide invalidation ships in Pro alongside the KMS adapters.
   a `"` character;
 - a `@Shredded` entity whose table exists and fails mapping admission (`SHRED-SCHEMA-009`): a
   view, a foreign table, row level security the runtime role is subject to, a missing privilege, a
-  `citext` or other non-`pg_catalog` equality on the tenant, subject or identifier column, a
+  `citext` or other non-`pg_catalog` equality on the tenant, subject or identifier column, a tenant
+  or subject column that is not `text`, `varchar` or `char(n)`, a
   non-deterministic collation, or a `NOT NULL` or generated blind-index column. A table that does
   not exist yet is a WARN, and the erasure refuses until it does;
 - a Hibernate dialect that is not PostgreSQL. This module builds SQL identifiers itself and folds by

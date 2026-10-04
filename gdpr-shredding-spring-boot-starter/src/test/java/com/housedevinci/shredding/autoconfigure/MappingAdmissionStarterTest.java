@@ -171,6 +171,20 @@ class MappingAdmissionStarterTest {
         .contains("citext");
   }
 
+  /** C-i (security review C-19-3): a uuid tenant column refuses startup, naming the column. */
+  @Test
+  void a_uuid_tenant_column_refuses_startup_and_says_ids_are_stored_as_text() throws SQLException {
+    sql(
+        "CREATE TABLE public.b2_note (id bigserial PRIMARY KEY, owner_id varchar(255),"
+            + " tenant_id uuid, email bytea, email_idx bytea)");
+    Throwable thrown = catchThrowable(() -> builder(PlainApp.class, "none").run().close());
+    assertThat(code(thrown)).isEqualTo(ErrorCodes.MAPPING_INADMISSIBLE);
+    assertThat(message(thrown))
+        .contains("tenant column public.b2_note.tenant_id")
+        .contains("uuid")
+        .contains("stored in a text column");
+  }
+
   /**
    * D-8(a)'s reason, for this bean: lazy initialisation does not move the check to request time.
    */
