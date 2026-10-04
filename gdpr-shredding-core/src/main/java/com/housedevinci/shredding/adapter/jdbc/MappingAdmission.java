@@ -161,7 +161,7 @@ public final class MappingAdmission {
 
     private static void addOnce(List<Column> list, Column column) {
       for (Column existing : list) {
-        if (existing.ref().equals(column.ref()) && existing.use() == column.use()) {
+        if (existing.equals(column)) {
           return;
         }
       }

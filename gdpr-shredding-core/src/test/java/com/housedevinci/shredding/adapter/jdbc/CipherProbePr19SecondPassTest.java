@@ -13,7 +13,6 @@ import com.housedevinci.shredding.domain.ColumnRef;
 import com.housedevinci.shredding.domain.ErasureChain;
 import com.housedevinci.shredding.domain.ErasureOutcome;
 import com.housedevinci.shredding.domain.ErasureRecord;
-import com.housedevinci.shredding.domain.ErrorCodes;
 import com.housedevinci.shredding.domain.Pseudonymiser;
 import com.housedevinci.shredding.domain.ShreddingException;
 import com.housedevinci.shredding.domain.SubjectId;
@@ -114,7 +113,9 @@ class CipherProbePr19SecondPassTest {
   }
 
   private static String clause(Verdict v) {
-    return v instanceof Refused r ? r.rule() + " (" + r.message() + ")" : v.getClass().getSimpleName();
+    return v instanceof Refused r
+        ? r.rule() + " (" + r.message() + ")"
+        : v.getClass().getSimpleName();
   }
 
   @Test
@@ -159,11 +160,19 @@ class CipherProbePr19SecondPassTest {
     assertThat(sameTextUpdate(app, "app.s2g", "T1", "abc")).isEqualTo(1);
     assertThat(sameTextUpdate(unspecified, "app.s2g", "T1", "abc")).isEqualTo(1);
     erase(app, "app.s2g", "T1", "abc");
-    assertThat(text(su, "SELECT string_agg(id::text, ',' ORDER BY id) FROM app.s2g"
-            + " WHERE email_idx IS NOT NULL")).isEqualTo("2,3");
+    assertThat(
+            text(
+                su,
+                "SELECT string_agg(id::text, ',' ORDER BY id) FROM app.s2g"
+                    + " WHERE email_idx IS NOT NULL"))
+        .isEqualTo("2,3");
     erase(unspecified, "app.s2g", "T1", "abcd");
-    assertThat(text(su, "SELECT string_agg(id::text, ',' ORDER BY id) FROM app.s2g"
-            + " WHERE email_idx IS NOT NULL")).isEqualTo("3");
+    assertThat(
+            text(
+                su,
+                "SELECT string_agg(id::text, ',' ORDER BY id) FROM app.s2g"
+                    + " WHERE email_idx IS NOT NULL"))
+        .isEqualTo("3");
   }
 
   /** varchar(n) shorter than an id: the write fails loudly, nothing is silently truncated. */
@@ -186,7 +195,10 @@ class CipherProbePr19SecondPassTest {
     assertThat(sameTextUpdate(unspecified, "app.s2h", "T1", "abcdef")).isZero();
   }
 
-  /** A case-insensitive nondeterministic collation on the column or on its domain: same class as C-19-5. */
+  /**
+   * A case-insensitive nondeterministic collation on the column or on its domain: same class as
+   * C-19-5.
+   */
   @Test
   void ci_nondeterministic_collation_on_column_or_domain_is_refused() {
     exec(
@@ -210,8 +222,7 @@ class CipherProbePr19SecondPassTest {
     assertThat(out.values()).allMatch(v -> !v.equals("Admitted"));
     Throwable thrown = catchThrowable(() -> erase(app, "app.s2j", "T1", "alice"));
     assertThat(thrown).isInstanceOf(ShreddingException.class);
-    assertThat(text(su, "SELECT count(*) FROM app.s2j WHERE email_idx IS NOT NULL"))
-        .isEqualTo("1");
+    assertThat(text(su, "SELECT count(*) FROM app.s2j WHERE email_idx IS NOT NULL")).isEqualTo("1");
   }
 
   /** The role string acts as an enum: anything not exactly one of the four is refused. */
@@ -227,8 +238,7 @@ class CipherProbePr19SecondPassTest {
             "SUBJECT COLUMN",
             "tenant column",
             "")) {
-      Throwable t =
-          catchThrowable(() -> new Column(ColumnRef.unquoted("x"), Use.COMPARED, role));
+      Throwable t = catchThrowable(() -> new Column(ColumnRef.unquoted("x"), Use.COMPARED, role));
       assertThat(t).describedAs("[" + role + "]").isInstanceOf(ShreddingException.class);
     }
     // A non-interned equal string is the role, not a bypass.

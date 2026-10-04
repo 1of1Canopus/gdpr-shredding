@@ -68,6 +68,13 @@ class MappingAdmissionStarterTest {
 
   @SpringBootConfiguration
   @EnableAutoConfiguration
+  @EntityScan(
+      basePackageClasses =
+          com.housedevinci.shredding.autoconfigure.cipherprobe19b.idsubject.C19bOwner.class)
+  static class IdSubjectApp extends Tenant {}
+
+  @SpringBootConfiguration
+  @EnableAutoConfiguration
   @EntityScan(basePackageClasses = B2JoinedLeaf.class)
   static class JoinedApp extends Tenant {}
 
@@ -119,6 +126,21 @@ class MappingAdmissionStarterTest {
   }
 
   /** N30: absent at startup is a WARN naming the entity, the table and the remedy. */
+  /**
+   * C-19-7: a subject column that is also the identifier column keeps both roles in the admission
+   * targets, so C-i is applied to it as the subject and not only as the identifier.
+   */
+  @Test
+  void a_subject_column_that_is_also_the_identifier_keeps_its_subject_role() {
+    try (var ctx = builder(IdSubjectApp.class, "none").run()) {
+      var target = ctx.getBean(ShreddedModel.class).admissionTargets().get(0);
+      var id = target.columns().stream().filter(c -> c.ref().text().equals("id")).toList();
+      assertThat(id)
+          .extracting(c -> c.role() + "/" + c.use())
+          .containsExactlyInAnyOrder("identifier column/COMPARED", "subject column/COMPARED");
+    }
+  }
+
   @Test
   void a_table_absent_at_startup_warns_and_boots_and_the_erasure_refuses() {
     try (var ctx = builder(PlainApp.class, "none").run()) {

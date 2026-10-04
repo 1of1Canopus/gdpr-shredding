@@ -1,18 +1,11 @@
 package com.housedevinci.shredding.autoconfigure;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
-import ch.qos.logback.classic.spi.ILoggingEvent;
-import ch.qos.logback.core.read.ListAppender;
 import com.housedevinci.shredding.application.ErasureRequest;
 import com.housedevinci.shredding.application.ErasureService;
-import com.housedevinci.shredding.autoconfigure.admission.joined.B2JoinedLeaf;
-import com.housedevinci.shredding.autoconfigure.admission.joinedpk.B2PkLeaf;
-import com.housedevinci.shredding.autoconfigure.admission.plain.B2Note;
-import com.housedevinci.shredding.autoconfigure.admission.single.B2SingleLeaf;
 import com.housedevinci.shredding.autoconfigure.cipherprobe19b.idsubject.C19bOwner;
-import java.util.UUID;
-import static org.assertj.core.api.Assertions.catchThrowable;
 import com.housedevinci.shredding.domain.ShreddingException;
 import com.housedevinci.shredding.domain.SubjectId;
 import com.housedevinci.shredding.domain.TenantId;
@@ -23,9 +16,8 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Base64;
-import org.junit.jupiter.api.AfterEach;
+import java.util.UUID;
 import org.junit.jupiter.api.Test;
-import org.slf4j.LoggerFactory;
 import org.springframework.boot.SpringBootConfiguration;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
@@ -67,11 +59,11 @@ class CipherProbePr19bStarterTest {
 
   /**
    * C-19-7 (LOW). The subject column is the uuid identifier column, reached through a read-only
-   * String property mapped over it. The startup target lists the identifier first
-   * (COMPARED, role identifier) and the subject's {@code addOnce} drops the same ref with the same
-   * use, so C-i never sees it: startup is green. The erasure leg builds its targets from the blind
-   * indexes alone, so there the column is the subject and C-i refuses every erasure. Startup and
-   * erasure must agree: the context must refuse to start with C-i.
+   * String property mapped over it. The startup target lists the identifier first (COMPARED, role
+   * identifier) and the subject's {@code addOnce} drops the same ref with the same use, so C-i
+   * never sees it: startup is green. The erasure leg builds its targets from the blind indexes
+   * alone, so there the column is the subject and C-i refuses every erasure. Startup and erasure
+   * must agree: the context must refuse to start with C-i.
    */
   @Test
   void probe_a_subject_column_that_is_also_the_identifier_skips_c_i_at_startup() {
@@ -95,13 +87,10 @@ class CipherProbePr19bStarterTest {
     } catch (RuntimeException e) {
       started = e;
     }
-    assertThat(started)
-        .describedAs("startup must refuse what every erasure refuses")
-        .isNotNull();
+    assertThat(started).describedAs("startup must refuse what every erasure refuses").isNotNull();
     assertThat(code(started)).isEqualTo("SHRED-SCHEMA-009");
     assertThat(message(started)).contains("public.c19b_owner.id is of type uuid");
   }
-
 
   private SpringApplicationBuilder builder(Class<?> app, String ddlAuto) {
     return new SpringApplicationBuilder(app)

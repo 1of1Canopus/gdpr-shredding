@@ -11,8 +11,8 @@ import jakarta.persistence.Table;
 import java.util.UUID;
 
 /**
- * Second pass of the PR 19 review: the subject of the blind index is the entity's own identifier,
- * a {@code uuid} column, reached through a read-only String property over that same column (the
+ * Second pass of the PR 19 review: the subject of the blind index is the entity's own identifier, a
+ * {@code uuid} column, reached through a read-only String property over that same column (the
  * direct form, {@code subjectColumn} naming the identifier with no property over it, is refused by
  * the model).
  */

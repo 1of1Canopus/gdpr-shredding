@@ -280,6 +280,12 @@ All notable changes to this project. The format follows
 - `TABLE_PER_CLASS`: a leaf declaring its own `@Shredded` field is checked on its own table and
   erases; the security review's test is adopted and the "not tested" text removed.
 
+### Fixed (security review pass 2 of mapping admission)
+- C-19-7 LOW: a tenant or subject column that is also the entity's identifier column was checked
+  at startup as the identifier only, so clause C-i was skipped for it: the application started and
+  every erasure was then refused with `SHRED-SCHEMA-009`. The startup targets now keep a column
+  once per role, so the startup check refuses what the erasure refuses.
+
 ### Removed
 - **BREAKING.** `JdbcSupport.runtimeRoleOwnsErasureTable`, public since 0.1.0. Its query had no
   `schemaname` predicate, so it answered about whichever copy of `shredding_erasure` `pg_tables`

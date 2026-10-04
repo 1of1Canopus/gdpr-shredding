@@ -217,7 +217,7 @@ public final class ShreddedModel {
       List<MappingAdmission.Column> columns, ColumnRef ref, String role, boolean compared) {
     var use = compared ? MappingAdmission.Use.COMPARED : MappingAdmission.Use.ASSIGNED;
     for (var existing : columns) {
-      if (existing.ref().equals(ref) && existing.use() == use) {
+      if (existing.ref().equals(ref) && existing.use() == use && existing.role().equals(role)) {
         return;
       }
     }
