@@ -443,12 +443,17 @@ public final class MappingAdmission {
   }
 
   /**
-   * The whole descendant set, breadth first, one statement per relation that has children. The set
-   * is a tree (PostgreSQL refuses an inheritance cycle), so nothing is visited twice; the bound is
-   * there so a catalogue this module did not expect is unverifiable rather than a long loop.
+   * The whole descendant set, breadth first, one statement per relation that has children, each
+   * relation once. The inheritance set is a DAG, not a tree: legacy inheritance allows several
+   * parents, so a relation under a diamond has one {@code pg_inherits} row per parent and would
+   * otherwise be visited once per path (security review C-19-4). PostgreSQL refuses a cycle, and
+   * the visited set would end one regardless. The bound counts distinct relations, so a catalogue
+   * this module did not expect is unverifiable rather than a long loop.
    */
   private static List<Descendant> descendants(Connection c, long root) throws SQLException {
     var out = new ArrayList<Descendant>();
+    var visited = new java.util.HashSet<Long>();
+    visited.add(root);
     var queue = new ArrayDeque<Long>();
     queue.add(root);
     try (PreparedStatement ps = c.prepareStatement(CHILDREN_SQL)) {
@@ -462,6 +467,9 @@ public final class MappingAdmission {
                     rs.getString("relkind"),
                     rs.getString("relpersistence"),
                     rs.getLong("children"));
+            if (!visited.add(d.oid())) {
+              continue;
+            }
             out.add(d);
             if (d.children() > 0) {
               queue.add(d.oid());
