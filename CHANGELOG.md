@@ -44,7 +44,7 @@ All notable changes to this project. The format follows
   `SHRED-SCHEMA-009` and nothing is destroyed, cleared or recorded. Never cached: a startup verdict
   is undone by one rename and one `CREATE VIEW` the runtime role may perform. The `SHARE UPDATE
   EXCLUSIVE` lock serialises two erasures of the same table and waits behind a manual `VACUUM`,
-  `ANALYZE` or `CREATE INDEX CONCURRENTLY` on it; it does not block the application's writes. See
+  `ANALYZE` or `CREATE INDEX CONCURRENTLY` on it, and behind an autovacuum run to prevent wraparound, which does not yield (security review C-19-6); it does not block the application's writes. See
   [docs/upgrading-0.2.0.md](docs/upgrading-0.2.0.md), "Every installation: what your entity tables
   must be".
 - The identifier column of a `@Shredded` entity is resolved once at startup by `ShreddedModel`

@@ -144,7 +144,7 @@ Each erasure now takes `LOCK TABLE ... IN SHARE UPDATE EXCLUSIVE MODE` on every 
 the set of partitions and inheritance children cannot change between the check and the `UPDATE`.
 It does not block your application's reads or writes. It does make two erasures of the same table
 run one after the other, and an erasure waits behind a manual `VACUUM`, `ANALYZE` or
-`CREATE INDEX CONCURRENTLY` on that table.
+`CREATE INDEX CONCURRENTLY` on that table. An erasure also waits behind an autovacuum run to prevent transaction ID wraparound, which, unlike an ordinary autovacuum, does not give way to a waiting lock, for as long as that run takes; while it waits it holds the subject's advisory lock and key rows, and later erasures of the same table queue behind it. Set a `lock_timeout` on the erasure's connection if that wait must be bounded.
 
 ## Steps
 

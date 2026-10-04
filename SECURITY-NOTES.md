@@ -754,8 +754,8 @@ against the first, so the set of relations the `UPDATE` routes to could change a
 described it - including gaining a foreign table over a hiding view. Measured on an ordinary table as
 well as a partitioned one, which is why the second lock is taken on every table. Its cost: two
 erasures of the same table run one after the other, and an erasure waits behind a manual `VACUUM`,
-`ANALYZE` or `CREATE INDEX CONCURRENTLY` on that table. The application's own reads and writes are
-not blocked. A `LOCK` that fails because the relation does not exist, is a foreign table, or may
+`ANALYZE` or `CREATE INDEX CONCURRENTLY` on that table. An erasure also waits behind an autovacuum run to prevent transaction ID wraparound, which, unlike an ordinary autovacuum, does not give way to a waiting lock, for as long as that run takes; while it waits it holds the subject's advisory lock and key rows, and later erasures of the same table queue behind it. Set a `lock_timeout` on the erasure's connection if that wait must be bounded. The application's own reads and
+writes are not blocked. A `LOCK` that fails because the relation does not exist, is a foreign table, or may
 not be locked by the role is the same refusal, reached one statement earlier.
 
 **What it reads, and why that cannot be lied to.** Every statement is fully qualified and every
