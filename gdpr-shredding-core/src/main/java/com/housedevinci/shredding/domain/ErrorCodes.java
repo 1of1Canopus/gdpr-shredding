@@ -195,20 +195,24 @@ public final class ErrorCodes {
 
   /**
    * A copy of a blind-index column exists outside the table, where no erasure reaches it
-   * (audit-table coverage design, section 4c). In this release the copy is PostgreSQL's planner
-   * statistics on the column: its statistics target is not 0, so the next {@code ANALYZE} samples
-   * it; {@code pg_stats} already holds sampled values for it; an expression index computes over it;
-   * an extended-statistics object covers it; or a stored generated column computed from it has any
-   * of these. Statistics store most common values and histogram bounds, which any role with {@code
-   * SELECT} on the table reads, and an erasure does not remove them, so an erased subject's index
-   * stays matchable with the application's index secret. The message names each fact and prints the
-   * remedy with the column's actual type.
+   * (audit-table coverage design, section 4c): a trigger or rule on the table or a descendant, a
+   * materialized view reading the column, a foreign key on it, a publication carrying it, a logical
+   * slot that decodes without a publication, a leftover audit or history table, a Hibernate Envers
+   * or Hibernate audit or history mapping writing it, an association keyed on it; or PostgreSQL's
+   * planner statistics on the column: its statistics target is not 0, so the next {@code ANALYZE}
+   * samples it; {@code pg_stats} already holds sampled values for it; an expression index computes
+   * over it; an extended-statistics object covers it; or a stored generated column computed from it
+   * has any of these. Statistics store most common values and histogram bounds, which any role with
+   * {@code SELECT} on the table reads, and an erasure does not remove them, so an erased subject's
+   * index stays matchable with the application's index secret. The message names each fact and
+   * prints the remedy with the column's actual type.
    *
    * <p><b>Raised from two positions</b>, like {@link #MAPPING_INADMISSIBLE}: at startup, where the
    * context refuses to start; and before an erasure's first statement, inside its transaction and
    * under its locks, where that one erasure is refused and nothing is destroyed, cleared or
-   * recorded. A table whose statistics the runtime role cannot see is {@link #SCHEMA_UNVERIFIABLE},
-   * not this code.
+   * recorded. The catalogue copies are checked a third time inside the erasure, after its {@code
+   * UPDATE} and before commit, where the erasure rolls back. A table whose statistics the runtime
+   * role cannot see is {@link #SCHEMA_UNVERIFIABLE}, not this code.
    */
   public static final String BLIND_INDEX_COPIED = "SHRED-SCHEMA-010";
 

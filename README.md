@@ -154,6 +154,12 @@ what was destroyed, when, by whom, and the date the erasure is also complete in 
 
 ## Modules
 
+Hibernate Envers is supported when every `@Shredded` and `@BlindIndex` field is `@NotAudited` and
+Envers is registered as [docs/index.md](docs/index.md) shows; a copy of a blind index anywhere else
+(an audit or history table, a trigger, a rule, a materialized view, a foreign key, a publication, a
+logical slot) refuses startup, and planner statistics must be off on blind-index columns (upgrade
+step 3a).
+
 | Module | What |
 |---|---|
 | `gdpr-shredding-core` | JDK-only domain and application: envelope encryption, key model, erasure and the hash-chained erasure log |

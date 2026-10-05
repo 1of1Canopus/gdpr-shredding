@@ -23,6 +23,23 @@ All notable changes to this project. The format follows
   `jackson-databind` at all, now at 3.1.7.
 
 ### Changed
+- **BREAKING. Every copy of a blind-index column outside the table is refused
+  (`SHRED-SCHEMA-010`).** An erasure clears the index in the table only, so a copy kept the erased
+  subject matchable with the application's index secret while the record said `COMPLETE`.
+  Startup and every erasure now refuse, naming the object and its remedy: Hibernate Envers, Hibernate's
+  own `@Audited` or `@Temporal` history writing the column, an association or element collection
+  keyed on it, any enabled trigger or rule on the table or a partition or child, a materialized
+  view reading it, a foreign key on it, a publication carrying it, a logical slot with a plugin
+  other than `pgoutput`, and a leftover audit or history table found by name or by its revision
+  columns. Each erasure checks once more after its `UPDATE`, before commit. In-table `@Temporal`
+  history is refused. Envers is supported with every `@Shredded` and `@BlindIndex` field
+  `@NotAudited` and Envers in its manual mode (docs/index.md, "Using Hibernate Envers"). See
+  docs/upgrading-0.2.0.md, "Every installation: what your entity tables must be", and the step 1
+  queries.
+- A `@BlindIndex` field inside an `@Embeddable` is refused at startup (`SHRED-CONFIG-001`); it was
+  ignored, so its column was never cleared.
+- The refusals for an Envers audit entity mapping a `@Shredded` converter, and for an Envers
+  listener displacing this module's, now name Envers and the documented manual mode.
 - **BREAKING. Planner statistics on a blind-index column are refused (`SHRED-SCHEMA-010`, new).**
   `ANALYZE` stores sampled values of every column, which any role with `SELECT` on the table reads
   from `pg_stats`, and an erasure never removed them, so an erased subject's index stayed
@@ -347,7 +364,12 @@ All notable changes to this project. The format follows
 
 ### Added
 - `SHRED-SCHEMA-010` (`ErrorCodes.BLIND_INDEX_COPIED`): a copy of a blind-index column exists
-  where no erasure reaches it; in this release, planner statistics. `MappingAdmission.Verdict`
+  where no erasure reaches it: planner statistics, and every catalogue or mapping copy listed
+  under Changed. `CopySignatures` (core, `adapter.jdbc`): the audit and history tables and
+  revision columns the mapping names; `MappingAdmission.verdict(Connection, Target,
+  CopySignatures)` and a `JdbcErasureStore` constructor taking it, for core-only users whose
+  mapping names its own audit tables (the existing signatures use Hibernate's defaults).
+  `hibernate-envers` is an optional dependency of the starter. `MappingAdmission.Verdict`
   gains `Copied`, and `MappingAdmission.Column` an optional attribute name for messages (the
   three-argument constructor is kept).
 - `JdbcSupport.verifySchema(DataSource)` and `verifySchema(DataSource, boolean)`, public core API,

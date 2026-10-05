@@ -130,6 +130,7 @@ catalogue fact and the remedy.
 | a non-deterministic collation on a compared column | an erasure for `s1` also clears `S1`, another tenant's row included | a deterministic collation |
 | a blind-index column that is `NOT NULL` or generated | the erasure sets it to `NULL` | drop the constraint; index a plain column |
 | planner statistics on a blind-index column: a statistics target that is not 0 (every column's default), rows already in `pg_stats`, an expression index computing over it, extended statistics covering it, or a stored generated column computed from it that has any of these; on the table or any partition or inheritance child (`SHRED-SCHEMA-010`) | `ANALYZE` stores sampled values of the column, most common values and histogram bounds, which any role with `SELECT` on the table reads from `pg_stats`, and an erasure does not remove them: the erased subject's index stays matchable | step 3a, before the deploy window |
+| a copy of a blind-index column outside the table (`SHRED-SCHEMA-010`): Hibernate Envers auditing it, `@org.hibernate.annotations.Audited` or `@Temporal` history writing it, an association or element collection keyed on it, or, in the catalogue, any enabled trigger or rule on the table or a partition or child, a materialized view reading it (directly, through a view, or as a whole row), a foreign key on it (either side), a publication carrying it, a logical replication slot of this database with a plugin other than `pgoutput`, or a leftover audit or history table holding a column of its name (named `<table>_aud`, `<table>_AUD`, `<table>_history` or as the mapping names it, or holding the revision columns `rev`/`revtype` or `effective`/`superseded` next to it) | the erasure clears the index in the table only; every copy keeps the erased subject's index, matchable with the application's index secret, and a trigger or rule fires on the erasure's own `UPDATE`. This module cannot see where a trigger or a subscriber writes, so none is admitted in this release | the message names the object and its remedy: `@NotAudited` / `@Audited.Excluded` / `@Temporal.Excluded` and clear the audit column; drop or disable the trigger, drop the rule; leave the column out of the materialized view; drop the foreign key; a publication column list without the index; drop the slot; reference the entity by its identifier |
 
 At startup a table that is present and refused fails the context with `SHRED-SCHEMA-009`. A table
 that does not exist yet is a WARN, so `spring.jpa.defer-datasource-initialization=true`, a schema a
@@ -146,6 +147,15 @@ see (no `SELECT` on the column, or row level security that applies to the role) 
 `SHRED-SCHEMA-005`: unverifiable is not clean. A partial index whose predicate alone names the
 column (`ON customer (id) WHERE email_idx IS NOT NULL`) stores no statistics of it and is admitted;
 a plain index on the column stores none either.
+
+A copy outside the table is refused with the same code, at startup and before every erasure's
+first statement, and once more inside every erasure, after its `UPDATE` and read-backs and before
+commit: `CREATE MATERIALIZED VIEW` and `CREATE PUBLICATION ... FOR ALL TABLES` are not blocked by
+the erasure's locks, so a copy made while an erasure runs refuses that erasure, which rolls back
+with nothing destroyed, cleared or recorded. A disabled trigger is admitted; enabling it refuses the
+next erasure. Hibernate Envers is supported when every `@Shredded` and `@BlindIndex` field is
+`@NotAudited` and Envers is registered as docs/index.md "Using Hibernate Envers" shows. In-table
+`@Temporal` history (`hibernate.temporal.table_strategy=SINGLE_TABLE`) is refused in 0.2.0.
 
 Admitted with a WARN at startup: an `UNLOGGED` table or partition (the erasure is sound; a crash
 empties it, residue included). Admitted: a domain over `text` or `varchar` as tenant or subject,
@@ -207,6 +217,35 @@ SELECT pg_catalog.pg_describe_object(d.classid, d.objid, d.objsubid) FROM pg_cat
    AND d.refobjsubid = (SELECT attnum FROM pg_catalog.pg_attribute
                          WHERE attrelid = 'public.customer'::regclass AND attname = 'email_idx');
 ```
+
+Then list the copies 0.2.0 refuses (`SHRED-SCHEMA-010`), each non-empty result a finding:
+
+```sql
+-- triggers and rules on the table and every partition (legacy children: from pg_inherits)
+SELECT tgrelid::regclass, tgname, tgenabled FROM pg_catalog.pg_trigger
+ WHERE NOT tgisinternal AND tgenabled <> 'D'
+   AND tgrelid IN (SELECT relid FROM pg_catalog.pg_partition_tree('public.customer'));
+SELECT ev_class::regclass, rulename FROM pg_catalog.pg_rewrite
+ WHERE rulename <> '_RETURN'
+   AND ev_class IN (SELECT relid FROM pg_catalog.pg_partition_tree('public.customer'));
+-- publications carrying the table, with their column lists (NULL: every column)
+SELECT p.pubname, p.pubupdate, t.attrs
+  FROM pg_catalog.pg_publication p, pg_catalog.pg_get_publication_tables(p.pubname::text) t
+ WHERE t.relid = 'public.customer'::regclass;
+-- logical slots of this database that decode without a publication
+SELECT slot_name, plugin, active FROM pg_catalog.pg_replication_slots
+ WHERE slot_type = 'logical' AND database = current_database() AND plugin <> 'pgoutput';
+-- foreign keys on the column, either side
+SELECT conname, conrelid::regclass, confrelid::regclass FROM pg_catalog.pg_constraint
+ WHERE contype = 'f'
+   AND (conrelid = 'public.customer'::regclass OR confrelid = 'public.customer'::regclass);
+-- leftover audit or history tables holding a column of the index's name
+SELECT attrelid::regclass FROM pg_catalog.pg_attribute
+ WHERE attname = 'email_idx' AND attrelid <> 'public.customer'::regclass AND NOT attisdropped;
+```
+
+A materialized view over the column is found with the dependents query above (a `_RETURN` rule of
+a relation whose `relkind` is `m`).
 
 `pg_partition_tree` covers partitions; for legacy inheritance children list them from
 `pg_inherits`. An index or statistics object whose definition does not mention the blind-index
@@ -394,7 +433,7 @@ no WARN. If instead you get:
 | `SHRED-SCHEMA-005` | verification could not complete. A catalogue read was refused, or a migration is in flight |
 | `SHRED-SCHEMA-006` | `initialize-schema=true` and the DDL failed. Use the owner-applied path instead |
 | `SHRED-SCHEMA-007` | a privilege the application needs is missing. Step 5 is incomplete |
-| `SHRED-SCHEMA-010` | a blind-index column keeps planner statistics (its target, stored rows, an expression index, extended statistics, or a generated column computed from it). Step 3a did not run, or not on every column; the message names each fact and prints the remedy |
+| `SHRED-SCHEMA-010` | a copy of a blind-index column exists outside the table: planner statistics (its target, stored rows, an expression index, extended statistics, or a generated column computed from it; step 3a did not run, or not on every column), Hibernate Envers or Hibernate's own `@Audited` / `@Temporal` writing it, an association keyed on it, a trigger, a rule, a materialized view, a foreign key, a publication, a non-`pgoutput` logical slot, or a leftover audit or history table. The message names each object and prints the remedy; see "Every installation: what your entity tables must be" |
 | `SHRED-CONFIG-001` naming an entity and a schema | a `@Shredded` entity's mapping names no schema. See "Every installation: name the schema your entities live in" above |
 | `SHRED-SCHEMA-009` | mapping admission refused a `@Shredded` entity's table or one of its columns. The message names the entity, the column and the catalogue fact. The change most installations meet is the column-type rule, a tenant or subject column that is not `text`, `varchar` or `char(n)` (a `uuid` subject, for one); see "Every installation: what your entity tables must be" above. The refusal reads, with your entity and column in place of the angle brackets: `@Shredded entity <entity>: the subject column <schema>.<table>.<column> is of type uuid. This module compares tenant and subject columns against the request's string, and only text, varchar and char(n) compare that string as written: another type parses it (a uuid or a number, so one spelling of a subject clears another subject's index), truncates it (name, "char"), lets a cast the application's role owns decide the comparison (an enum), or has no comparison with a string at all. Map the tenant and subject columns as text, varchar or char(n). A UUID or numeric subject id is stored in a text column.` The remedy for a `uuid` column is `ALTER TABLE <schema>.<table> ALTER COLUMN <column> TYPE text USING <column>::text;`, and the mapping then stores the id as a string |
 
