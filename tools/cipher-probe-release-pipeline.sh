@@ -333,7 +333,7 @@ probe_verify_fails_on_a_clean_checkout() {
 # ---------------------------------------------------------------------------
 probe_sources_jar_differs_from_a_build_that_actually_ran_tests() {
   [ "${CIPHER_PROBE_MAVEN:-0}" = "1" ] || { echo "        (skipped: set CIPHER_PROBE_MAVEN=1)" >&2; return 0; }
-  local work log step ts name actual expected jar mismatch=0
+  local work log step ts name actual expected jar vrc mismatch=0
   work=$(mktemp -d)
   log="$work/build.log"
   git clone -q --no-hardlinks "${CIPHER_PROBE_TREE:-.}" "$work/tree" || { rm -rf "$work"; return "$PROBE_ERROR"; }
@@ -343,8 +343,18 @@ probe_sources_jar_differs_from_a_build_that_actually_ran_tests() {
   # The checks run in the clone; no `&&` chain, so a failure is attributed to the step that failed.
   ts="$(cd "$work/tree" && scripts/git-commit-timestamp.sh 2>>"$log")" || step="timestamp"
   if [ -z "${step:-}" ]; then
-    (cd "$work/tree" && REPRODUCIBLE_SHA_FILE="$PWD/repro-sha.txt" scripts/verify-reproducible.sh) >>"$log" 2>&1 \
-      || step="scripts/verify-reproducible.sh (two -DskipTests builds)"
+    (cd "$work/tree" && REPRODUCIBLE_SHA_FILE="$PWD/repro-sha.txt" scripts/verify-reproducible.sh) >>"$log" 2>&1
+    vrc=$?
+    # RC-12: status 3 is the script's verdict "an artifact DIFFERS or is MISSING", which is what
+    # this probe looks for (WEAK), not a build failure. A DIFFERS/MISSING row in the table counts
+    # as the same verdict whatever status carried it. Any other non-zero is a failed build (ERROR).
+    if [ "$vrc" -eq 3 ] || { [ "$vrc" -ne 0 ] && grep -Eq '^[^ ]+\.(jar|pom) +(DIFFERS|MISSING) ' "$log"; }; then
+      echo "        verify-reproducible.sh: not reproducible:" >&2
+      grep -E '^[^ ]+\.(jar|pom) +(DIFFERS|MISSING) ' "$log" | sed 's/^/        | /' >&2
+      rm -rf "$work"
+      return 0
+    fi
+    [ "$vrc" -eq 0 ] || step="scripts/verify-reproducible.sh (build 1 skips tests, build 2 runs them)"
   fi
   if [ -z "${step:-}" ]; then
     (cd "$work/tree" && ./mvnw -B clean verify -Prelease -Dgpg.skip=true -Dproject.build.outputTimestamp="$ts") >>"$log" 2>&1 \
