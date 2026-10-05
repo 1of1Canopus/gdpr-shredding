@@ -40,6 +40,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -118,6 +119,19 @@ class CopyCataloguePostgresTest {
     POSTGRES.stop();
   }
 
+  /**
+   * A stale audit or history table found by shape is a copy of every admitted table whose
+   * blind-index column has that name (row 45: shape, not contents, and not which table it came
+   * from). The fixtures share one database, so each test that makes one drops it again.
+   */
+  @AfterEach
+  void dropShapeFixtures() {
+    exec(
+        owner,
+        "DROP TABLE IF EXISTS app.e9_aud, audit.old_customer_hist, audit.e17_versions,"
+            + " app.all_aud, app.k1_aud");
+  }
+
   // ------------------------------------------------------------------- rows 15-20: triggers
 
   @Test
@@ -125,9 +139,9 @@ class CopyCataloguePostgresTest {
     table("app.t1");
     exec(
         owner,
-        "CREATE TABLE app.t1_history (LIKE app.t1)",
+        "CREATE TABLE app.t1_log (LIKE app.t1)",
         "CREATE FUNCTION app.t1_copy() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN"
-            + " INSERT INTO app.t1_history SELECT OLD.*; RETURN NULL; END $$",
+            + " INSERT INTO app.t1_log SELECT OLD.*; RETURN NULL; END $$",
         "CREATE TRIGGER t1_audit AFTER UPDATE ON app.t1 FOR EACH ROW"
             + " EXECUTE FUNCTION app.t1_copy()");
 
@@ -166,8 +180,12 @@ class CopyCataloguePostgresTest {
   void t3_every_trigger_shape_is_refused(String name, String shape, String fact) {
     String table = "app.t3_" + name;
     table(table);
-    exec(owner, "CREATE FUNCTION app.t3_" + name + "_f() RETURNS trigger LANGUAGE plpgsql AS"
-        + " $$ BEGIN RETURN NULL; END $$");
+    exec(
+        owner,
+        "CREATE FUNCTION app.t3_"
+            + name
+            + "_f() RETURNS trigger LANGUAGE plpgsql AS"
+            + " $$ BEGIN RETURN NULL; END $$");
     String create =
         ("constraint".equals(name) ? "CREATE CONSTRAINT TRIGGER " : "CREATE TRIGGER ")
             + "tr_"
@@ -465,7 +483,7 @@ class CopyCataloguePostgresTest {
   @Test
   void p1_publication_without_update_refused() {
     table("app.p1");
-    exec(owner, "CREATE PUBLICATION p1_pub FOR TABLE app.p1 WITH (publish = 'insert')");
+    exec(su, "CREATE PUBLICATION p1_pub FOR TABLE app.p1 WITH (publish = 'insert')");
     try {
       assertThat(copied("app.p1"))
           .contains(
@@ -515,7 +533,7 @@ class CopyCataloguePostgresTest {
   @Test
   void p3_column_list_excluding_index_admitted() {
     table("app.p3");
-    exec(owner, "CREATE PUBLICATION p3_pub FOR TABLE app.p3 (id, tenant, subject)");
+    exec(su, "CREATE PUBLICATION p3_pub FOR TABLE app.p3 (id, tenant, subject)");
     try {
       assertThat(verdict("app.p3")).isInstanceOf(Admitted.class);
     } finally {
@@ -618,8 +636,10 @@ class CopyCataloguePostgresTest {
   @Test
   void e9_envers_disabled_stale_audit_column_is_refused() {
     table("app.e9");
-    exec(owner, "CREATE TABLE app.e9_aud (id bigint, rev integer, revtype smallint,"
-        + " email_idx varchar(64))");
+    exec(
+        owner,
+        "CREATE TABLE app.e9_aud (id bigint, rev integer, revtype smallint,"
+            + " email_idx varchar(64))");
 
     assertThat(copied("app.e9"))
         .contains(
@@ -640,8 +660,10 @@ class CopyCataloguePostgresTest {
   @Test
   void e15_renamed_stale_audit_table_found_by_shape() {
     table("app.e15");
-    exec(owner, "CREATE TABLE audit.old_customer_hist (id bigint, rev integer, revtype smallint,"
-        + " email_idx varchar(64))");
+    exec(
+        owner,
+        "CREATE TABLE audit.old_customer_hist (id bigint, rev integer, revtype smallint,"
+            + " email_idx varchar(64))");
 
     assertThat(copied("app.e15"))
         .contains(
@@ -657,8 +679,10 @@ class CopyCataloguePostgresTest {
   @Test
   void e17_stale_temporal_history_table_found_by_shape() {
     table("app.e17");
-    exec(owner, "CREATE TABLE audit.e17_versions (id bigint, effective timestamp,"
-        + " superseded timestamp, email_idx varchar(64))");
+    exec(
+        owner,
+        "CREATE TABLE audit.e17_versions (id bigint, effective timestamp,"
+            + " superseded timestamp, email_idx varchar(64))");
 
     assertThat(copied("app.e17"))
         .contains(
@@ -683,7 +707,7 @@ class CopyCataloguePostgresTest {
     table("app.e19");
     exec(
         owner,
-        "CREATE TABLE audit.\"Note Archive\" (id bigint, email_idx varchar(64))",
+        "CREATE TABLE audit.e19_archive (id bigint, email_idx varchar(64))",
         "CREATE TABLE audit.e19_rev (id bigint, \"REVISION\" integer, kind smallint,"
             + " email_idx varchar(64))");
     var signatures =
@@ -691,18 +715,19 @@ class CopyCataloguePostgresTest {
             List.of(
                 new CopySignatures.NamedCopy(
                     TableRef.parse("app.e19"),
-                    TableRef.parse("audit.\"Note Archive\""),
+                    TableRef.parse("audit.e19_archive"),
                     "Hibernate Envers",
                     "audit")),
-            List.of(new CopySignatures.RevisionSignature("Hibernate Envers", "audit",
-                "REVISION", "kind")));
+            List.of(
+                new CopySignatures.RevisionSignature(
+                    "Hibernate Envers", "audit", "REVISION", "kind")));
 
     Verdict verdict = verdict(app, "app.e19", signatures);
 
     assertThat(verdict).isInstanceOf(Copied.class);
     assertThat(((Copied) verdict).message())
         .contains(
-            "shredding: audit.\"Note Archive\" has a column email_idx and is the audit table"
+            "shredding: audit.e19_archive has a column email_idx and is the audit table"
                 + " Hibernate Envers writes for app.e19.")
         .contains(
             "audit.e19_rev has a column email_idx, the blind-index column of app.e19, together"
@@ -747,7 +772,8 @@ class CopyCataloguePostgresTest {
         "ALTER TABLE app.k1 ADD CONSTRAINT k1_u UNIQUE (email_idx)",
         "CREATE TABLE app.k1_child (r varchar(64) CONSTRAINT k1_ref REFERENCES app.k1"
             + " (email_idx))",
-        "CREATE PUBLICATION k1_pub FOR TABLE app.k1");
+        "COMMENT ON TABLE app.k1 IS 'hostile-path fixture'");
+    exec(su, "CREATE PUBLICATION k1_pub FOR TABLE app.k1");
     table("app.k1_clean");
     exec(
         app,
@@ -759,7 +785,8 @@ class CopyCataloguePostgresTest {
             + " WHERE false",
         "CREATE VIEW decoy.pg_replication_slots AS SELECT * FROM"
             + " pg_catalog.pg_replication_slots WHERE false",
-        "CREATE VIEW decoy.pg_attribute AS SELECT * FROM pg_catalog.pg_attribute WHERE false",
+        "CREATE VIEW decoy.pg_attribute AS SELECT attrelid, attname, attnum, attisdropped,"
+            + " attgenerated FROM pg_catalog.pg_attribute WHERE false",
         "CREATE VIEW decoy.pg_class AS SELECT * FROM pg_catalog.pg_class WHERE false",
         "CREATE FUNCTION decoy.pg_get_publication_tables(VARIADIC text[], OUT pubid oid,"
             + " OUT relid oid, OUT attrs int2vector, OUT qual pg_node_tree) RETURNS SETOF record"
@@ -800,8 +827,7 @@ class CopyCataloguePostgresTest {
         Throwable thrown =
             catchThrowable(
                 () ->
-                    MappingAdmission.verdict(
-                        broken, target("app.k2"), CopySignatures.defaults()));
+                    MappingAdmission.verdict(broken, target("app.k2"), CopySignatures.defaults()));
 
         assertThat(thrown).describedAs(failing).isInstanceOf(ShreddingException.class);
         assertThat(((ShreddingException) thrown).code())
@@ -819,13 +845,16 @@ class CopyCataloguePostgresTest {
       Connection counting = counting(c, counted);
       MappingAdmission.verdict(counting, target("app.k3"), CopySignatures.defaults());
       int statements = counted.get();
-      exec(owner, "INSERT INTO app.k3 SELECT g, 'T1', 'app.k3-x-' || g, md5(g::text), 'n'"
-          + " FROM generate_series(1, 20000) g");
+      exec(
+          owner,
+          "INSERT INTO app.k3 SELECT g, 'T1', 'app.k3-x-' || g, md5(g::text), 'n'"
+              + " FROM generate_series(1, 20000) g");
       counted.set(0);
       MappingAdmission.verdict(counting, target("app.k3"), CopySignatures.defaults());
 
-      assertThat(counted.get()).describedAs("statements do not grow with rows").isEqualTo(
-          statements);
+      assertThat(counted.get())
+          .describedAs("statements do not grow with rows")
+          .isEqualTo(statements);
       long[] nanos = new long[21];
       for (int i = 0; i < nanos.length; i++) {
         long start = System.nanoTime();
@@ -1045,8 +1074,7 @@ class CopyCataloguePostgresTest {
     return pool(user, password, url, null);
   }
 
-  private static HikariDataSource pool(
-      String user, String password, String url, String initSql) {
+  private static HikariDataSource pool(String user, String password, String url, String initSql) {
     var config = new HikariConfig();
     config.setJdbcUrl(url == null ? POSTGRES.getJdbcUrl() : url);
     config.setUsername(user);
@@ -1080,5 +1108,4 @@ class CopyCataloguePostgresTest {
       throw new IllegalStateException(e.getMessage(), e);
     }
   }
-
 }

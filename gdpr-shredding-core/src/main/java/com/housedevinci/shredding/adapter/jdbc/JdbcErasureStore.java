@@ -55,6 +55,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
   private final List<BlindIndexColumn> blindIndexColumns;
   private final List<MappingAdmission.Target> admissionTargets;
   private final BlindIndexResidual residual;
+  private final CopySignatures copySignatures;
   private final String dataKeyTable;
   private final String erasedSubjectTable;
   private final String erasureTable;
@@ -71,6 +72,23 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
       ErasureChain chain,
       List<BlindIndexColumn> blindIndexColumns,
       BlindIndexResidual residual) {
+    this(dataSource, schema, chain, blindIndexColumns, residual, CopySignatures.defaults());
+  }
+
+  /**
+   * @param residual the independent read-back, as above
+   * @param copySignatures the audit and history tables and revision columns the application's
+   *     mapping names, so the copy leg checked inside every erasure reads the same inputs as the
+   *     one checked at startup (audit-table coverage design, S-4). A core-only user who maps no
+   *     audit or history table passes {@link CopySignatures#defaults()}
+   */
+  public JdbcErasureStore(
+      DataSource dataSource,
+      VerifiedSchema schema,
+      ErasureChain chain,
+      List<BlindIndexColumn> blindIndexColumns,
+      BlindIndexResidual residual,
+      CopySignatures copySignatures) {
     this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
     Objects.requireNonNull(schema, "schema");
     // Design §16: the four relation names are built once, from the schema that was verified at
@@ -86,6 +104,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
     this.blindIndexColumns = List.copyOf(blindIndexColumns);
     this.admissionTargets = MappingAdmission.Target.forErasure(this.blindIndexColumns);
     this.residual = Objects.requireNonNull(residual, "residual");
+    this.copySignatures = Objects.requireNonNull(copySignatures, "copySignatures");
     // Fail closed at startup, not on the first erasure: a rolling restart must not serve traffic
     // for a while before it discovers it disagrees with the trail.
     JdbcSupport.withConnection(
@@ -281,7 +300,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
     // order for every erasure, so two erasures cannot take the same pair of locks the other way
     // round.
     for (MappingAdmission.Target target : admissionTargets) {
-      admit(c, target);
+      admit(c, target, copySignatures);
     }
     int cleared = 0;
     for (BlindIndexColumn column : blindIndexColumns) {
@@ -310,6 +329,14 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
       }
     }
     verifyCleared(c, tenant, subject);
+    // C5: the whole verdict again, on this connection, after the UPDATE and its read-backs. CREATE
+    // MATERIALIZED VIEW and CREATE PUBLICATION ... FOR ALL TABLES are not blocked by this
+    // erasure's locks and copy the index values it is about to clear from the last committed
+    // snapshot; a copy made while this transaction held its locks is found here and the erasure
+    // rolls back. What remains is the time between this run and commit (SECURITY-NOTES.md).
+    for (MappingAdmission.Target target : admissionTargets) {
+      recheck(c, target, copySignatures);
+    }
     return cleared;
   }
 
@@ -336,11 +363,12 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
    * may not be locked by this role is the same refusal the verdict would give, reached one
    * statement earlier (A26).
    */
-  private static void admit(Connection c, MappingAdmission.Target target) throws SQLException {
+  private static void admit(Connection c, MappingAdmission.Target target, CopySignatures signatures)
+      throws SQLException {
     TableRef table = target.table();
     lock(c, target, "LOCK TABLE " + table.sql() + " IN ROW EXCLUSIVE MODE");
     lock(c, target, "LOCK TABLE " + table.sql() + " IN SHARE UPDATE EXCLUSIVE MODE");
-    MappingAdmission.Verdict verdict = MappingAdmission.verdict(c, target);
+    MappingAdmission.Verdict verdict = MappingAdmission.verdict(c, target, signatures);
     switch (verdict) {
       case MappingAdmission.Admitted admitted -> {
         // Postures the erasure is sound under; startup has already warned about each of them.
@@ -350,6 +378,40 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
       case MappingAdmission.Copied copied ->
           throw refusedBeforeFirstStatement(ErrorCodes.BLIND_INDEX_COPIED, copied.message());
     }
+  }
+
+  /**
+   * The verdict at the third position (audit-table coverage design, C5): after this erasure's
+   * {@code UPDATE} and read-backs, before the key rows are deleted and before commit. Same
+   * function, same inputs as at startup and after the locks (S-4). Anything but admission rolls the
+   * whole transaction back.
+   */
+  private static void recheck(
+      Connection c, MappingAdmission.Target target, CopySignatures signatures) throws SQLException {
+    String code;
+    String message;
+    switch (MappingAdmission.verdict(c, target, signatures)) {
+      case MappingAdmission.Admitted admitted -> {
+        return;
+      }
+      case MappingAdmission.Absent absent -> {
+        code = ErrorCodes.MAPPING_INADMISSIBLE;
+        message = absent.message();
+      }
+      case MappingAdmission.Refused refused -> {
+        code = ErrorCodes.MAPPING_INADMISSIBLE;
+        message = refused.message();
+      }
+      case MappingAdmission.Copied copied -> {
+        code = ErrorCodes.BLIND_INDEX_COPIED;
+        message = copied.message();
+      }
+    }
+    throw new ShreddingException(
+        code,
+        message
+            + " Found after this erasure's UPDATE: the erasure is refused and rolled back, no key"
+            + " is destroyed, no blind index is cleared and no record is appended.");
   }
 
   private static void lock(Connection c, MappingAdmission.Target target, String sql)

@@ -16,8 +16,8 @@ import java.util.Objects;
  * <p>A relation outside the admitted table and its descendants that holds a column named as a
  * blind-index column is a copy when it is one of {@link #named()}, when it is named as Hibernate
  * Envers or Hibernate names the audit or history table of the admitted table by default ({@code
- * <table>_aud}, {@code <table>_AUD}, {@code <table>_history}, in the table's own schema), or when it
- * also holds both columns of one of {@link #signatures()}. Shape only, never contents.
+ * <table>_aud}, {@code <table>_AUD}, {@code <table>_history}, in the table's own schema), or when
+ * it also holds both columns of one of {@link #signatures()}. Shape only, never contents.
  *
  * <p>The starter builds this from the persistence unit's own metamodel (Envers' and Hibernate's
  * configured names); a core-only user who maps no audit or history table passes {@link
