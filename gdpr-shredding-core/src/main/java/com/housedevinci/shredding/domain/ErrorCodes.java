@@ -194,12 +194,14 @@ public final class ErrorCodes {
   public static final String MAPPING_INADMISSIBLE = "SHRED-SCHEMA-009";
 
   /**
-   * RC-7: an erasure could not take the table lock mapping admission needs, because another session
-   * held a conflicting lock for longer than the connection's {@code lock_timeout} (SQLState 55P03)
-   * or the database chose this transaction as a deadlock victim (40P01). Nothing was destroyed,
-   * cleared or recorded: the transaction rolled back whole. It says nothing about the key store,
-   * and nothing about the mapping. Retry once the other session (another erasure, a manual {@code
-   * VACUUM}, {@code ANALYZE} or {@code CREATE INDEX CONCURRENTLY}) has finished.
+   * RC-7, RC-10: an erasure waited on a lock and gave up: another session held a conflicting lock
+   * longer than the connection's {@code lock_timeout} (SQLState 55P03), or the database chose this
+   * transaction as a deadlock victim (40P01). Raised at every wait of the erasure transaction: the
+   * subject's advisory lock, the key rows, the table locks mapping admission takes, the blind-index
+   * {@code UPDATE} (an application transaction open on the subject's row) and the erasure-log
+   * append. Nothing was destroyed, cleared or recorded: the transaction rolled back whole. It says
+   * nothing about the key store, and nothing about the mapping. Retry once the other session has
+   * finished.
    */
   public static final String ERASURE_LOCK_WAIT = "SHRED-ERASURE-LOCK-WAIT";
 
