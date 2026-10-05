@@ -78,7 +78,8 @@ public final class MappingAdmissionCheck {
     if (!refusals.isEmpty()) {
       throw new ShreddingException(
           ErrorCodes.MAPPING_INADMISSIBLE,
-          String.join(" ", refusals) + " See docs/upgrading-0.2.0.md, \"Mapping admission\".");
+          String.join(" ", refusals)
+              + " See docs/upgrading-0.2.0.md, \"Every installation: what your entity tables must be\".");
     }
     this.checked = targets.size();
   }
