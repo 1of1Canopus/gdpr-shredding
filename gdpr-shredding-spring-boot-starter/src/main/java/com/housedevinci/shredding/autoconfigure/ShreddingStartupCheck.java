@@ -58,6 +58,7 @@ public final class ShreddingStartupCheck implements InitializingBean {
     // then refuses the application's very first shredded write - checked here, before it is ever
     // handed to WriteVerification.
     refuseIfLedgerCapBelowOne();
+    refuseIfBackupRetentionNegative();
     WriteVerification.configureMaxOutstanding(
         properties.getWriteVerification().getMaxOutstanding());
     refuseIfVerifierNotRegisteredFirst();
@@ -145,6 +146,24 @@ public final class ShreddingStartupCheck implements InitializingBean {
     // Read once so the field is not merely held: the gate has already refused or warned, and this
     // is the line that ties the two log lines together for an operator reading one boot log.
     log.debug("shredding: writing to schema {}", schemaGate.schema());
+  }
+
+  /**
+   * RC-5: a negative {@code shredding.erasure.backup-retention} boots silently and every proof of
+   * erasure then dates the backup clearance before the erasure. Refused at the property boundary;
+   * zero stays legal (no backups).
+   */
+  private void refuseIfBackupRetentionNegative() {
+    var retention = properties.getErasure().getBackupRetention();
+    if (retention != null && retention.isNegative()) {
+      throw new ShreddingException(
+          ErrorCodes.CONFIG,
+          "shredding.erasure.backup-retention is "
+              + retention
+              + ", but must not be negative. The proof of erasure states the day the erasure is"
+              + " complete in backups as the erasure's own time plus this duration; a negative"
+              + " value would date it before the erasure happened. Use 0 if there are no backups.");
+    }
   }
 
   /**

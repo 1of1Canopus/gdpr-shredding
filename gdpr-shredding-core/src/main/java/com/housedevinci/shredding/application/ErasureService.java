@@ -2,8 +2,10 @@ package com.housedevinci.shredding.application;
 
 import com.housedevinci.shredding.domain.ErasureOutcome;
 import com.housedevinci.shredding.domain.ErasureRecord;
+import com.housedevinci.shredding.domain.ErrorCodes;
 import com.housedevinci.shredding.domain.HookOutcome;
 import com.housedevinci.shredding.domain.Pseudonymiser;
+import com.housedevinci.shredding.domain.ShreddingException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -52,6 +54,17 @@ public final class ErasureService {
     this.pseudonymiser = Objects.requireNonNull(pseudonymiser, "pseudonymiser");
     this.hooks = List.copyOf(hooks);
     this.backupRetention = Objects.requireNonNull(backupRetention, "backupRetention");
+    if (backupRetention.isNegative()) {
+      // RC-5: a negative retention dates "complete in backups" before the erasure itself, and that
+      // date is chained into the record and printed in the proof.
+      throw new ShreddingException(
+          ErrorCodes.CONFIG,
+          "shredding.erasure.backup-retention is "
+              + backupRetention
+              + ", but must not be negative. The proof of erasure states the day the erasure is"
+              + " complete in backups as the erasure's own time plus this duration; a negative"
+              + " value would date it before the erasure happened. Use 0 if there are no backups.");
+    }
     this.clock = Objects.requireNonNull(clock, "clock");
     this.entityCount = entityCount;
     this.fieldCount = fieldCount;
