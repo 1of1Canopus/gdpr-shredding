@@ -265,6 +265,18 @@ All notable changes to this project. The format follows
   a comment saying so, rather than inheriting it by omission: reading that file now tells you which
   controls are off in the demo.
 
+### Fixed (security review of the audit-table design)
+- **P-1 (LOW)** - `JdbcErasureStore.decodeHooks` counted the UTF-8 length of a hook outcome field one
+  UTF-16 char at a time, so a hook name holding a character outside the Basic Multilingual Plane
+  (an emoji, a surrogate pair) lost its field boundary: the honest record decoded as INVALID and
+  the chain verifier reported an untampered chain as BROKEN. It now advances by code point. The
+  encode side hashes the whole string and was already correct; the in-memory store keeps
+  objects and has no decoder.
+- **P-2 (INFO)** - `JdbcErasureStore.decodeHooks` accepted length prefixes the encoder never writes:
+  one ending inside a 4-byte character, one longer than the remaining text, and non-canonical
+  digits (`-1`, `+1`, `01`). It now accepts only `0|[1-9][0-9]*` and refuses a field whose byte
+  count does not land exactly on its length, with the typed INVALID error.
+
 ### Fixed (security review pass 1 of mapping admission)
 - C-19-1 MEDIUM, C-19-2 MEDIUM, C-19-3 LOW, C-19-5 LOW: an enum, `name`, `"char"`, `uuid` or
   numeric tenant or subject column was admitted. An enum's owner could give it an implicit cast to

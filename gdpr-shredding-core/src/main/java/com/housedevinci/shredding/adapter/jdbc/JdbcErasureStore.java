@@ -769,7 +769,12 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
       }
       int byteLength;
       try {
-        byteLength = Integer.parseInt(material.substring(i + 1, colon));
+        String digits = material.substring(i + 1, colon);
+        // P-2: only the digits the encoder writes (no sign, no leading zero).
+        if (!digits.matches("0|[1-9][0-9]*")) {
+          throw new NumberFormatException(digits);
+        }
+        byteLength = Integer.parseInt(digits);
       } catch (NumberFormatException e) {
         // L10: this column is writable by exactly the attacker the chain exists to detect, so a
         // malformed length must be a typed, catchable error - never a raw NumberFormatException
@@ -781,11 +786,19 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
       int end = start;
       int seen = 0;
       while (end < material.length() && seen < byteLength) {
+        // P-1: advance by code point, not by UTF-16 char. A character outside the BMP is a
+        // surrogate pair whose UTF-8 form (4 bytes) only exists for the pair; counting each half
+        // alone (1 byte each, as '?') loses the field boundary. Encoding side
+        // (ErasureChain.field) encodes the whole string, so this is the symmetric count.
+        int next = end + Character.charCount(material.codePointAt(end));
         seen +=
-            String.valueOf(material.charAt(end))
-                .getBytes(java.nio.charset.StandardCharsets.UTF_8)
-                .length;
-        end++;
+            material.substring(end, next).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        end = next;
+      }
+      if (seen != byteLength) {
+        // P-2: the length ended inside a character or ran past the material; the encoder never
+        // writes either.
+        throw new ShreddingException(ErrorCodes.INVALID, "hook_outcomes is not in canonical form");
       }
       fields.add(material.substring(start, end));
       i = end;
