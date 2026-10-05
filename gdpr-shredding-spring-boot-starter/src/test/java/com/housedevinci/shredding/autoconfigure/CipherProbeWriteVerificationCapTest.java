@@ -58,11 +58,14 @@ class CipherProbeWriteVerificationCapTest {
   @DynamicPropertySource
   static void secrets(DynamicPropertyRegistry registry) {
     registry.add("shredding.master-key", () -> b64("write-verif-cap-master-key-32byt"));
+    registry.add("shredding.jdbc.initialize-schema", () -> "true");
+    registry.add("shredding.jdbc.allow-privileged-runtime-role", () -> "true");
     registry.add(
         "shredding.erasure-log.hmac-secret", () -> b64("write-verif-cap-chain-secret-32b"));
     registry.add(
         "shredding.blind-index.hmac-secret", () -> b64("write-verif-cap-index-secret-32b"));
     registry.add("spring.jpa.hibernate.ddl-auto", () -> "create-drop");
+    registry.add("spring.jpa.properties.hibernate.default_schema", () -> "public");
     registry.add(
         "spring.jpa.properties.hibernate.dialect", () -> "org.hibernate.dialect.PostgreSQLDialect");
     // A small cap so the probe does not need to actually insert fifty thousand rows to reach it.

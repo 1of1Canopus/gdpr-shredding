@@ -65,6 +65,8 @@ class CipherProbeJdbcTest {
 
   private static HikariDataSource dataSource;
 
+  private static com.housedevinci.shredding.adapter.jdbc.VerifiedSchema schema;
+
   private JdbcKeyProvider keys;
   private DataKeyCache cache;
   private FieldCipher cipher;
@@ -100,6 +102,10 @@ class CipherProbeJdbcTest {
               + " shredding_data_key, shredding_erased_subject, customer CASCADE");
     }
     JdbcSupport.initializeSchema(dataSource);
+    // The container role is the owner here - one role, one container - so verification is asked to
+    // allow a privileged runtime role. The hardened two-role posture has its own class,
+    // SchemaVerificationTest.
+    schema = JdbcSupport.verifySchema(dataSource, true).schema();
     try (Connection c = dataSource.getConnection();
         var st = c.createStatement()) {
       st.execute(
@@ -113,6 +119,7 @@ class CipherProbeJdbcTest {
     keys =
         new JdbcKeyProvider(
             dataSource,
+            schema,
             MasterKey.fromBytes(new byte[32]),
             RandomSource.secure(),
             Clock.systemUTC());
@@ -123,7 +130,8 @@ class CipherProbeJdbcTest {
   }
 
   private JdbcErasureStore store(List<BlindIndexColumn> columns) {
-    return new JdbcErasureStore(dataSource, ErasureChain.keyed(SECRET, "k1"), columns, RESIDUAL);
+    return new JdbcErasureStore(
+        dataSource, schema, ErasureChain.keyed(SECRET, "k1"), columns, RESIDUAL);
   }
 
   /**
@@ -445,7 +453,12 @@ class CipherProbeJdbcTest {
         store(
             List.of(
                 new BlindIndexColumn(
-                    com.housedevinci.shredding.domain.TableRef.of("customer"),
+                    // Section 3.2: a @Shredded entity's table carries a schema in its mapping, so
+                    // the framework-rendered read-back names one too. Unqualified, it would be
+                    // resolved by the session's search_path - and inside the one-statement window
+                    // of section 4 there is nothing on that path for it to resolve from, which is
+                    // the fail-closed half of the same decision (T2f).
+                    com.housedevinci.shredding.domain.TableRef.parse("public.customer"),
                     com.housedevinci.shredding.domain.ColumnRef.unquoted("email_bidx"),
                     com.housedevinci.shredding.domain.ColumnRef.unquoted("customer_id"),
                     com.housedevinci.shredding.domain.ColumnRef.unquoted("tenant_id"),
@@ -661,7 +674,9 @@ class CipherProbeJdbcTest {
     service(store).erase(new ErasureRequest(TENANT, s, "dpo", "art 17"));
 
     assertThatThrownBy(
-            () -> new JdbcErasureStore(dataSource, ErasureChain.unkeyed(), List.of(), RESIDUAL))
+            () ->
+                new JdbcErasureStore(
+                    dataSource, schema, ErasureChain.unkeyed(), List.of(), RESIDUAL))
         .isInstanceOf(ShreddingException.class)
         .extracting(e -> ((ShreddingException) e).code())
         .isEqualTo(ErrorCodes.ERASURE_KEY_MISMATCH);

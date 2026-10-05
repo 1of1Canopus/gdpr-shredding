@@ -631,16 +631,16 @@ public final class ShreddingEventListener
       return;
     }
     ColumnRef idColumn = singleIdColumn(event.getPersister());
-    String sql =
-        "UPDATE "
-            + fields.get(0).table().sql()
-            + " SET "
-            + columns.stream()
-                .map(c -> c.sql() + " = ?")
-                .collect(java.util.stream.Collectors.joining(", "))
-            + " WHERE "
-            + idColumn.sql()
-            + " = ?";
+    // P2b, design section 3.4: built on the application's connection, inside the application's
+    // transaction, so Property B only - every name qualified, no session mechanism. The SET
+    // assignments are an assignment position and not an operator name; the WHERE is.
+    StringBuilder statement =
+        new StringBuilder("UPDATE ").append(fields.get(0).table().sql()).append(" SET ");
+    for (int i = 0; i < columns.size(); i++) {
+      statement.append(i == 0 ? "" : ", ").append(columns.get(i).sql()).append(" = ?");
+    }
+    statement.append(" WHERE ").append(idColumn.sql()).append(" OPERATOR(pg_catalog.=) ?");
+    String sql = statement.toString();
     // Not cast to EventSource: a StatelessSession insert of an IDENTITY-generated shredded entity
     // reaches this rebind too, and StatelessSessionImpl is not an EventSource.
     event
@@ -736,28 +736,11 @@ public final class ShreddingEventListener
   }
 
   /**
-   * The identifier column, taken from the persister's own identifier mapping and never from {@code
-   * getIdentifierColumnNames()}, which returns a name this module would have to unquote by hand
-   * (addendum 4, §4.3). {@code ShreddedModel} refuses a composite-id {@code @Shredded} entity at
-   * startup, so both refusals below are unreachable for a mapped entity - they stay as typed
-   * refusals by their real reason (change 6) rather than as a cast or an array index.
+   * The identifier column, resolved once by {@code ShreddedModel} at startup (mapping admission,
+   * addendum section A.9) and read here, never resolved a second time.
    */
-  private static ColumnRef singleIdColumn(EntityPersister persister) {
-    var identifier = persister.getIdentifierMapping();
-    if (!(identifier instanceof org.hibernate.metamodel.mapping.BasicValuedModelPart basic)) {
-      throw new ShreddingException(
-          ErrorCodes.CONFIG,
-          "a @Shredded entity has a composite or embedded identifier ("
-              + identifier.getClass().getSimpleName()
-              + "). Every stored value is bound to its row's identifier and read back by it; a"
-              + " composite identifier has no single column for that read-back and no canonical"
-              + " byte form to bind to, so the mapping is refused at startup. Use a basic"
-              + " identifier: a numeric id, a UUID, a String or a byte[].");
-    }
-    return ColumnRefs.of(
-        basic,
-        ShreddedModel.simpleEntityName(persister.getEntityName()) + " identifier",
-        persister.getFactory().getJdbcServices().getDialect());
+  private ColumnRef singleIdColumn(EntityPersister persister) {
+    return model().idColumn(entityName(persister));
   }
 
   @Override
@@ -856,18 +839,18 @@ public final class ShreddingEventListener
       Object id,
       List<ShreddedModel.ShreddedField> fields,
       ColumnRef idColumn) {
-    String columns =
-        fields.stream()
-            .map(f -> f.column().sql())
-            .collect(java.util.stream.Collectors.joining(", "));
-    String sql =
-        "SELECT "
-            + columns
-            + " FROM "
-            + fields.get(0).table().sql()
-            + " WHERE "
-            + idColumn.sql()
-            + " = ?";
+    // P2b, as above: the application's connection, Property B only.
+    StringBuilder statement = new StringBuilder("SELECT ");
+    for (int i = 0; i < fields.size(); i++) {
+      statement.append(i == 0 ? "" : ", ").append(fields.get(i).column().sql());
+    }
+    statement
+        .append(" FROM ")
+        .append(fields.get(0).table().sql())
+        .append(" WHERE ")
+        .append(idColumn.sql())
+        .append(" OPERATOR(pg_catalog.=) ?");
+    String sql = statement.toString();
     return session.doReturningWork(
         connection -> {
           try (PreparedStatement ps = connection.prepareStatement(sql)) {

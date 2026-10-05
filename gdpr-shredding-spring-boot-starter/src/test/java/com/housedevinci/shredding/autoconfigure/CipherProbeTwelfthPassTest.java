@@ -288,12 +288,15 @@ class CipherProbeTwelfthPassTest {
         .web(WebApplicationType.NONE)
         .properties(
             "shredding.master-key=" + b64("twelfth-master-key-32-bytes!!!!!"),
+            "shredding.jdbc.initialize-schema=true",
+            "shredding.jdbc.allow-privileged-runtime-role=true",
             "shredding.erasure-log.hmac-secret=" + b64("twelfth-chain-secret-32-bytes!!!"),
             "shredding.blind-index.hmac-secret=" + b64("twelfth-index-secret-32-bytes!!!"),
             "spring.datasource.url=" + POSTGRES.getJdbcUrl(),
             "spring.datasource.username=" + POSTGRES.getUsername(),
             "spring.datasource.password=" + POSTGRES.getPassword(),
             "spring.jpa.hibernate.ddl-auto=update",
+            "spring.jpa.properties.hibernate.default_schema=public",
             "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect");
   }
 

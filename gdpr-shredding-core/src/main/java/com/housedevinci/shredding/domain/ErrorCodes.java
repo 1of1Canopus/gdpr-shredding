@@ -111,6 +111,89 @@ public final class ErrorCodes {
   public static final String READ_UNVERIFIED = "SHRED-READ-UNVERIFIED";
 
   /**
+   * C-12-1, startup schema verification. None of the module's four tables exist in the resolved
+   * schema. The module never creates them with the application's own credentials: a role that can
+   * run DDL owns the erasure tables and the guard functions, and an owner can disable or replace
+   * its own guards, so control 8 would not hold against the application in any configuration.
+   */
+  public static final String SCHEMA_ABSENT = "SHRED-SCHEMA-001";
+
+  /**
+   * The objects exist but are missing or wrong in shape: a table, a column, the sequence or a
+   * constraint.
+   */
+  public static final String SCHEMA_INCOMPLETE = "SHRED-SCHEMA-002";
+
+  /**
+   * A guard is not load-bearing: a trigger missing, extra, disabled, not {@code ENABLE ALWAYS} or
+   * pointing at the wrong function; a guard function body that differs from the bundled script; or
+   * a rule, a row-level-security flag or a policy on one of the four tables. Control 8 (append-only
+   * erasure log) and control 11 (erasure tombstone) do not hold.
+   */
+  public static final String SCHEMA_UNGUARDED = "SHRED-SCHEMA-003";
+
+  /**
+   * The runtime database role is privileged over the module's objects; see the message for the
+   * legs.
+   */
+  public static final String RUNTIME_ROLE_PRIVILEGED = "SHRED-SCHEMA-004";
+
+  /**
+   * Verification could not complete: a catalogue read was refused, the connection was lost, or the
+   * bundled schema resource was unreadable. Never a pass and never a warning - unverifiable is not
+   * clean.
+   */
+  public static final String SCHEMA_UNVERIFIABLE = "SHRED-SCHEMA-005";
+
+  /** {@code shredding.jdbc.initialize-schema=true} and the DDL failed. */
+  public static final String SCHEMA_CREATION_FAILED = "SHRED-SCHEMA-006";
+
+  /**
+   * A privilege the adapters need is missing. Never downgraded by {@code
+   * shredding.jdbc.allow-privileged-runtime-role}: an application that cannot write the erasure log
+   * is broken, not differently configured, and boot is a better place to learn that than the first
+   * erasure request.
+   */
+  public static final String RUNTIME_ROLE_UNDERPRIVILEGED = "SHRED-SCHEMA-007";
+
+  /**
+   * C-13-14, name-resolution design section 4.4: the module could not isolate the name resolution
+   * of its independent read-back. One statement of an erasure is rendered by Hibernate from the
+   * entity mapping, so there is no name in it for this module to qualify; it runs instead with the
+   * session's {@code search_path} replaced by {@code pg_catalog, pg_temp} for that one statement
+   * and restored immediately, and this code is what the module raises when it cannot establish that
+   * the replacement was in force, or that the session was handed back carrying the exact bytes it
+   * arrived with.
+   *
+   * <p><b>Never a startup condition, and never "re-apply the script".</b> Unlike every other code
+   * in the {@code SHRED-SCHEMA} family, this one says nothing about the installed schema. It means
+   * the connection was in auto-commit when the erasure reached that statement, or something moved
+   * {@code search_path} inside the erasure's transaction. The whole transaction is rolled back, so
+   * no key is destroyed, no blind index is left half-cleared and no record is appended; callers
+   * should treat it as an outage of that operation, like {@link #KEY_UNAVAILABLE}, rather than as a
+   * misconfiguration of the database.
+   */
+  public static final String SCHEMA_NAME_ISOLATION = "SHRED-SCHEMA-008";
+
+  /**
+   * Mapping admission (name-resolution design, addendum section A.7): a {@code @Shredded} entity's
+   * table, or a column of it the module compares or assigns, has a shape the erasure cannot be
+   * trusted on - a view, a foreign table, row level security this role is subject to, a temporary
+   * relation, a missing privilege, an equality operator outside {@code pg_catalog}, a
+   * non-deterministic collation, a NOT NULL or generated blind-index column. Every one of these
+   * makes the erasure and both of its read-backs agree on an answer that is false, or fail.
+   *
+   * <p><b>Raised from two positions.</b> At startup, for a table that exists and is inadmissible:
+   * the context refuses to start. Before an erasure's first statement, inside its transaction and
+   * under its lock, for a table that is inadmissible or absent at that moment: that one erasure is
+   * refused and nothing is destroyed, cleared or recorded. A table absent at startup is a WARN, not
+   * this code, because a table created after the context refreshes is an honest deployment. The
+   * remedy is always the mapping or the table, never a retry. A catalogue that cannot be read is
+   * {@link #SCHEMA_UNVERIFIABLE}, not this code.
+   */
+  public static final String MAPPING_INADMISSIBLE = "SHRED-SCHEMA-009";
+
+  /**
    * C-20: a Spring Data repository call was bracketed, but the module could not establish that
    * every {@code EntityManagerFactory} bean in the application is the one instance {@code
    * ShreddingIntegrator} is wired to. A bracket that cannot tell which Hibernate session it is

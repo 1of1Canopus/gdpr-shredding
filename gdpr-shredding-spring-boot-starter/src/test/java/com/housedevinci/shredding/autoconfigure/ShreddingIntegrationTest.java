@@ -70,6 +70,8 @@ class ShreddingIntegrationTest {
 
   @DynamicPropertySource
   static void secrets(DynamicPropertyRegistry registry) {
+    registry.add("shredding.jdbc.initialize-schema", () -> "true");
+    registry.add("shredding.jdbc.allow-privileged-runtime-role", () -> "true");
     registry.add(
         "shredding.master-key",
         () ->
@@ -90,6 +92,7 @@ class ShreddingIntegrationTest {
                     "starter-integration-index-secret".getBytes(StandardCharsets.UTF_8)));
     // No init script for this fixture table; Hibernate creates it from the entity mapping.
     registry.add("spring.jpa.hibernate.ddl-auto", () -> "create-drop");
+    registry.add("spring.jpa.properties.hibernate.default_schema", () -> "public");
     registry.add(
         "spring.jpa.properties.hibernate.dialect", () -> "org.hibernate.dialect.PostgreSQLDialect");
   }

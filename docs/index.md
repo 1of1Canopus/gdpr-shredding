@@ -49,11 +49,13 @@ inside an `@Embeddable`, not inside an `@ElementCollection` - both are refused a
 and not mapped `@Basic(fetch = LAZY)` (undocumented lazily by Hibernate's own bytecode-enhancement
 requirement, which this module does not configure and has not tested against).
 
-**A `@Shredded` field cannot be declared on the root or a subclass of an `@Inheritance` hierarchy**
-(`JOINED`, `SINGLE_TABLE` or `TABLE_PER_CLASS`) that maps more than one entity - refused at startup,
-naming the ancestor and the inheriting entity (S-23). This module keys a shredded field's subject
-expression, its `@Immutable` check and its `@SecondaryTable` refusal by one entity name, and an
-inherited field's column is shared by more than one, which no single converter can describe. Share
+**A `@Shredded` field cannot be inherited from an entity ancestor** in an `@Inheritance` hierarchy
+(`JOINED`, `SINGLE_TABLE` or `TABLE_PER_CLASS`) - refused at startup, naming the ancestor and the
+inheriting entity (S-23). This module keys a shredded field's subject expression, its `@Immutable`
+check and its `@SecondaryTable` refusal by one entity name, and an inherited field's column is shared
+by more than one, which no single converter can describe. A field declared on the concrete subclass
+itself is supported; mapping admission checks that subclass's own mapped table (measured for
+`JOINED`, `SINGLE_TABLE` and `TABLE_PER_CLASS`). Share
 the field through a plain `@MappedSuperclass` instead (not itself an `@Entity`) - that is unaffected
 and is the supported way to put the same `@Shredded` field on more than one concrete entity - or
 declare the field, its `@Convert` and its own converter directly on each concrete entity.
@@ -209,6 +211,20 @@ There is no fail-open property anywhere in this module.
 | `SHRED-READ-UNVERIFIED` | a decrypt happened inside an open read region but no entity load ever installed it before the region closed - a projection, or residue from a region an error unwound past - see "How the read path verifies" above |
 | `SHRED-SUBJECT-UNRESOLVED` | a row carries at least one shredded value and its data subject could not be resolved |
 | `SHRED-EMF-UNINSTRUMENTED` | more than one `EntityManagerFactory` bean exists in the application context; the read bracket cannot tell which repository is bound to which, so every repository is refused rather than bracketed on the chance it is the wrong one |
+| `SHRED-SCHEMA-001` | none of this module's tables exist in the resolved schema. The application never creates them with its own credentials; apply `schema-postgresql.sql` with a privileged role |
+| `SHRED-SCHEMA-002` | the objects exist but are wrong in shape: a missing table, column, constraint, or the `bigserial` sequence |
+| `SHRED-SCHEMA-003` | a guard is not load-bearing: a trigger missing, extra, disabled, not `ENABLE ALWAYS` or pointing at the wrong function; a guard-function body that differs from the bundled script; or a rule, an RLS flag or a policy. Control 8 and control 11 do not hold |
+| `SHRED-SCHEMA-004` | the runtime database role is privileged over this module's objects and could remove its own guards. `shredding.jdbc.allow-privileged-runtime-role=true` turns this into a WARN at every startup |
+| `SHRED-SCHEMA-005` | verification could not complete - a refused catalogue read, a lost connection, an unreadable bundled resource, or a migration in flight. Never a pass and never a warning |
+| `SHRED-SCHEMA-006` | `shredding.jdbc.initialize-schema=true` and the DDL failed. Carries the SQLState only |
+| `SHRED-SCHEMA-007` | a privilege the adapters need is missing. Never downgraded by `allow-privileged-runtime-role` |
+| `SHRED-SCHEMA-009` | mapping admission: a `@Shredded` entity's table is not an ordinary permanent table this role can address unhidden, or a tenant, subject or identifier column does not compare through a `pg_catalog` equality under a deterministic collation, or a tenant or subject column is not `text`, `varchar` or `char(n)`, or a blind-index column is `NOT NULL` or generated. A startup refusal for a table that is present; before an erasure's first statement for one that is inadmissible or absent then, with nothing destroyed or recorded. See [upgrading-0.2.0.md](upgrading-0.2.0.md), "what your entity tables must be" |
+| `SHRED-SCHEMA-008` | the module could not isolate the name resolution of its independent read-back: the connection was in auto-commit, or something moved `search_path` inside the erasure's transaction. The one `SHRED-SCHEMA-*` code that is never a startup condition and never means "re-apply the script"; treat it as an outage of that operation. The erasure's whole transaction rolls back |
+
+Every `SHRED-SCHEMA-*` code except `-008` is a startup refusal (`-009` also refuses an erasure): the application context fails to build, so nothing
+serves traffic against a schema this module cannot vouch for. Each message lists every problem it
+found, names the schema, the role and the property that changes the outcome, and points at
+[upgrading-0.2.0.md](upgrading-0.2.0.md).
 
 The per-key encryption limit (`shredding.crypto.max-encryptions-per-key`) has no error code: reaching
 it rotates to the next key version rather than refusing, so there is nothing a caller ever sees.
@@ -319,11 +335,23 @@ already null, so it is normally smaller than the subject's row count.
 
 Every statement this module builds for one of your tables is addressed at the table Hibernate maps,
 schema and all, taken from the persister at startup. `@Table(schema = "app2")` and
-`spring.jpa.properties.hibernate.default_schema` both work. A catalog-qualified table, and a table
-or schema whose name is not lowercase, are refused at startup rather than addressed by a guess. With
-no schema in the mapping the statements are unqualified, exactly like Hibernate's own, and the
-connection's `search_path` decides. This module's own `shredding_*` tables are unqualified: keep
-them on the runtime role's `search_path`.
+`spring.jpa.properties.hibernate.default_schema` both work, and **one of them is required**: a
+`@Shredded` entity whose mapping names no schema is refused at startup with `SHRED-CONFIG-001`.
+Without a schema, the erasure's `UPDATE`, the module's own read-back and the read-back Hibernate
+renders are all unqualified; a table of the same name in a schema ahead of yours on the connection's
+`search_path` takes all three at once, they agree with each other, and the erasure reports
+`COMPLETE` over data it never touched. A catalog-qualified table, and a table or schema whose name
+is not lowercase, are refused at startup rather than addressed by a guess.
+
+One statement of an erasure is rendered by Hibernate from your mapping, so there is no name in it
+for this module to qualify. It runs with the connection's `search_path` replaced by `pg_catalog,
+pg_temp` for the width of that one statement, and restored to the exact bytes it arrived with. If a
+row-level-security policy function, or a function called from a view one of your entities is mapped
+to, names a relation unqualified, it will fail inside that one statement rather than resolve
+something unexpected: give it `ALTER FUNCTION <fn> SET search_path = <schema>, pg_catalog`. See
+SECURITY-NOTES.md.
+
+This module's own `shredding_*` tables are qualified to the schema verified at boot.
 
 ## The cross-node cache window
 
@@ -363,6 +391,12 @@ Cluster-wide invalidation ships in Pro alongside the KMS adapters.
   be recorded as complete;
 - a column whose name this module cannot reproduce exactly as Hibernate renders it, or that carries
   a `"` character;
+- a `@Shredded` entity whose table exists and fails mapping admission (`SHRED-SCHEMA-009`): a
+  view, a foreign table, row level security the runtime role is subject to, a missing privilege, a
+  `citext` or other non-`pg_catalog` equality on the tenant, subject or identifier column, a tenant
+  or subject column that is not `text`, `varchar` or `char(n)`, a
+  non-deterministic collation, or a `NOT NULL` or generated blind-index column. A table that does
+  not exist yet is a WARN, and the erasure refuses until it does;
 - a Hibernate dialect that is not PostgreSQL. This module builds SQL identifiers itself and folds by
   PostgreSQL's rules; `hibernate.globally_quoted_identifiers` (with or without
   `_skip_column_definitions`) and `hibernate.auto_quote_keyword` are supported for columns, and for

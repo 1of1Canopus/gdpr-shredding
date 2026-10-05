@@ -6,6 +6,18 @@
       "description": "Base64 master key that wraps every per-subject data key. Required, at least 32 bytes, supplied through the environment. No default and none is generated; sample-looking values are refused at startup."
     },
     {
+      "name": "shredding.jdbc.initialize-schema",
+      "type": "java.lang.Boolean",
+      "defaultValue": false,
+      "description": "Runs the bundled schema-postgresql.sql with this application's own database credentials at boot. False by default: DDL implies ownership, and the owner of these tables can disable or replace the append-only guards, so the controls would not be load-bearing against the application itself. With it false the application issues no DDL and verifies the schema instead, refusing to start if it is absent, incomplete or unguarded. WARNs at every startup while on."
+    },
+    {
+      "name": "shredding.jdbc.allow-privileged-runtime-role",
+      "type": "java.lang.Boolean",
+      "defaultValue": false,
+      "description": "Boots even when the database role is privileged over this module's objects: a member of the owner role, a superuser, the owner of any of the nine objects, CREATE on the schema, CREATE or TEMPORARY on the database, membership of the database owner, or a table privilege beyond the documented grant set. WARNs at every startup, naming the legs that fired. Never suppresses SHRED-SCHEMA-007, a privilege the adapters actually need."
+    },
+    {
       "name": "shredding.dev-mode",
       "type": "java.lang.Boolean",
       "defaultValue": false,

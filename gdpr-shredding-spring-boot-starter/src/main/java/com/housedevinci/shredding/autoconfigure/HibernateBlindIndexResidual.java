@@ -46,6 +46,16 @@ import org.hibernate.engine.spi.SessionFactoryImplementor;
  *       the erasure began. If that ever changes, this reset turns auto-commit back on
  *       mid-transaction.
  * </ul>
+ *
+ * <p><b>One residual, named rather than silently carried (C-13-11).</b> The HQL below renders to
+ * {@code count(*)} in SQL, and Hibernate gives no way to write {@code pg_catalog.count(*)} in HQL.
+ * Every statement this module builds itself is now qualified, including {@code JdbcErasureStore}'s
+ * two same-text read-backs; this one is rendered by the framework and is therefore still resolved
+ * through the session's {@code search_path}. A runtime role that defines its own {@code count}
+ * aggregate can make this leg answer zero. It is not the only leg: the same-text read-back, which
+ * is qualified, runs over the same column in the same transaction and refuses the erasure on its
+ * own. Closing the framework-rendered half needs a mechanism rather than a prefix, so it is
+ * recorded here and on the design page instead of being fixed in a correction pass.
  */
 final class HibernateBlindIndexResidual implements BlindIndexResidual {
 

@@ -86,9 +86,12 @@ class CipherProbePropertyAccessSequenceTest {
             .web(WebApplicationType.NONE)
             .properties(
                 "shredding.master-key=" + b64("propseq-master-key-32-bytes!!!!!"),
+                "shredding.jdbc.initialize-schema=true",
+                "shredding.jdbc.allow-privileged-runtime-role=true",
                 "shredding.erasure-log.hmac-secret=" + b64("propseq-chain-secret-32-bytes!!!"),
                 "shredding.blind-index.hmac-secret=" + b64("propseq-index-secret-32-bytes!!!"),
                 "spring.jpa.hibernate.ddl-auto=create-drop",
+                "spring.jpa.properties.hibernate.default_schema=public",
                 "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect",
                 "spring.jpa.properties.hibernate.jdbc.batch_size=10",
                 "spring.jpa.properties.hibernate.order_inserts=true",

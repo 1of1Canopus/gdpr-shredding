@@ -91,9 +91,12 @@ class CipherProbeScanDepthTest {
             .web(WebApplicationType.NONE)
             .properties(
                 "shredding.master-key=" + b64("scandepth-master-key-32-bytes!!!"),
+                "shredding.jdbc.initialize-schema=true",
+                "shredding.jdbc.allow-privileged-runtime-role=true",
                 "shredding.erasure-log.hmac-secret=" + b64("scandepth-chain-secret-32bytes!!"),
                 "shredding.blind-index.hmac-secret=" + b64("scandepth-index-secret-32bytes!!"),
                 "spring.jpa.hibernate.ddl-auto=create-drop",
+                "spring.jpa.properties.hibernate.default_schema=public",
                 "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect",
                 "spring.datasource.url=" + POSTGRES.getJdbcUrl(),
                 "spring.datasource.username=" + POSTGRES.getUsername(),
@@ -134,9 +137,12 @@ class CipherProbeScanDepthTest {
             .web(WebApplicationType.NONE)
             .properties(
                 "shredding.master-key=" + b64("scandepth-master-key-32-bytes!!!"),
+                "shredding.jdbc.initialize-schema=true",
+                "shredding.jdbc.allow-privileged-runtime-role=true",
                 "shredding.erasure-log.hmac-secret=" + b64("scandepth-chain-secret-32bytes!!"),
                 "shredding.blind-index.hmac-secret=" + b64("scandepth-index-secret-32bytes!!"),
                 "spring.jpa.hibernate.ddl-auto=create-drop",
+                "spring.jpa.properties.hibernate.default_schema=public",
                 "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect",
                 "spring.datasource.url=" + POSTGRES.getJdbcUrl(),
                 "spring.datasource.username=" + POSTGRES.getUsername(),

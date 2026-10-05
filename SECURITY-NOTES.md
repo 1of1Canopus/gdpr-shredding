@@ -121,11 +121,18 @@ survived. `@Table(schema = ...)` and `hibernate.default_schema` are both support
 catalog-qualified table, and a table or schema whose identifier is not folded lowercase, are refused
 at startup with `SHRED-CONFIG-001` rather than addressed by a guess.
 
-**Residual.** When the mapping names no schema at all, Hibernate's own table expression is
-unqualified and so is this module's, and `search_path` decides — exactly as it does for Hibernate's
-own statements. That is the intended property: this module addresses the table Hibernate addresses.
-This module's own tables (`shredding_*`) are unqualified deliberately and are expected on the
-runtime role's `search_path`.
+**A mapping that names no schema is refused at startup.** It used to be the intended property
+("this module addresses the table Hibernate addresses"), and what it cost was measured: with no
+`@Table(schema)` and no `hibernate.default_schema`, the blind-index `UPDATE`, the module's own
+same-text read-back and the read-back Hibernate renders are all unqualified, a table of the same
+name in a schema ahead of the real one on the role's path takes all three at once, they agree with
+each other, and the erasure reports `COMPLETE` over untouched residue. Startup now refuses with
+`SHRED-CONFIG-001`, naming the entity and both spellings of the remedy. It is also what makes the
+one-statement window below possible: that window leaves no role-writable schema on the path, so the
+relation in the framework-rendered statement has to come from the mapping, and inside the window an
+unqualified relation is an error rather than a decoy read.
+
+This module's own tables (`shredding_*`) are qualified to the schema verified at boot.
 
 ### Which column this module's statements address (S-22, S-24)
 
@@ -557,9 +564,9 @@ only legitimate "not found" for a `@Shredded` entity is a brand-new row on inser
 reaches this method — insert has its own path (`onPreInsert`/`onPostInsert`).
 
 This module's own tables (`shredding_data_key`, `shredding_erasure`, `shredding_erasure_anchor`,
-`shredding_erased_subject`) are addressed unqualified, deliberately, and are expected on the runtime
-role's `search_path` — the same residual recorded above under "Which table this module's statements
-address".
+`shredding_erased_subject`) are addressed as `"<verified schema>"."<table>"`, and the comparison in
+this read-back names `pg_catalog` for its operator — see "What qualification covers, and what it
+does not".
 
 Probe: `CipherProbeSubjectMovedNotFoundTest.probe_the_subject_immutability_check_refuses_when_the_read_back_finds_no_row`.
 
@@ -586,11 +593,24 @@ itself `@Entity`-annotated - naming the ancestor, the inheriting entity, and poi
 `@MappedSuperclass` (not itself an entity) is unaffected: it is never scanned as `type` under more
 than one `entityName`, so it never had this problem.
 
-**Limitation, not fixed:** `@Shredded` cannot be used on a field of an entity that is the root or a
-subclass of an `@Inheritance` hierarchy mapping more than one entity, under `JOINED`, `SINGLE_TABLE`
-or `TABLE_PER_CLASS`. Declare the field, its `@Convert` and its own converter directly on each
-concrete entity instead, or share it through a `@MappedSuperclass` (not an `@Entity` superclass).
-Documented in `docs/index.md`.
+**Limitation, not fixed:** a `@Shredded` field declared on an entity that another entity in an
+`@Inheritance` hierarchy inherits it from is refused, under `JOINED`, `SINGLE_TABLE` or
+`TABLE_PER_CLASS`. Declare the field, its `@Convert` and its own converter directly on each concrete
+entity instead, or share it through a `@MappedSuperclass` (not an `@Entity` superclass). Documented
+in `docs/index.md`.
+
+**Correction (0.2.0).** An earlier text of this note, and of `docs/index.md`, said a `@Shredded`
+field was refused anywhere in such a hierarchy. The refusal above is what the code does: a field
+declared on the concrete subclass itself is scanned once, under that subclass's own entity name, and
+is supported. Mapping admission checks the subclass's own mapped table - the table every statement
+this module builds for it addresses - and nothing else: for `JOINED` that is the leaf's table and
+its own key column (a renamed `@PrimaryKeyJoinColumn` included), for `SINGLE_TABLE` the shared table,
+for `TABLE_PER_CLASS` the leaf's own table.
+All three are measured, booted and erased in the test suite. A `JOINED` root's
+table is addressed by no statement of this module and is not checked, even when it names no schema:
+Hibernate 7 drops the root from the read-back it renders when no root column is referenced, and if
+a later Hibernate stopped doing so the read-back would fail inside its window and the erasure would
+roll back whole (finding C-18-1).
 
 Probe: `CipherProbeTenthPassTest.probe_a_shredded_field_in_an_inheritance_hierarchy_is_refused_by_its_real_reason`.
 
@@ -683,6 +703,96 @@ support ticket or a PDF the application itself produced. Those are the applicati
 `PostErasureHook` is the seam for dealing with them - which is why a failed hook makes the erasure
 `PARTIAL` and never `COMPLETE`.
 
+### Mapping admission: what the erasure's three legs cannot see (SHRED-SCHEMA-009)
+
+The erasure's three legs - the blind-index `UPDATE`, the same-text read-back and the read-back
+Hibernate renders - are built independently, but they all ask the entity's relation the same
+question the same way. Six mapping shapes make all three agree on an answer that is false, measured
+on PostgreSQL 16 with every name qualified and the window in force:
+
+| the relation or column | what the three legs report | what is true |
+|---|---|---|
+| an auto-updatable view that hides the subject's row | 0 rows, cleared | the residue is in the base table |
+| a row-level-security policy the runtime role is subject to | 0 rows, cleared | the residue is in the table |
+| a foreign table over a remote view that hides the row | 0 rows, cleared | the residue is on the other server |
+| `citext` tenant and subject | 0 rows, cleared | the application's own lookup finds the row |
+| a domain carrying its own two-sided `=` (case-insensitive, say) | 0 rows, cleared | the same |
+| a non-deterministic collation on tenant and subject | 2 rows cleared where 1 was asked for | another tenant's row was cleared |
+
+Each was recorded `COMPLETE`. No comparison of counts can catch them: the residue is invisible to
+every statement this module can issue through that mapping. The control is a refusal before the
+first statement, from the one source the erasure does not share, the system catalogue.
+
+**What is checked.** The relation must be an ordinary or partitioned table (`pg_class.relkind` `r`
+or `p`); every partition and inheritance child, at every depth, must be one too, every leaf an
+ordinary table and none temporary; the relation must not be temporary; the role must hold `SELECT`
+and `UPDATE` on it; and if row level security is enabled the role must not be subject to it (it
+owns the table and the table does not `FORCE` it, or the role has `BYPASSRLS`). The tenant, subject
+and identifier columns must exist, their type (a domain chased to its base) must be a scalar base
+type or an enum whose own default equality operator is `pg_catalog`'s, or that reaches one through
+an implicit binary cast to a `pg_catalog` type whose own equality is (`varchar` does, `citext` does
+not, because its own equality is read first), their declared type must carry no two-sided `=` of
+its own outside `pg_catalog`, and their collation must be deterministic (a non-collatable type such
+as `bigint` has none and is admitted). The tenant and subject columns must in addition resolve to
+`text`, `varchar` or `char(n)` (below). Every blind-index column must exist, be nullable and not be
+generated.
+
+**Where it runs.** At startup, from an eager bean that runs after Hibernate's schema export, Flyway,
+Liquibase and any `spring.sql.init` script: a table that is present and inadmissible fails the
+context. A table that is absent at startup is a WARN naming the entity and the table, because a
+table created after the application starts is an honest deployment. And again inside every
+erasure's transaction, before the first statement that touches the table, with nothing cached: a
+startup verdict is undone by one `ALTER TABLE ... RENAME` and one `CREATE VIEW` the runtime role is
+allowed to perform. There, any refusal - absent included - is `SHRED-SCHEMA-009`, and no key is
+destroyed, no index cleared and no record appended.
+
+**The lock that keeps the verdict true until the `UPDATE`.** The erasure first takes `LOCK TABLE
+... IN ROW EXCLUSIVE MODE`, the lock its `UPDATE` would take anyway, which conflicts with the
+`ACCESS EXCLUSIVE` every way of dropping, renaming or replacing the relation needs; then `... IN SHARE
+UPDATE EXCLUSIVE MODE`, which conflicts with `ATTACH PARTITION`, `DETACH PARTITION CONCURRENTLY`,
+`CREATE TABLE ... INHERITS` and `ALTER TABLE ... INHERIT`. Without the second lock all four succeed
+against the first, so the set of relations the `UPDATE` routes to could change after the verdict
+described it - including gaining a foreign table over a hiding view. Measured on an ordinary table as
+well as a partitioned one, which is why the second lock is taken on every table. Its cost: two
+erasures of the same table run one after the other, and an erasure waits behind a manual `VACUUM`,
+`ANALYZE` or `CREATE INDEX CONCURRENTLY` on that table. An erasure also waits behind an autovacuum run to prevent transaction ID wraparound, which, unlike an ordinary autovacuum, does not give way to a waiting lock, for as long as that run takes; while it waits it holds the subject's advisory lock and key rows, and later erasures of the same table queue behind it. Set a `lock_timeout` on the erasure's connection if that wait must be bounded. The application's own reads and
+writes are not blocked. A `LOCK` that fails because the relation does not exist, is a foreign table, or may
+not be locked by the role is the same refusal, reached one statement earlier.
+
+**What it reads, and why that cannot be lied to.** Every statement is fully qualified and every
+value is bound. The table and column texts go through `pg_catalog.parse_ident` in its strict,
+one-argument form, which is PostgreSQL's own identifier folding and raises on text it cannot parse;
+the relaxed form silently parses `app.t; DROP TABLE app.t` and is never used. Measured: the verdicts
+are identical on a `search_path` where every function and operator the statements use has a lying
+shadow ahead of `pg_catalog` and a relation of the same name sits in the first schema. A statement
+that fails is `SHRED-SCHEMA-005`, never a pass.
+
+**What it deliberately does not check.** The data. Triggers and rules on the table: one that undoes
+the clearing leaves the index populated, both read-backs see it, and the erasure is refused with
+`SHRED-ERASURE-004` - loud, so not an admission rule. The `@Shredded` data column's own type, which
+nothing compares. Indexes, `CHECK` constraints and `NOT NULL` on tenant or subject. An unlogged
+table, or an unlogged partition or child, is admitted with a WARN at startup: the erasure on it is
+sound, and what a crash empties is the application's durability decision.
+
+**Between a startup WARN and the first erasure.** On the one deployment the absent-table WARN exists
+for - the table created after the context refreshes - the write path's three statements on the
+application's connection (the `IDENTITY` rebind, the subject-immutability re-read and the
+write-verification read-back) compare the identifier column with no verdict behind them yet. Each
+fails loudly on the shapes above (a row count that is not 1), and the first erasure refuses until
+the table is admissible.
+
+**Tenant and subject columns are text-typed (clause C-i).** The erasure compares the tenant and
+subject columns against the request's string. Only `text`, `varchar` and `char(n)` (the built-in
+types, identified by oid, after following domains) compare that string as written, so those are
+the only types admitted for them. Measured on the types the other rules admit: an enum's owner can
+give it an implicit cast to `text` with its own function, after which the erasure, both read-backs
+and the record agree on `COMPLETE` with nothing cleared; `name` and `"char"` truncate their input, so
+a subject id longer than 63 bytes is never matched; `uuid` and numeric types parse the string, so
+under `stringtype=unspecified` an erasure requested as `A0EEBC99-...` or `0042` clears the index of
+the subject stored as `a0eebc99-...` or `42`, whose key survives, and under the driver's default
+every erasure fails. A UUID or numeric subject id is stored in a text column. The identifier column
+is compared with Hibernate's own typed binds and is held to the other rules only.
+
 ## Threats the module does close, and how
 
 | Threat | Control |
@@ -741,11 +851,273 @@ support ticket or a PDF the application itself produced. Those are the applicati
 
 - **Back up the keys table separately from the data**, or use a KMS. A single backup that holds
   both is a backup that undoes every erasure it contains.
-- **Run the application with a role that has INSERT and SELECT on `shredding_erasure`**, not the
-  owner. The append-only triggers stop the runtime role; only the owner can disable them.
+- **Run the application with a role that is not the schema owner, and do not let it run DDL.** The
+  append-only triggers stop the runtime role from deleting or truncating the log tables; only the
+  owner can disable a trigger. From 0.2.0 the application verifies this at startup and refuses to
+  start if it does not hold. See "Database roles" below for the exact grants that role needs, and
+  why leaving one out is not a smaller version of least privilege, it is a runtime failure.
 - **Never store `shredding.erasure-log.hmac-secret` beside the datasource password.** If one
   compromise yields both, the chain key is not a second factor, it is decoration. Module B's rule.
 - **Losing the master key erases everyone.** The startup health check reports whether it can unwrap
   a known key; wire it into your readiness probe.
 - The erasure-log HMAC secret is **not** a data key and is **never** destroyed by an erasure.
   Destroying it would break the very record that proves the erasure happened.
+
+### Database roles
+
+The schema step (`schema-postgresql.sql`) must be applied **once, by an owner role**, or another
+role that can create tables, functions and triggers. The application itself runs as a separate,
+non-owner role, so that the append-only triggers on the log tables are load-bearing: an owner can
+`ALTER TABLE ... DISABLE TRIGGER` or `CREATE OR REPLACE` a guard function into a no-op, and a
+non-owner can do neither.
+
+Until 0.1.1 that was advice the code made impossible to follow - the starter ran the schema DDL
+with the application's own credentials on every boot, so the only role that could start it was the
+owner. From 0.2.0 the application issues no DDL by default (`shredding.jdbc.initialize-schema` is
+`false`), verifies the schema at startup instead, and refuses to start when the schema is missing,
+wrong, unguarded, or when its own role could remove the guards. The upgrade steps for an existing
+installation are in [docs/upgrading-0.2.0.md](docs/upgrading-0.2.0.md).
+
+Grant exactly this, no more, with the module's schema on the `search_path` of whoever runs it (or
+the names qualified):
+
+```sql
+GRANT USAGE                  ON SCHEMA <schema>                     TO shredding_app;
+GRANT SELECT, INSERT, DELETE ON shredding_data_key                  TO shredding_app;
+GRANT UPDATE (encryption_count) ON shredding_data_key               TO shredding_app;
+GRANT SELECT, INSERT         ON shredding_erased_subject            TO shredding_app;
+GRANT UPDATE (erased_at)     ON shredding_erased_subject            TO shredding_app;
+GRANT SELECT, INSERT         ON shredding_erasure                   TO shredding_app;
+GRANT SELECT, INSERT, UPDATE ON shredding_erasure_anchor            TO shredding_app;
+GRANT USAGE                  ON SEQUENCE shredding_erasure_seq_seq  TO shredding_app;
+```
+
+And take these away, which `GRANT` alone does not do:
+
+```sql
+REVOKE CREATE    ON SCHEMA   <schema> FROM shredding_app;
+REVOKE CREATE    ON SCHEMA   public   FROM PUBLIC;   -- PostgreSQL 14 and earlier
+REVOKE TEMPORARY ON DATABASE <db>     FROM shredding_app, PUBLIC;
+REVOKE CREATE    ON DATABASE <db>     FROM shredding_app, PUBLIC;
+```
+
+Four of these are easy to miss, and each of them fails in a different way.
+
+- **`shredding_erasure_seq_seq`.** `shredding_erasure.seq` is a `bigserial`; PostgreSQL names its
+  backing sequence `<table>_<column>_seq`, so it is not covered by a table-level `GRANT ... ON
+  shredding_erasure` at all. Without `USAGE` on it, every erasure write fails at insert time with
+  `permission denied for sequence shredding_erasure_seq_seq` - the erasure never reaches the log,
+  and the caller sees a hard failure rather than a silently missing row. `SELECT` on the sequence
+  is deliberately **not** granted: no statement this module issues reads it.
+- **`UPDATE (erased_at)` on `shredding_erased_subject`.** The application never issues an `UPDATE`
+  against this table; the grant exists because minting a key takes `SELECT ... FOR SHARE` on it to
+  serialise against a concurrent erasure, and PostgreSQL checks every row-locking clause (`FOR
+  UPDATE`, `FOR SHARE`, `FOR NO KEY UPDATE`, `FOR KEY SHARE`) against the `UPDATE` privilege, not
+  `SELECT`. A **column** grant is enough, and a table-wide one would let anything that took the
+  role over rewrite a tombstone's tenant or subject.
+- **`UPDATE (encryption_count)` on `shredding_data_key`.** The same shape and the same reason to
+  keep it to one column: table-wide `UPDATE` would allow resetting the counter that drives
+  `shredding.crypto.max-encryptions-per-key`, reopening a non-active key row, overwriting wrapped
+  key material in place, or backdating a row - none of which the module ever does.
+- **`TEMPORARY` and `CREATE` on the database.** These are not housekeeping. `TEMPORARY` lets the
+  runtime role create `pg_temp.shredding_erasure` and, with unqualified SQL, divert its own appends
+  into it; `CREATE` on a database is `CREATE SCHEMA`, which is the same attack with a permanent
+  schema. From 0.2.0 every statement this module issues is qualified to the schema verified at
+  boot, so neither buys a diverted write any more - but the privileges are refused at startup as
+  well, because a role that holds them is one `SET search_path` away from shadowing anything else
+  in your estate. **And the database must not be owned by the application role:** an owner
+  re-`GRANT`s itself either privilege in one statement, so the `REVOKE` above does not bind it.
+  Check with `SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = current_database();`.
+
+The runtime role is never granted `DELETE` or `TRUNCATE` on `shredding_erasure`,
+`shredding_erased_subject` or `shredding_erasure_anchor`, nor `TRIGGER` or `REFERENCES` on any of
+the four tables. The append-only triggers refuse those statements from any role that holds the
+privilege, but `TRIGGER` in particular is not covered by them at all: a non-owner holding `TRIGGER`
+can add a trigger of its own to the erasure log.
+
+A privilege can be held **directly, through a group role, through a predefined role such as
+`pg_write_all_data`, or through `PUBLIC`**. An empty grep of your grant scripts therefore proves
+nothing; check with `has_table_privilege('<role>', '<table>', '<privilege>')`, which is what the
+startup verification uses.
+
+### What startup verification does and does not prove
+
+From 0.2.0, `ShreddingSchemaGate` refuses to start the application unless, in the schema
+`current_schema()` resolves to: the four tables exist as permanent ordinary tables with exactly the
+columns and constraints the bundled script creates; the erasure log's `bigserial` sequence is
+present and owned by its column; the three guard functions exist with the **bodies from the bundled
+script**, compared text for text, because `CREATE OR REPLACE FUNCTION` keeps the oid and every
+identity check passes after a body swap; exactly the seven guard triggers exist, each pointing
+through `tgfoid` at the right function, each at `ENABLE ALWAYS`, **each with no `WHEN` predicate
+(`tgqual`) and no `UPDATE OF` column list (`tgattr`)** - a guard recreated `WHEN (false)` or
+narrowed to one column is identical in every other column and fires never; there is no rewrite
+rule, no row-level-security flag, no policy and **no inheritance child** on any of the four tables
+(a child carries none of the parent's triggers while its rows are read and deleted through the
+parent's name); and the runtime role is not
+privileged in any of the senses above. A catalogue read this module cannot perform is a refusal,
+not a warning: unverifiable is not clean.
+
+Three things it does not prove, and they are named here rather than implied.
+
+1. **It is a point in time.** An owner who disables a trigger or replaces a guard body at 03:00 is
+   not noticed until the next restart. Periodic re-verification is future work; until then, audit
+   `pg_proc` and `pg_trigger` from the owner's side and monitor DDL in the database audit log. The
+   `REVOKE TEMPORARY`/`REVOKE CREATE` above are also grant-side, and a role that owns the database
+   can restore them to itself after boot - which is why the verification refuses that role.
+2. **`ENABLE ALWAYS` defends against a narrower actor than it looks.** It makes the guards fire for
+   a replication apply worker, for a superuser session in `session_replication_role = replica`, and
+   under `pg_restore --disable-triggers`. It does **not** defend against the table's owner, who
+   needs none of those: `ALTER TABLE ... DISABLE TRIGGER` is already theirs.
+3. **The expectation lives in the jar.** Guard bodies are compared against the bundled
+   `schema-postgresql.sql`, so an attacker who can rewrite the deployed jar controls the
+   expectation as well as the database. That, not "a guard body was rewritten", is what remains
+   outside detection.
+
+**The check does not ask the role it is judging.** A function name resolves along `search_path`
+exactly as a relation name does, any role may run `ALTER ROLE <itself> SET search_path` (there is no
+privilege to revoke), and an application role normally owns a business schema it can define
+functions in. `pg_has_role`, `has_table_privilege`, `format_type` and `pg_get_constraintdef` written
+bare are therefore predicates the subject of the check supplies the answer to. Verification's
+transaction now pins its own `search_path` to `pg_catalog` for its own duration, reads the pin back
+and refuses with `SHRED-SCHEMA-005` if it did not take, and every catalogue function, catalogue
+relation and `regclass` cast carries a `pg_catalog.` prefix in any case - belt and braces, because
+the pin is one statement a later edit can lose and a prefix is visible in every diff. The bundled
+script and the erasure store's own `count(*)`, `now()` and `pg_advisory_xact_lock(...)` are
+qualified for the same reason. **One leg is not covered and is named rather than implied:** the
+Hibernate-rendered independent read-back is `count(*)` in HQL, which the framework renders
+unqualified, so a role that defines its own `count` aggregate can make that one leg answer zero.
+The erasure store's own same-text read-back runs over the same column in the same transaction, is
+qualified, and refuses on its own.
+
+### The health endpoint publishes the posture
+
+`/actuator/health` gains two details from the gate's verdict rather than re-deriving them:
+`schema`, the schema that was verified, and `runtimeRolePrivileged`, `yes` or `no`.
+
+`runtimeRolePrivileged: yes` is a one-word statement that this application's append-only controls
+are advisory - useful to an operator, and equally useful to anyone else who can read it. Health
+details are hidden by default in Spring Boot; keep them that way on any endpoint that is reachable
+without authentication. If you set `management.endpoint.health.show-details`, set it to
+`when-authorized`, not `always`, and put the actuator on a port your ingress does not publish.
+
+### What qualification covers, and what it does not
+
+Every statement this module issues names its relation as `"<verified schema>"."<table>"`, so none
+of them depends on `search_path` at parse time. Relation names are not the only names a statement
+resolves, and from this release they are not the only ones qualified.
+
+**Operators, functions, aggregates, types and casts.** A `search_path` decides an *operator* name
+exactly as it decides a relation name, and order is no protection: PostgreSQL ships no `=` with
+`varchar` on either side, so an `=(varchar, varchar)` created by a role in a schema it owns is an
+exact-type match and is selected at step 2 of operator resolution whatever the path order. Measured:
+with such an operator answering `false`, an erasure recorded `COMPLETE` with `keysDestroyed = 0`
+while the data key was still in the table. Every operator in every statement this module builds is
+now written `OPERATOR(pg_catalog....)`, every function and aggregate `pg_catalog....`, every cast
+`::pg_catalog....`; the same holds in the bundled `schema-postgresql.sql`, which has no pin
+available at all (an unqualified `CREATE TABLE` targets `current_schema()`, so `pg_catalog` cannot
+be put first there), and in the three statements the starter builds on the application's **own**
+Hibernate connection — the `IDENTITY` rebind, the subject-immutability re-read and the
+write-verification ledger's read-back. Those three get qualification and no session mechanism, on
+purpose: a transaction-local `set_config` there would re-point every later statement of the
+application's transaction, including statements of entities this module knows nothing about.
+
+Because `OPERATOR(...)` erases precedence — every qualified operator takes one generic precedence —
+an expression with more than one operator token is fully parenthesised, and a drift gate in the test
+suite refuses an unparenthesised pair.
+
+**The guard functions resolve names only in `pg_catalog`.** A guard function is not `SECURITY
+DEFINER`, so without a `search_path` clause its body resolves its operator names in the session of
+whoever writes to the table — the session of the role the guard exists to constrain. Measured: a
+role holding exactly the grant block below, owning nothing in the schema, rewrote the erasure
+anchor's `row_count`, `head_hash` and `keyed` past the monotonic guard with three operators it
+defined in its own schema. From this release the three guard functions carry
+`SET search_path = pg_catalog, pg_temp`, their bodies are written with `OPERATOR(pg_catalog....)`
+and explicit parentheses, and startup verification requires **both**: the body text against the
+bundled script and `pg_proc.proconfig` against exactly `{"search_path=pg_catalog, pg_temp"}`. Each
+is the other's backstop — `CREATE OR REPLACE FUNCTION` with no `SET` clause clears `proconfig` with
+no error, which is what the exact comparison catches, and the clause says nothing about a name a
+later edit adds, which is what the body comparison catches. A mismatch is `SHRED-SCHEMA-003` and
+the remedy is to re-apply `schema-postgresql.sql` as the owner.
+
+**The one statement a session still resolves, and the window it runs in.**
+
+Exactly one statement of an erasure is not covered by qualification the way the rest are: the
+**independent** blind-index read-back is rendered by Hibernate from the entity mapping, and HQL
+offers no way to write `pg_catalog.count(*)` or an `OPERATOR(pg_catalog....)` comparison - there is
+no name in that text for this module to qualify. It runs with the connection's `search_path`
+**replaced** by `pg_catalog, pg_temp` for the width of that one statement and restored immediately
+afterwards. For this leg the window is the only mechanism there is.
+
+The **cross-tenant WARN** read-back is written by this module and every name in it is qualified:
+`(<tenant> IS NULL OR NOT (<tenant> OPERATOR(pg_catalog.=) ?))` (finding C-A-6), over a two-part
+relation. It runs **outside** the window (finding C-18-6): the session's path decides nothing in it,
+so a window there could change no answer any test can observe, and a module-written statement
+inside one would be held to a weaker reading of the name gate. An earlier spelling reached the
+type's own equality through a grammar keyword, which has no `OPERATOR(pg_catalog....)` form, and the
+window was first built around that. The tenant column is nullable, so a bare
+`OPERATOR(pg_catalog.<>)` is not equivalent - `NULL <> ?` is `NULL`, which would drop exactly the
+rows this WARN exists to find - and the spelled-out form above is equivalent for the non-null bound
+value this always passes. What is at risk is the accuracy of a `WARN` line and never the erasure's
+verdict: every refusing leg on the same column is qualified.
+
+A replacement rather than a prefix, because order is not a defence: PostgreSQL ships no `=` with
+`varchar` on either side, so an `=(varchar, varchar)` a role creates in a schema it owns is an exact
+match and wins at step 2 of operator resolution whatever the path says. Only removing that schema
+from the candidate set changes the answer. The window is six statements — capture, pin, read the pin
+back, the statement, restore, read the restore back — because a pin that is not read back is a
+fiction: in auto-commit `set_config(..., true)` returns the pinned value while the next statement
+sees the old path, so an auto-commit connection is refused outright with `SHRED-SCHEMA-008`. The
+restore **binds** the captured bytes: a role may put a quote and a statement terminator in its own
+`search_path`, and a restore composed into statement text then leaves the control off and sends
+attacker-supplied text as a second statement. A failure inside the window propagates itself with the
+refused restore attached as suppressed, never replaced by an isolation code.
+
+`SHRED-SCHEMA-008` is the only `SHRED-SCHEMA-*` code that is never a startup condition and never
+means "re-apply the script": it means the connection was in auto-commit, or something moved
+`search_path` inside the erasure's transaction. The erasure's whole transaction rolls back — no key
+destroyed, no index half-cleared, no record appended.
+
+**The window is one statement wide, and that is a property, not a style.** The erasure's own
+`UPDATE` runs outside it, on the path the transaction arrived with, with every name in it qualified
+by this module — so an application trigger whose body names a relation unqualified still fires and
+still succeeds. A window around the whole transaction would break that application. The test suite's
+name gate checks the invariant: it refuses any statement of this module's own inside a window.
+
+**The window needs the relation to come from the mapping, which is why startup refuses a
+schema-less one.** Nothing role-writable is left on the bracketed path, so a relation name that is
+not qualified cannot resolve in there at all. Keeping the application's own schema on the bracketed
+path so an unqualified name still resolved would put that schema back in the candidate set and
+re-open the operator-shadowing hole verbatim. The two controls are therefore one: the startup
+refusal below, and this window.
+
+**What a `SELECT` can still run inside the window.** Mapping admission (section above) refuses an entity
+mapped to a view and a table whose row-level-security policy applies to the runtime role, so neither
+a view's functions nor a policy's run in the window of an admitted erasure. A function a policy
+calls on a table the role owns without `FORCE ROW LEVEL SECURITY` is not run either, because the
+policy does not apply to the owner. What is left is the mapping's own SQL:
+the text of a `@SQLRestriction` and of every auto-enabled `@Filter` condition on a `@BlindIndex`
+entity is rendered by Hibernate into the windowed read-back, and an unqualified function, relation or
+non-keyword type name in it does not resolve there. That is the commoner case, and it makes every
+erasure of that entity fail, loudly and with the transaction rolled back whole (the data key is
+still present afterwards), while the application itself reads and writes the entity normally. The
+remedy is to schema-qualify every function, relation and non-keyword type those fragments name, for
+example `@SQLRestriction("public.pr18_visible(owner_id)")`; a qualified function whose body resolves
+names at run time needs the remedy below as well. A string-body `LANGUAGE sql` function (`AS $$ ... $$`) is parsed again each time it runs, on the
+path in force then, so inside the window it behaves exactly like a plpgsql function and fails with
+`relation "..." does not exist`. Only a SQL-standard body (`BEGIN ATOMIC ... END` or `RETURN ...`,
+PostgreSQL 14 and later) binds its names when the function is created and is unaffected. If you
+have a function of either kind that names something unqualified, give it its own clause:
+`ALTER FUNCTION <fn> SET search_path = <schema>, pg_catalog` (the same mechanism this module gives
+its own guards), or rewrite it with a SQL-standard body. The failure mode is availability of that one erasure, fail-closed, and it is
+reported with the database's own message.
+- The **mapping admission** - whether the relation a `@Shredded` entity names is a table this
+  module can address and whose compared columns compare the way the application's own do - is read
+  from the catalogue at startup and inside every erasure. See "Mapping admission" above.
+- The application's **own** tables are reached through the entity mapping, and this module does not
+  validate their contents on your behalf: the role owns its own data tables and can drop them, and
+  that is not a control a library can hold. What is closed is the module's three legs and
+  Hibernate's rendering disagreeing about *which* table they are talking about — the mapping must
+  name a schema (`hibernate.default_schema`, or `@Table(schema = ...)`) or startup refuses.
+- A `search_path` is still the operator's to set, and nothing here depends on it being sane. What
+  these changes remove is the module's *dependence* on it.
+
