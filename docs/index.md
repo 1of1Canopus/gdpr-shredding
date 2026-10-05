@@ -183,7 +183,7 @@ the natural id.
 | `shredding.erasure-log.unkeyed` | `false` | loud opt-out. WARNs at every startup |
 | `shredding.blind-index.hmac-secret` | required with `@BlindIndex` | its own secret, never the data key or chain material |
 | `shredding.blind-index.bits` | `64` | index width. A prefilter: the query path re-verifies |
-| `shredding.erasure.backup-retention` | `30d` | the erasure is complete at `erasedAt + this`, and the record says so. Must not be negative: startup refuses it with `SHRED-CONFIG-001`. `0` means no backups |
+| `shredding.erasure.backup-retention` | `30d` | the erasure is complete at `erasedAt + this`, and the record says so. Must be between `0` and `36500d` (100 years): startup refuses anything else with `SHRED-CONFIG-001`, because a negative value dates the backup clearance before the erasure and a larger one cannot be dated or stored. `0` means no backups |
 
 There is no fail-open property anywhere in this module.
 
@@ -211,7 +211,7 @@ There is no fail-open property anywhere in this module.
 | `SHRED-READ-UNVERIFIED` | a decrypt happened inside an open read region but no entity load ever installed it before the region closed - a projection, or residue from a region an error unwound past - see "How the read path verifies" above |
 | `SHRED-SUBJECT-UNRESOLVED` | a row carries at least one shredded value and its data subject could not be resolved |
 | `SHRED-EMF-UNINSTRUMENTED` | more than one `EntityManagerFactory` bean exists in the application context; the read bracket cannot tell which repository is bound to which, so every repository is refused rather than bracketed on the chance it is the wrong one |
-| `SHRED-ERASURE-LOCK-WAIT` | an erasure could not take the table lock it needs: another session held a conflicting lock longer than the connection's `lock_timeout` (SQLState `55P03`), or the database chose the erasure as a deadlock victim (`40P01`). The erasure was not performed and nothing was destroyed, cleared or recorded. Retryable, and not a key-store outage |
+| `SHRED-ERASURE-LOCK-WAIT` | an erasure waited on a lock and gave up, at any of its steps (the subject's advisory lock, the key rows, the table locks, the blind-index `UPDATE` waiting on an application transaction's row lock, the erasure-log append): another session held a conflicting lock longer than the connection's `lock_timeout` (SQLState `55P03`), or the database chose the erasure as a deadlock victim (`40P01`). The erasure was not performed and nothing was destroyed, cleared or recorded. Retryable, and not a key-store outage |
 | `SHRED-SCHEMA-001` | none of this module's tables exist in the resolved schema. The application never creates them with its own credentials; apply `schema-postgresql.sql` with a privileged role |
 | `SHRED-SCHEMA-002` | the objects exist but are wrong in shape: a missing table, column, constraint, or the `bigserial` sequence |
 | `SHRED-SCHEMA-003` | a guard is not load-bearing: a trigger missing, extra, disabled, not `ENABLE ALWAYS` or pointing at the wrong function; a guard-function body that differs from the bundled script; or a rule, an RLS flag or a policy. Control 8 and control 11 do not hold |
