@@ -286,6 +286,27 @@ All notable changes to this project. The format follows
   every erasure was then refused with `SHRED-SCHEMA-009`. The startup targets now keep a column
   once per role, so the startup check refuses what the erasure refuses.
 
+### Fixed (release-candidate security review, corrections)
+- RC-4: `docs/upgrading-0.2.0.md` no longer says a rollback to 0.1.1 has "nothing to undo". 0.1.1's
+  unconditional boot DDL fails as the post-upgrade runtime role; the guide now gives two executed
+  procedures (boot 0.1.1 as the owner role, or undo ownership and `CREATE` on the schema) and what
+  the second one costs.
+- RC-5: a negative `shredding.erasure.backup-retention` is refused at startup with `SHRED-CONFIG-001`
+  naming the property, and by the `ErasureService` constructor for core users. Zero stays legal.
+  The value is also bounded above, at 36500 days (100 years): a larger one could not be dated or
+  stored and refused every erasure without a code (RC-9).
+- RC-6: the upgrade guide's step 7 table has a `SHRED-SCHEMA-009` row with the exact column-type
+  message and the `ALTER COLUMN ... TYPE text` remedy.
+- RC-7: a lock wait that exceeds the connection's `lock_timeout` (SQLState `55P03`) or a deadlock
+  (`40P01`) while an erasure takes its table locks is reported as the new `SHRED-ERASURE-LOCK-WAIT`
+  (lock wait exceeded, erasure not performed, retry), not as `SHRED-KEY-UNAVAILABLE`. The new code is
+  added to the error-code table; nothing was renamed. It covers every wait of the erasure
+  transaction, not only the table lock: the subject's advisory lock, the key rows, the blind-index
+  `UPDATE` (an application transaction open on the subject's row) and the erasure-log append (RC-10).
+- RC-8: `tools/cipher-probe-release-pipeline.sh` keeps the build logs of the sources-jar
+  reproducibility probe, prints the tail of a failing build and reports a build failure as ERROR, not
+  as WEAK.
+
 ### Removed
 - **BREAKING.** `JdbcSupport.runtimeRoleOwnsErasureTable`, public since 0.1.0. Its query had no
   `schemaname` predicate, so it answered about whichever copy of `shredding_erasure` `pg_tables`
