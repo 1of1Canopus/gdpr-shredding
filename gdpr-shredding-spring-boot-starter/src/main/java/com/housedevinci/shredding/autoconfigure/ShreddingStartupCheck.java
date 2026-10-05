@@ -1,5 +1,6 @@
 package com.housedevinci.shredding.autoconfigure;
 
+import com.housedevinci.shredding.application.ErasureService;
 import com.housedevinci.shredding.application.FieldCipher;
 import com.housedevinci.shredding.domain.ErasedValuePolicy;
 import com.housedevinci.shredding.domain.ErrorCodes;
@@ -58,7 +59,7 @@ public final class ShreddingStartupCheck implements InitializingBean {
     // then refuses the application's very first shredded write - checked here, before it is ever
     // handed to WriteVerification.
     refuseIfLedgerCapBelowOne();
-    refuseIfBackupRetentionNegative();
+    refuseIfBackupRetentionOutOfRange();
     WriteVerification.configureMaxOutstanding(
         properties.getWriteVerification().getMaxOutstanding());
     refuseIfVerifierNotRegisteredFirst();
@@ -149,20 +150,15 @@ public final class ShreddingStartupCheck implements InitializingBean {
   }
 
   /**
-   * RC-5: a negative {@code shredding.erasure.backup-retention} boots silently and every proof of
-   * erasure then dates the backup clearance before the erasure. Refused at the property boundary;
-   * zero stays legal (no backups).
+   * RC-5 and RC-9: {@code shredding.erasure.backup-retention} outside 0 to 100 years boots and then
+   * either dates the proof's backup clearance before the erasure (negative) or refuses every
+   * erasure (too large to date or store). Refused at the property boundary; zero stays legal (no
+   * backups).
    */
-  private void refuseIfBackupRetentionNegative() {
+  private void refuseIfBackupRetentionOutOfRange() {
     var retention = properties.getErasure().getBackupRetention();
-    if (retention != null && retention.isNegative()) {
-      throw new ShreddingException(
-          ErrorCodes.CONFIG,
-          "shredding.erasure.backup-retention is "
-              + retention
-              + ", but must not be negative. The proof of erasure states the day the erasure is"
-              + " complete in backups as the erasure's own time plus this duration; a negative"
-              + " value would date it before the erasure happened. Use 0 if there are no backups.");
+    if (retention != null) {
+      ErasureService.requireValidBackupRetention(retention);
     }
   }
 

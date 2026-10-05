@@ -54,20 +54,40 @@ public final class ErasureService {
     this.pseudonymiser = Objects.requireNonNull(pseudonymiser, "pseudonymiser");
     this.hooks = List.copyOf(hooks);
     this.backupRetention = Objects.requireNonNull(backupRetention, "backupRetention");
-    if (backupRetention.isNegative()) {
-      // RC-5: a negative retention dates "complete in backups" before the erasure itself, and that
-      // date is chained into the record and printed in the proof.
+    requireValidBackupRetention(backupRetention);
+    this.clock = Objects.requireNonNull(clock, "clock");
+    this.entityCount = entityCount;
+    this.fieldCount = fieldCount;
+  }
+
+  /**
+   * RC-9: the longest backup retention accepted, 100 years. Far past any retention a backup policy
+   * has, and far inside both {@code Instant}'s range and PostgreSQL's {@code timestamptz} (year
+   * 294276), so {@code erasedAt + retention} can always be dated and stored.
+   */
+  public static final Duration MAX_BACKUP_RETENTION = Duration.ofDays(36_500);
+
+  /**
+   * RC-5 and RC-9: the one check of {@code shredding.erasure.backup-retention}, used by this
+   * constructor and by the starter's property validation. The proof of erasure states the day the
+   * erasure is complete in backups as the erasure's own time plus this duration: a negative value
+   * would date it before the erasure happened, and a value past the ceiling cannot be dated or
+   * stored, which would refuse every erasure.
+   */
+  public static void requireValidBackupRetention(Duration backupRetention) {
+    Objects.requireNonNull(backupRetention, "backupRetention");
+    if (backupRetention.isNegative() || backupRetention.compareTo(MAX_BACKUP_RETENTION) > 0) {
       throw new ShreddingException(
           ErrorCodes.CONFIG,
           "shredding.erasure.backup-retention is "
               + backupRetention
-              + ", but must not be negative. The proof of erasure states the day the erasure is"
-              + " complete in backups as the erasure's own time plus this duration; a negative"
-              + " value would date it before the erasure happened. Use 0 if there are no backups.");
+              + ", but must be between 0 and "
+              + MAX_BACKUP_RETENTION.toDays()
+              + " days. The proof of erasure states the day the erasure is complete in backups as"
+              + " the erasure's own time plus this duration: a negative value would date it before"
+              + " the erasure happened, and a value above the ceiling cannot be dated or stored."
+              + " Use 0 if there are no backups.");
     }
-    this.clock = Objects.requireNonNull(clock, "clock");
-    this.entityCount = entityCount;
-    this.fieldCount = fieldCount;
   }
 
   public ErasureResult erase(ErasureRequest request) {
