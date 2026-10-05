@@ -298,15 +298,13 @@ ownership of one table when owning one guard function is enough to replace every
 the application's own credentials at every boot, with no property to skip it. After steps 2 and 4 the
 application role owns none of the tables or guard functions and holds no `CREATE` on the schema, so
 that script fails (`permission denied for schema ...`) and the rolled-back application does not
-start. Rolling back the jar alone is therefore not enough. Choose one of two ways, and prefer the
-first.
+start. Rolling back the jar alone is therefore not enough. Choose one of two ways.
 
 **A. Boot 0.1.1 as the owner role.** Give the rolled-back application the owner role's credentials
 (`spring.datasource.username` / `password`) for the time it runs 0.1.1. That role owns the objects
-and the schema, so the boot script runs; no statement has to be undone, and the append-only guards
-stay out of the application role's reach. The role must be able to read and write your own business
-tables, and a role that cannot is the reason to use B. Switch back to the runtime role when you
-upgrade again.
+and the schema, so the boot script runs and no statement has to be undone; going forward again is
+switching the credentials back. The role must be able to read and write your own business tables;
+a role that cannot is the reason to use B.
 
 **B. Undo steps 2 and 4 for the application role.** As the owner role or a superuser:
 
@@ -322,15 +320,18 @@ GRANT  CREATE ON SCHEMA <schema> TO <application role>;
 ```
 
 (If step 2 also moved the schema to the owner role, `ALTER SCHEMA <schema> OWNER TO <application
-role>` instead of the last line works too.) Both variants were executed against a 0.1.x install
-that had been upgraded by steps 2 to 5; 0.1.1's boot script then ran to completion.
+role>` instead of the last line works too; the test does not run that alternative.) Variant A, and
+the seven `ALTER` statements plus the `GRANT` of B, were executed against a 0.1.x install that had
+been upgraded by steps 2 to 5; 0.1.1's boot script then ran to completion.
 
-**What B costs.** It puts the application role back in the state this release exists to remove: the
-role owns the guard functions and the tables, so it can replace a guard or delete from
-`shredding_erasure`, and the append-only erasure log and the erasure tombstone are advisory again.
-Record that in your processing documentation for as long as 0.1.1 runs, and do not present the log as
-append-only to a supervisory authority in that window. Variant A does not have that cost, because the
-role that holds the guards is not the one the application's own code and queries run as, only
-the one 0.1.1's boot step uses. Neither variant needs the 0.2.0 properties: 0.1.1 ignores them, and
+**What both variants cost.** In both, the whole application runs as a role that can replace the
+guards: 0.1.1 has one `DataSource`, so under A every query the application runs, and anything that
+can make it run SQL, runs as the owner of the four tables, the three guard functions and the schema,
+and under B the application role owns them again. In either case that role can disable the
+append-only trigger or replace a guard function, and delete from `shredding_erasure`, so the
+append-only erasure log and the erasure tombstone are advisory for as long as 0.1.1 runs. Record that
+in your processing documentation for that window, and do not present the log as append-only to a
+supervisory authority in it. The variants differ only in effort: A has no statement to undo, B
+returns ownership with the statements above. Neither variant needs the 0.2.0 properties: 0.1.1 ignores them, and
 tolerates the changed guard bodies, `ENABLE ALWAYS`, a column already changed to `text`, and a
 schema already named in a mapping. To go forward again, repeat steps 2 to 7.
