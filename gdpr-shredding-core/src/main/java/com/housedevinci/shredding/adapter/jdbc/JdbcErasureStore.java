@@ -350,6 +350,26 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
       ps.execute();
     } catch (SQLException e) {
       String state = String.valueOf(e.getSQLState());
+      if ("55P03".equals(state) || "40P01".equals(state)) {
+        throw new ShreddingException(
+            ErrorCodes.ERASURE_LOCK_WAIT,
+            "shredding: the erasure could not take the lock it needs on "
+                + target.table()
+                + " ("
+                + ("55P03".equals(state)
+                    ? "lock wait exceeded the connection's lock_timeout"
+                    : "deadlock detected, this transaction was chosen as the victim")
+                + ", SQLState "
+                + state
+                + "; wanted: "
+                + sql.substring(sql.indexOf(" IN ") + 4)
+                + "). The erasure was not performed: no key is destroyed, no blind index is"
+                + " touched and no record is appended. Another session holds a conflicting lock"
+                + " (another erasure of the table, a manual VACUUM, ANALYZE or CREATE INDEX"
+                + " CONCURRENTLY, or an autovacuum to prevent wraparound). This is not a key-store"
+                + " outage. Retry the erasure later.",
+            e);
+      }
       String why =
           switch (state) {
             case "42P01" -> "does not exist";
