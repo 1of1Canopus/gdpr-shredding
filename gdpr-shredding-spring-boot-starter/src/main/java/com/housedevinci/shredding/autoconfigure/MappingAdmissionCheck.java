@@ -15,7 +15,8 @@ import org.slf4j.LoggerFactory;
  * Mapping admission at startup (name-resolution design, addendum section A.5): every
  * {@code @Shredded} entity's table is checked against the catalogue before the application serves a
  * request, and a table that is present and inadmissible stops the context with {@code
- * SHRED-SCHEMA-009}.
+ * SHRED-SCHEMA-009}; a table whose blind-index column keeps planner statistics stops it with {@code
+ * SHRED-SCHEMA-010} (audit-table coverage design, section 3b).
  *
  * <p>This is the early half of the control. The half that holds is the erasure's own check, inside
  * every erasure's transaction and under its lock, because a verdict taken here is undone by one
@@ -51,6 +52,7 @@ public final class MappingAdmissionCheck {
     Objects.requireNonNull(gate, "gate");
     List<MappingAdmission.Target> targets = model.admissionTargets();
     var refusals = new ArrayList<String>();
+    var copies = new ArrayList<String>();
     try (Connection c = gate.dataSource().getConnection()) {
       for (MappingAdmission.Target target : targets) {
         switch (MappingAdmission.verdict(c, target)) {
@@ -64,6 +66,7 @@ public final class MappingAdmissionCheck {
                   absent.message(),
                   ErrorCodes.MAPPING_INADMISSIBLE);
           case MappingAdmission.Refused refused -> refusals.add(refused.message());
+          case MappingAdmission.Copied copied -> copies.add(copied.message());
         }
       }
     } catch (SQLException e) {
@@ -76,9 +79,21 @@ public final class MappingAdmissionCheck {
           e);
     }
     if (!refusals.isEmpty()) {
+      // A mapping that cannot be erased is the first thing to fix; a copy found on another table
+      // is still named, so one deployment shows the operator every refusal it will meet.
       throw new ShreddingException(
           ErrorCodes.MAPPING_INADMISSIBLE,
-          String.join(" ", refusals) + " See docs/upgrading-0.2.0.md, \"Mapping admission\".");
+          String.join(" ", refusals)
+              + " See docs/upgrading-0.2.0.md, \"Mapping admission\"."
+              + (copies.isEmpty()
+                  ? ""
+                  : " Also refused, with "
+                      + ErrorCodes.BLIND_INDEX_COPIED
+                      + ": "
+                      + String.join(" ", copies)));
+    }
+    if (!copies.isEmpty()) {
+      throw new ShreddingException(ErrorCodes.BLIND_INDEX_COPIED, String.join(" ", copies));
     }
     this.checked = targets.size();
   }

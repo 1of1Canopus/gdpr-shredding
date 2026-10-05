@@ -21,6 +21,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -204,7 +205,13 @@ public final class ShreddedModel {
         BlindIndexColumn c = index.column();
         addOnce(columns, c.tenantColumn(), MappingAdmission.TENANT, true);
         addOnce(columns, c.subjectColumn(), MappingAdmission.SUBJECT, true);
-        addOnce(columns, c.column(), MappingAdmission.BLIND_INDEX, false);
+        addOnce(
+            columns,
+            c.column(),
+            MappingAdmission.BLIND_INDEX,
+            false,
+            Optional.of(
+                "@BlindIndex " + index.entityClass().getSimpleName() + "." + index.fieldName()));
       }
       out.add(
           new MappingAdmission.Target(
@@ -215,13 +222,22 @@ public final class ShreddedModel {
 
   private static void addOnce(
       List<MappingAdmission.Column> columns, ColumnRef ref, String role, boolean compared) {
+    addOnce(columns, ref, role, compared, Optional.empty());
+  }
+
+  private static void addOnce(
+      List<MappingAdmission.Column> columns,
+      ColumnRef ref,
+      String role,
+      boolean compared,
+      Optional<String> attribute) {
     var use = compared ? MappingAdmission.Use.COMPARED : MappingAdmission.Use.ASSIGNED;
     for (var existing : columns) {
       if (existing.ref().equals(ref) && existing.use() == use && existing.role().equals(role)) {
         return;
       }
     }
-    columns.add(new MappingAdmission.Column(ref, use, role));
+    columns.add(new MappingAdmission.Column(ref, use, role, attribute));
   }
 
   public List<ShreddedField> shreddedFields() {

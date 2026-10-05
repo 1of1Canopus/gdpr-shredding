@@ -76,12 +76,15 @@ public final class MappingAdmission {
    * @param role what the column is: one of {@link #TENANT}, {@link #SUBJECT}, {@link #IDENTIFIER}
    *     or {@link #BLIND_INDEX}. A closed set, because clause C-i is decided by it: the tenant and
    *     subject columns are the two this module compares against a bound {@code String}
+   * @param attribute what maps the column, for messages ({@code @BlindIndex Customer.emailIndex});
+   *     empty at the erasure's position, where the store holds columns rather than attributes
    */
-  public record Column(ColumnRef ref, Use use, String role) {
+  public record Column(ColumnRef ref, Use use, String role, Optional<String> attribute) {
     public Column {
       Objects.requireNonNull(ref, "ref");
       Objects.requireNonNull(use, "use");
       Objects.requireNonNull(role, "role");
+      Objects.requireNonNull(attribute, "attribute");
       if (!List.of(TENANT, SUBJECT, IDENTIFIER, BLIND_INDEX).contains(role)) {
         throw new ShreddingException(
             ErrorCodes.CONFIG,
@@ -97,6 +100,11 @@ public final class MappingAdmission {
                 + role
                 + "\"");
       }
+    }
+
+    /** A column with no attribute to name in messages: the erasure's position. */
+    public Column(ColumnRef ref, Use use, String role) {
+      this(ref, use, role, Optional.empty());
     }
 
     /** Clause C-i applies: a tenant or subject column, compared against a bound string. */
@@ -170,7 +178,7 @@ public final class MappingAdmission {
   }
 
   /** The outcome of one check. */
-  public sealed interface Verdict permits Admitted, Absent, Refused {}
+  public sealed interface Verdict permits Admitted, Absent, Refused, Copied {}
 
   /**
    * Admitted. {@code warnings} are postures the erasure is sound under and the operator must still
@@ -192,6 +200,14 @@ public final class MappingAdmission {
    * @param rule the clause that decided it (R-a ... C-h), for tests and for the reader
    */
   public record Refused(String rule, String message) implements Verdict {}
+
+  /**
+   * Admissible as a mapping, and a copy of a blind-index column exists where no erasure reaches it
+   * ({@code SHRED-SCHEMA-010}, audit-table coverage design section 3b): planner statistics. Decided
+   * only once the mapping itself is admitted, so a table is never told to fix its statistics before
+   * it is told it cannot be erased at all.
+   */
+  public record Copied(String message) implements Verdict {}
 
   // ------------------------------------------------------------------------------- statements
 
@@ -389,7 +405,15 @@ public final class MappingAdmission {
       List<Descendant> descendants =
           relation.children() > 0 ? descendants(c, oid) : List.<Descendant>of();
       List<ColumnFacts> columns = columns(c, oid, target.columns());
-      return judge(target, relation, descendants, columns);
+      Verdict verdict = judge(target, relation, descendants, columns);
+      if (!(verdict instanceof Admitted)) {
+        return verdict;
+      }
+      var family = new ArrayList<Long>();
+      family.add(oid);
+      descendants.forEach(d -> family.add(d.oid()));
+      Optional<String> copied = PlannerStatistics.check(c, target, oid, family);
+      return copied.<Verdict>map(Copied::new).orElse(verdict);
     } catch (SQLException e) {
       throw unverifiable(target, "SQLState " + e.getSQLState(), e);
     }
