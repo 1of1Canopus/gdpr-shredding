@@ -728,6 +728,18 @@ inheritance child, each path by which statistics can exist, and refuses any of t
   `GENERATED ALWAYS AS (lower(email_idx)) STORED` column gets its own `pg_stats` histogram of
   derived values. A virtual generated column (18) stores nothing and cannot be given a target.
 
+An expression index, an expression in extended statistics, or a stored generated column on the
+table or a descendant that calls a function or operator outside `pg_catalog` is
+`SHRED-SCHEMA-005`, whatever columns it names: the function body is invisible to the expression
+tree, and an `IMMUTABLE` SQL function taking the row's identifier can return the blind index
+(measured by the security review: the index's own `pg_stats` row held the index values while the
+tree named only `id`).
+
+The remedy the message prints is read with `search_path` pinned to `pg_catalog, pg_temp` and opens
+with the same setting, so a view or policy re-created from it cannot re-bind a name to a
+same-named object on the operator's path; a view under default privileges is named rather than
+re-created, because `CREATE VIEW` would widen its grants.
+
 A partition or child whose `pg_stats` rows the runtime role cannot see - no `SELECT` on the column,
 or row level security that applies to the role, both of which `pg_stats` filters on - is
 `SHRED-SCHEMA-005`.
@@ -741,9 +753,6 @@ Residuals, named:
 - **Values written as literals into catalogue definitions** - an index predicate, a `CHECK`, a
   column default, a view's text - are operator-authored, never touched by an erasure, and not
   scanned by this module. The predicate-only partial index is admitted on that basis.
-- **An expression index over a function that reads the column indirectly** (an immutable function
-  taking the row's identifier and looking the index up elsewhere) is not visible in the stored tree.
-  An immutable function that reads another relation is already outside what PostgreSQL guarantees.
 - **The superuser `pg_statistic` delete** that upgrade step 3a documents for 16 and 17 is the
   operator's statement, not the module's; the module's re-read at the next startup is the control.
 

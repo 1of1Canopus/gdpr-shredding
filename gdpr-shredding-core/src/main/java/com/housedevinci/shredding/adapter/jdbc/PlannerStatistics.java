@@ -142,12 +142,59 @@ final class PlannerStatistics {
           + " CAST('pg_catalog.pg_class' AS pg_catalog.regclass))"
           + " AND (d.refobjid OPERATOR(pg_catalog.=) s.stxrelid)"
           + " AND (d.refobjsubid OPERATOR(pg_catalog.>) 0)) AS deps,"
-          + " CAST(s.stxkeys AS pg_catalog.text) AS keys"
+          + " CAST(s.stxkeys AS pg_catalog.text) AS keys,"
+          + " CAST(s.stxexprs AS pg_catalog.text) AS exprs"
           + " FROM pg_catalog.unnest(?) AS f"
           + " JOIN pg_catalog.pg_statistic_ext s"
           + " ON (s.stxrelid OPERATOR(pg_catalog.=) CAST(f.f AS pg_catalog.oid))"
           + " JOIN pg_catalog.pg_namespace sn ON (sn.oid OPERATOR(pg_catalog.=) s.stxnamespace)"
           + " ORDER BY sn.nspname, s.stxname";
+
+  /** Every stored generated column on a family member, with its stored expression tree. */
+  static final String GENERATED_SQL =
+      "SELECT pg_catalog.concat_ws('.', pg_catalog.quote_ident(n.nspname),"
+          + " pg_catalog.quote_ident(c.relname), pg_catalog.quote_ident(a.attname)) AS col,"
+          + " CAST(ad.adbin AS pg_catalog.text) AS exprs"
+          + " FROM pg_catalog.unnest(?) AS f"
+          + " JOIN pg_catalog.pg_attrdef ad"
+          + " ON (ad.adrelid OPERATOR(pg_catalog.=) CAST(f.f AS pg_catalog.oid))"
+          + " JOIN pg_catalog.pg_attribute a ON (a.attrelid OPERATOR(pg_catalog.=) ad.adrelid)"
+          + " AND (a.attnum OPERATOR(pg_catalog.=) ad.adnum)"
+          + " AND (a.attgenerated OPERATOR(pg_catalog.=) 's')"
+          + " JOIN pg_catalog.pg_class c ON (c.oid OPERATOR(pg_catalog.=) ad.adrelid)"
+          + " JOIN pg_catalog.pg_namespace n ON (n.oid OPERATOR(pg_catalog.=) c.relnamespace)"
+          + " ORDER BY 1";
+
+  /** The functions among the given oids that are not in {@code pg_catalog}, by qualified name. */
+  static final String FOREIGN_FUNCTIONS_SQL =
+      "SELECT pg_catalog.concat_ws('.', pg_catalog.quote_ident(n.nspname),"
+          + " pg_catalog.quote_ident(p.proname)) AS name"
+          + " FROM pg_catalog.unnest(?) AS f"
+          + " JOIN pg_catalog.pg_proc p ON (p.oid OPERATOR(pg_catalog.=) CAST(f.f AS pg_catalog.oid))"
+          + " JOIN pg_catalog.pg_namespace n ON (n.oid OPERATOR(pg_catalog.=) p.pronamespace)"
+          + " WHERE (n.nspname OPERATOR(pg_catalog.<>) 'pg_catalog')"
+          + " ORDER BY 1";
+
+  /**
+   * The operators among the given oids that are not {@code pg_catalog}'s, or whose function is not,
+   * by qualified name.
+   */
+  static final String FOREIGN_OPERATORS_SQL =
+      "SELECT pg_catalog.concat_ws('.', pg_catalog.quote_ident(n.nspname), o.oprname) AS name"
+          + " FROM pg_catalog.unnest(?) AS f"
+          + " JOIN pg_catalog.pg_operator o"
+          + " ON (o.oid OPERATOR(pg_catalog.=) CAST(f.f AS pg_catalog.oid))"
+          + " JOIN pg_catalog.pg_namespace n ON (n.oid OPERATOR(pg_catalog.=) o.oprnamespace)"
+          + " JOIN pg_catalog.pg_proc p ON (p.oid OPERATOR(pg_catalog.=) o.oprcode)"
+          + " JOIN pg_catalog.pg_namespace pn ON (pn.oid OPERATOR(pg_catalog.=) p.pronamespace)"
+          + " WHERE (n.nspname OPERATOR(pg_catalog.<>) 'pg_catalog')"
+          + " OR (pn.nspname OPERATOR(pg_catalog.<>) 'pg_catalog')"
+          + " ORDER BY 1";
+
+  /** Reads and restores the session's search_path around the remedy's catalogue reads. */
+  static final String READ_PATH_SQL = "SELECT pg_catalog.current_setting('search_path')";
+
+  static final String SET_PATH_SQL = "SELECT pg_catalog.set_config('search_path', ?, true)";
 
   /**
    * What depends on one column of one family member, as the owner's {@code ALTER COLUMN ... TYPE}
@@ -215,7 +262,11 @@ final class PlannerStatistics {
           + " WHERE (de.objoid OPERATOR(pg_catalog.=) c.oid)"
           + " AND (de.classoid OPERATOR(pg_catalog.=)"
           + " CAST('pg_catalog.pg_class' AS pg_catalog.regclass))"
-          + " AND (de.objsubid OPERATOR(pg_catalog.>) 0)) AS column_remarks"
+          + " AND (de.objsubid OPERATOR(pg_catalog.>) 0)) AS column_remarks,"
+          + " (SELECT pg_catalog.count(*) FROM pg_catalog.pg_default_acl da"
+          + " WHERE (da.defaclobjtype OPERATOR(pg_catalog.=) 'r')"
+          + " AND ((da.defaclnamespace OPERATOR(pg_catalog.=) CAST(0 AS pg_catalog.oid))"
+          + " OR (da.defaclnamespace OPERATOR(pg_catalog.=) c.relnamespace))) AS default_privileges"
           + " FROM pg_catalog.pg_class c"
           + " JOIN pg_catalog.pg_namespace n ON (n.oid OPERATOR(pg_catalog.=) c.relnamespace)"
           + " JOIN pg_catalog.pg_roles o ON (o.oid OPERATOR(pg_catalog.=) c.relowner)"
@@ -276,7 +327,10 @@ final class PlannerStatistics {
   record ExpressionIndex(long relid, String name, String root, String exprs) {}
 
   /** One extended-statistics object on a family member, with the attnums it covers. */
-  record ExtendedStatistics(long relid, String name, Set<Integer> attnums) {}
+  record ExtendedStatistics(long relid, String name, Set<Integer> attnums, String exprs) {}
+
+  /** What a stored expression tree calls: function oids and operator oids. */
+  record Calls(Set<Long> functions, Set<Long> operators) {}
 
   /** A stored expression tree's {@code Var} node: the attnum of the column it reads. */
   private static final Pattern VAR = Pattern.compile("\\{VAR :varno (\\d+) :varattno (-?\\d+) ");
@@ -308,6 +362,60 @@ final class PlannerStatistics {
     return out;
   }
 
+  private static final Pattern FUNC = Pattern.compile("\\{FUNCEXPR :funcid (\\d+) ");
+
+  private static final Pattern FUNC_TOKEN = Pattern.compile("\\{FUNCEXPR ");
+
+  private static final Pattern OP =
+      Pattern.compile(
+          "\\{(?:OPEXPR|DISTINCTEXPR|NULLIFEXPR|SCALARARRAYOPEXPR) :opno (\\d+) :opfuncid (\\d+) ");
+
+  private static final Pattern OP_TOKEN =
+      Pattern.compile("\\{(?:OPEXPR|DISTINCTEXPR|NULLIFEXPR|SCALARARRAYOPEXPR) ");
+
+  /**
+   * The functions and operators a stored expression tree calls (C-24-4): a function body is opaque
+   * to the {@code Var} scan, so what it calls is the other half of the reading. Same rule as {@link
+   * #referencedAttnums}: every call node must parse, or the tree is unverifiable.
+   */
+  static Calls calls(String tree) {
+    var functions = new LinkedHashSet<Long>();
+    var operators = new LinkedHashSet<Long>();
+    if (tree == null) {
+      return new Calls(functions, operators);
+    }
+    int parsed = 0;
+    Matcher f = FUNC.matcher(tree);
+    while (f.find()) {
+      functions.add(Long.parseLong(f.group(1)));
+      parsed++;
+    }
+    Matcher o = OP.matcher(tree);
+    while (o.find()) {
+      operators.add(Long.parseLong(o.group(1)));
+      long code = Long.parseLong(o.group(2));
+      if (code != 0) {
+        functions.add(code);
+      }
+      parsed++;
+    }
+    int tokens = count(FUNC_TOKEN, tree) + count(OP_TOKEN, tree);
+    if (tokens != parsed) {
+      throw new IllegalArgumentException(
+          tokens + " call nodes in a stored expression, " + parsed + " of them readable");
+    }
+    return new Calls(functions, operators);
+  }
+
+  private static int count(Pattern p, String tree) {
+    int n = 0;
+    Matcher m = p.matcher(tree);
+    while (m.find()) {
+      n++;
+    }
+    return n;
+  }
+
   /** A space-separated list of attnums, as {@code int2vector} and {@code string_agg} print. */
   static Set<Integer> attnums(String list) {
     var out = new LinkedHashSet<Integer>();
@@ -334,6 +442,11 @@ final class PlannerStatistics {
    */
   static Optional<String> check(Connection c, Target target, long root, List<Long> family)
       throws SQLException {
+    return withPinnedPath(c, () -> checkPinned(c, target, root, family));
+  }
+
+  private static Optional<String> checkPinned(
+      Connection c, Target target, long root, List<Long> family) throws SQLException {
     var blind = new ArrayList<Column>();
     for (Column col : target.columns()) {
       if (MappingAdmission.BLIND_INDEX.equals(col.role())) {
@@ -349,6 +462,7 @@ final class PlannerStatistics {
     }
     List<ExpressionIndex> indexes = indexes(c, family);
     List<ExtendedStatistics> extended = extended(c, family);
+    refuseOpaqueExpressions(c, family, indexes, extended);
 
     var findings = new ArrayList<Finding>();
     for (Column col : blind) {
@@ -450,13 +564,104 @@ final class PlannerStatistics {
               new ExtendedStatistics(
                   rs.getLong("stxrelid"),
                   rs.getString("nsp") + "." + rs.getString("name"),
-                  covered));
+                  covered,
+                  rs.getString("exprs")));
         }
       }
     } finally {
       oids.free();
     }
     return out;
+  }
+
+  /**
+   * C-24-4: an expression index, an expression in extended statistics, or a stored generated column
+   * on a family member that calls a function or operator outside {@code pg_catalog} stores
+   * statistics of whatever that function reads, which no catalogue read can see. Unverifiable is
+   * not clean: {@code SHRED-SCHEMA-005}, naming the object and what it calls.
+   */
+  private static void refuseOpaqueExpressions(
+      Connection c,
+      List<Long> family,
+      List<ExpressionIndex> indexes,
+      List<ExtendedStatistics> extended)
+      throws SQLException {
+    var trees = new LinkedHashMap<String, String>();
+    for (ExpressionIndex index : indexes) {
+      trees.put("expression index " + index.name(), index.exprs());
+    }
+    for (ExtendedStatistics stats : extended) {
+      if (stats.exprs() != null) {
+        trees.put("extended statistics " + stats.name(), stats.exprs());
+      }
+    }
+    Array oids = c.createArrayOf("int8", family.toArray(new Long[0]));
+    try (PreparedStatement ps = c.prepareStatement(GENERATED_SQL)) {
+      ps.setArray(1, oids);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          trees.put("stored generated column " + rs.getString("col"), rs.getString("exprs"));
+        }
+      }
+    } finally {
+      oids.free();
+    }
+    for (var tree : trees.entrySet()) {
+      Calls calls;
+      try {
+        calls = calls(tree.getValue());
+      } catch (IllegalArgumentException e) {
+        throw opaque(
+            tree.getKey(), "an expression this module could not read (" + e.getMessage() + ")", e);
+      }
+      List<String> foreign = new ArrayList<>(foreign(c, false, calls.functions()));
+      for (String op : foreign(c, true, calls.operators())) {
+        foreign.add("operator " + op);
+      }
+      if (!foreign.isEmpty()) {
+        throw opaque(
+            tree.getKey(),
+            String.join(", ", foreign)
+                + (foreign.size() == 1 ? ", which is" : ", which are")
+                + " outside pg_catalog",
+            null);
+      }
+    }
+  }
+
+  private static List<String> foreign(Connection c, boolean operators, Set<Long> oids)
+      throws SQLException {
+    var out = new ArrayList<String>();
+    if (oids.isEmpty()) {
+      return out;
+    }
+    Array array = c.createArrayOf("int8", oids.toArray(new Long[0]));
+    try (PreparedStatement ps =
+        c.prepareStatement(operators ? FOREIGN_OPERATORS_SQL : FOREIGN_FUNCTIONS_SQL)) {
+      ps.setArray(1, array);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          out.add(rs.getString("name"));
+        }
+      }
+    } finally {
+      array.free();
+    }
+    return out;
+  }
+
+  private static ShreddingException opaque(String object, String calls, Throwable cause) {
+    return new ShreddingException(
+        ErrorCodes.SCHEMA_UNVERIFIABLE,
+        "shredding: "
+            + object
+            + " on a blind-indexed table calls "
+            + calls
+            + ". Its statistics hold whatever that function reads, which this module cannot see,"
+            + " so it cannot tell whether they hold a blind-index column. Unverifiable is not"
+            + " clean, so this is a refusal. Drop it, or replace the function by a pg_catalog"
+            + " expression.",
+        cause);
   }
 
   private static void refuseIfHidden(Carrier carrier) {
@@ -576,6 +781,66 @@ final class PlannerStatistics {
 
   // ------------------------------------------------------------------------------ message
 
+  /** One piece of work on the connection. */
+  @FunctionalInterface
+  interface PathWork<T> {
+    T run() throws SQLException;
+  }
+
+  /**
+   * C-24-2: runs {@code work} with {@code search_path} pinned to {@code pg_catalog, pg_temp}, so
+   * every name the server deparses ({@code pg_get_viewdef}, {@code pg_get_expr}, {@code
+   * format_type}, {@code pg_describe_object}) comes back qualified unless it is {@code
+   * pg_catalog}'s. A definition deparsed on the application's own path prints names relative to
+   * that path, and the operator who runs the printed remedy in another session re-binds them: the
+   * view over another table, the policy calling another function. The pin is transaction-local and
+   * read back; on an auto-commit connection a transaction is opened and rolled back, inside one the
+   * arrived path is restored and read back (the erasure that called this is refused anyway).
+   */
+  static <T> T withPinnedPath(Connection c, PathWork<T> work) throws SQLException {
+    boolean auto = c.getAutoCommit();
+    String arrived = readPath(c);
+    if (auto) {
+      c.setAutoCommit(false);
+    }
+    boolean done = false;
+    try {
+      setPath(c, JdbcSupport.PINNED_PATH);
+      T result = work.run();
+      done = true;
+      return result;
+    } finally {
+      if (auto) {
+        c.rollback();
+        c.setAutoCommit(true);
+      } else if (done) {
+        setPath(c, arrived);
+      }
+    }
+  }
+
+  private static String readPath(Connection c) throws SQLException {
+    try (PreparedStatement ps = c.prepareStatement(READ_PATH_SQL);
+        ResultSet rs = ps.executeQuery()) {
+      if (!rs.next()) {
+        throw new SQLException("current_setting returned no row", "XX000");
+      }
+      return rs.getString(1);
+    }
+  }
+
+  private static void setPath(Connection c, String path) throws SQLException {
+    try (PreparedStatement ps = c.prepareStatement(SET_PATH_SQL)) {
+      ps.setString(1, path);
+      ps.execute();
+    }
+    String now = readPath(c);
+    if (!path.equals(now)) {
+      throw new SQLException(
+          "search_path read back as \"" + now + "\" after setting \"" + path + "\"", "XX000");
+    }
+  }
+
   private static final String WHY =
       " Statistics store sampled values of the column (most common values, histogram bounds); any"
           + " role with SELECT on the table reads them from pg_stats, and an erasure does not"
@@ -619,23 +884,38 @@ final class PlannerStatistics {
       }
     }
     if (!named.isEmpty()) {
-      out.append(
+      // The named branch still prints what it can run: SET STATISTICS 0 on the column and on
+      // every stored generated column computed from it, which needs no retyping. Only clearing
+      // the rows already stored needs a statement this module does not generate.
+      var zero = new StringBuilder();
+      var cleared = new ArrayList<String>();
+      for (Finding f : retyped) {
+        for (Carrier k : f.carriers()) {
+          if (k.root()) {
+            zero.append(" ALTER TABLE ")
+                .append(k.relation())
+                .append(" ALTER COLUMN ")
+                .append(k.column())
+                .append(" SET STATISTICS 0;");
+            cleared.add(k.qualified());
+          }
+        }
+      }
+      return out.append(
               " Objects that depend on the column and are not re-created by a generated"
                   + " statement: ")
           .append(String.join("; ", named.keySet()))
+          .append(". Clear the statistics without retyping. As the table owner run: SET")
+          .append(" search_path = pg_catalog, pg_temp;")
+          .append(zero)
+          .append(" The rows already stored for ")
+          .append(String.join(", ", cleared))
           .append(
-              ". Clear the statistics instead: on PostgreSQL 18 or later, as the table owner, SET"
-                  + " STATISTICS 0 then pg_catalog.pg_clear_attribute_stats for the column; on 16"
-                  + " or 17, a superuser deletes the column's pg_statistic rows after SET"
-                  + " STATISTICS 0.");
-      if (!generated.isEmpty()) {
-        out.append(" Do the same for the stored generated column")
-            .append(generated.size() == 1 ? " " : "s ")
-            .append(String.join(", ", generated))
-            .append(generated.size() == 1 ? ", which holds" : ", which hold")
-            .append(" values computed from it.");
-      }
-      return out.append(STEP).toString();
+              " then need a statement this module does not generate: on PostgreSQL 18 or later,"
+                  + " as the table owner, pg_catalog.pg_clear_attribute_stats for each column; on"
+                  + " 16 or 17, a superuser deletes their pg_statistic rows.")
+          .append(STEP)
+          .toString();
     }
     var alter = new StringBuilder();
     for (Finding f : retyped) {
@@ -661,10 +941,13 @@ final class PlannerStatistics {
           .append(';');
     }
     if (views.isEmpty() && policies.isEmpty()) {
-      out.append(" As the table owner run: SET lock_timeout = '5s';").append(alter);
+      out.append(
+              " As the table owner run: SET search_path = pg_catalog, pg_temp; SET lock_timeout ="
+                  + " '5s';")
+          .append(alter);
       out.append(
           retyped.size() == 1
-              ? " The second statement deletes the statistics already stored; it does not rewrite"
+              ? " The TYPE statement deletes the statistics already stored; it does not rewrite"
                   + " the table but takes an ACCESS EXCLUSIVE lock briefly."
               : " Each TYPE statement deletes the statistics already stored for its column; it"
                   + " does not rewrite the table but takes an ACCESS EXCLUSIVE lock briefly.");
@@ -675,7 +958,9 @@ final class PlannerStatistics {
     policies.values().forEach(p -> listed.add("policy " + p.name() + " on " + p.relation()));
     out.append(" Objects that depend on the column and must be dropped and re-created with it: ")
         .append(String.join("; ", listed))
-        .append(". As the table owner run: BEGIN; SET LOCAL lock_timeout = '5s';");
+        .append(
+            ". As the table owner run: BEGIN; SET LOCAL search_path = pg_catalog, pg_temp; SET LOCAL"
+                + " lock_timeout = '5s';");
     var recreate = new StringBuilder();
     for (var view : views.entrySet()) {
       out.append(" DROP VIEW ").append(view.getKey()).append(';');
@@ -783,6 +1068,12 @@ final class PlannerStatistics {
         }
         if (rs.getLong("column_acls") > 0 || rs.getLong("column_remarks") > 0) {
           return Optional.of(" (it has column privileges or column comments)");
+        }
+        // C-24-3: CREATE VIEW applies the creating role's default privileges, so a re-created
+        // view could carry grants the original never had. Any default for relations, global or
+        // for the view's schema and whoever it belongs to, names the view instead.
+        if (rs.getLong("default_privileges") > 0) {
+          return Optional.of(" (default privileges would change its grants)");
         }
         return Optional.empty();
       }

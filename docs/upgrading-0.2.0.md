@@ -257,13 +257,17 @@ statistics, so this step can run days before the 0.2.0 deploy with 0.1.1 live. T
 for a column with no dependents they are:
 
 ```sql
+SET search_path = pg_catalog, pg_temp;
 SET lock_timeout = '5s';
 ALTER TABLE public.customer ALTER COLUMN email_idx SET STATISTICS 0;
 ALTER TABLE public.customer ALTER COLUMN email_idx TYPE bytea USING email_idx;
 ```
 
-The first stops every future `ANALYZE` from sampling the column; the second deletes the statistics
-already stored. Measured on PostgreSQL 16 and 17: the second does not rewrite the table or its plain
+The pinned `search_path` makes every name in the statements mean what the message meant: the
+message reads every definition with the same path, so each name outside `pg_catalog` is printed
+schema-qualified and cannot re-bind to a same-named table or function on your session's path. The
+`SET STATISTICS 0` statement stops every future `ANALYZE` from sampling the column; the `TYPE`
+statement deletes the statistics already stored. Measured on PostgreSQL 16 and 17: the second does not rewrite the table or its plain
 indexes, and with the target at 0 no rows come back across a restart, `ANALYZE`, `ANALYZE <table>
 (<column>)` and `VACUUM ANALYZE`. Each `ALTER TABLE` takes an `ACCESS EXCLUSIVE` lock: it waits for
 running queries on the table and blocks new ones behind it, hence the `lock_timeout`; on a timeout,
@@ -283,12 +287,17 @@ child. Then:
 startup refusal then prints one transaction that drops them, runs the two statements and re-creates
 them from their catalogue definitions (`pg_get_viewdef`, the view's options, owner, grants and
 comment; the policy's command, roles, `USING` and `WITH CHECK`). One transaction, so the table is
-never readable without its policies, and any failure rolls everything back.
+never readable without its policies, and any failure rolls everything back; it opens with
+`SET LOCAL search_path = pg_catalog, pg_temp` for the reason above. A view is not re-created, but
+named (below), when default privileges for relations exist in its schema or globally: `CREATE VIEW`
+would apply them, and the view would carry grants it never had.
 
 **When the column has a dependent the message does not re-create** - a stored generated column, a
 view other views depend on, a view with triggers, rules, column privileges or column comments, a
-materialized view, a rule, a trigger with a column list or `WHEN` clause, a SQL-standard function
-body - clear the statistics without retyping:
+view under default privileges, a materialized view, a rule, a trigger with a column list or `WHEN`
+clause, a SQL-standard function body - the message prints the `SET STATISTICS 0` statements for the column and for each stored
+generated column computed from it (they need no retyping), names the dependents, and leaves the
+rows already stored to one of these:
 
 - **PostgreSQL 18 and later**, as the table owner, after `SET STATISTICS 0` on the column and on
   each stored generated column computed from it:
