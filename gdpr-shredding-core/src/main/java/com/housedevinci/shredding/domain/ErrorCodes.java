@@ -194,6 +194,16 @@ public final class ErrorCodes {
   public static final String MAPPING_INADMISSIBLE = "SHRED-SCHEMA-009";
 
   /**
+   * RC-7: an erasure could not take the table lock mapping admission needs, because another session
+   * held a conflicting lock for longer than the connection's {@code lock_timeout} (SQLState 55P03)
+   * or the database chose this transaction as a deadlock victim (40P01). Nothing was destroyed,
+   * cleared or recorded: the transaction rolled back whole. It says nothing about the key store,
+   * and nothing about the mapping. Retry once the other session (another erasure, a manual {@code
+   * VACUUM}, {@code ANALYZE} or {@code CREATE INDEX CONCURRENTLY}) has finished.
+   */
+  public static final String ERASURE_LOCK_WAIT = "SHRED-ERASURE-LOCK-WAIT";
+
+  /**
    * C-20: a Spring Data repository call was bracketed, but the module could not establish that
    * every {@code EntityManagerFactory} bean in the application is the one instance {@code
    * ShreddingIntegrator} is wired to. A bracket that cannot tell which Hibernate session it is
