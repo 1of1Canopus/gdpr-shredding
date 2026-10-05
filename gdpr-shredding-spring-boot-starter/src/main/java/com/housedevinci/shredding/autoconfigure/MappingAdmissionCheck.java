@@ -55,7 +55,7 @@ public final class MappingAdmissionCheck {
     var copies = new ArrayList<String>();
     try (Connection c = gate.dataSource().getConnection()) {
       for (MappingAdmission.Target target : targets) {
-        switch (MappingAdmission.verdict(c, target)) {
+        switch (MappingAdmission.verdict(c, target, model.copySignatures())) {
           case MappingAdmission.Admitted admitted ->
               admitted.warnings().forEach(w -> log.warn("shredding: {}", w));
           case MappingAdmission.Absent absent ->

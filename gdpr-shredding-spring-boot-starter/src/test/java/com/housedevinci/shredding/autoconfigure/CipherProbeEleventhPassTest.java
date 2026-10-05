@@ -17,7 +17,6 @@ import com.housedevinci.shredding.domain.SubjectId;
 import com.housedevinci.shredding.domain.TenantId;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
-import java.util.concurrent.CompletableFuture;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.SpringBootConfiguration;
@@ -192,41 +191,35 @@ class CipherProbeEleventhPassTest {
       String victim = "conc-victim-" + System.nanoTime();
       String bystander = "conc-other-" + System.nanoTime();
       notes.saveAndFlush(new OwnedNote(victim, "org-a", "victim@example.test"));
-      sql(
-          "create or replace function shredding_probe_slow11() returns trigger as $$ begin"
-              + " perform pg_sleep(2); return null; end; $$ language plpgsql");
-      sql(
-          "create trigger shredding_probe_slow11_trg after update on owned_note"
-              + " for each row execute function shredding_probe_slow11()");
-      try {
-        var erasure =
-            CompletableFuture.supplyAsync(
-                () -> {
-                  try {
-                    erasures.erase(
-                        new ErasureRequest(
-                            TenantId.of("org-a"), SubjectId.of(victim), "dpo", "art 17"));
-                    return "COMPLETED";
-                  } catch (ShreddingException e) {
-                    return e.code();
-                  }
-                });
-        Thread.sleep(700);
-        sql(
-            "insert into owned_note (owner_id, tenant_id, email, email_idx) values ('"
-                + bystander
-                + "', 'org-a', null, '\\x0102')");
+      // The erasure is paused after its UPDATE took its snapshot by a row lock (LateRow), not by a
+      // pg_sleep trigger, which admission refuses since audit-table coverage.
+      String outcome =
+          LateRow.during(
+              POSTGRES.getJdbcUrl(),
+              POSTGRES.getUsername(),
+              POSTGRES.getPassword(),
+              "SELECT 1 FROM owned_note WHERE owner_id = '" + victim + "' FOR UPDATE",
+              "insert into owned_note (owner_id, tenant_id, email, email_idx) values ('"
+                  + bystander
+                  + "', 'org-a', null, '\\x0102')",
+              () -> {
+                try {
+                  erasures.erase(
+                      new ErasureRequest(
+                          TenantId.of("org-a"), SubjectId.of(victim), "dpo", "art 17"));
+                  return "COMPLETED";
+                } catch (ShreddingException e) {
+                  return e.code();
+                }
+              });
 
-        assertThat(erasure.get())
-            .describedAs("another subject's concurrent row refused this subject's erasure")
-            .isEqualTo("COMPLETED");
-        assertThat(indexes(ctx, victim)).isZero();
-        assertThat(indexes(ctx, bystander))
-            .describedAs("the bystander's index was cleared by someone else's erasure")
-            .isEqualTo(1);
-      } finally {
-        sql("drop trigger if exists shredding_probe_slow11_trg on owned_note");
-      }
+      assertThat(outcome)
+          .describedAs("another subject's concurrent row refused this subject's erasure")
+          .isEqualTo("COMPLETED");
+      assertThat(indexes(ctx, victim)).isZero();
+      assertThat(indexes(ctx, bystander))
+          .describedAs("the bystander's index was cleared by someone else's erasure")
+          .isEqualTo(1);
     }
   }
 

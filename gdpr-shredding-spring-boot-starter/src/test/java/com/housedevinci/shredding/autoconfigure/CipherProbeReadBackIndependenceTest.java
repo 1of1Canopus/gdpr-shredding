@@ -14,7 +14,6 @@ import com.housedevinci.shredding.domain.TenantId;
 import jakarta.persistence.EntityManagerFactory;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
-import java.util.concurrent.CompletableFuture;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.SpringBootConfiguration;
@@ -206,37 +205,31 @@ class CipherProbeReadBackIndependenceTest {
       var erasures = ctx.getBean(ErasureService.class);
       String victim = "late-" + System.nanoTime();
       notes.saveAndFlush(new OwnedNote(victim, "org-a", "victim@example.test"));
-      sql(
-          "create or replace function shredding_probe_slow() returns trigger as $$ begin"
-              + " perform pg_sleep(2); return null; end; $$ language plpgsql");
-      sql(
-          "create trigger shredding_probe_slow_trg after update on owned_note"
-              + " for each row execute function shredding_probe_slow()");
-      try {
-        var erasure =
-            CompletableFuture.supplyAsync(
-                () -> {
-                  try {
-                    erasures.erase(
-                        new ErasureRequest(
-                            TenantId.of("org-a"), SubjectId.of(victim), "dpo", "art 17"));
-                    return "COMPLETED";
-                  } catch (ShreddingException e) {
-                    return e.code();
-                  }
-                });
-        Thread.sleep(700);
-        // Committed on its own connection, after the UPDATE's snapshot.
-        sql(
-            "insert into owned_note (owner_id, tenant_id, email, email_idx) values ('"
-                + victim
-                + "', 'org-a', null, '\\x0102')");
+      // Committed on its own connection, after the UPDATE's snapshot. The erasure is paused by a
+      // row lock (LateRow), not by a pg_sleep trigger, which admission refuses since audit-table
+      // coverage.
+      String outcome =
+          LateRow.during(
+              POSTGRES.getJdbcUrl(),
+              POSTGRES.getUsername(),
+              POSTGRES.getPassword(),
+              "SELECT 1 FROM owned_note WHERE owner_id = '" + victim + "' FOR UPDATE",
+              "insert into owned_note (owner_id, tenant_id, email, email_idx) values ('"
+                  + victim
+                  + "', 'org-a', null, '\\x0102')",
+              () -> {
+                try {
+                  erasures.erase(
+                      new ErasureRequest(
+                          TenantId.of("org-a"), SubjectId.of(victim), "dpo", "art 17"));
+                  return "COMPLETED";
+                } catch (ShreddingException e) {
+                  return e.code();
+                }
+              });
 
-        assertThat(erasure.get()).isEqualTo(ErrorCodes.ERASURE_INDEX_RESIDUAL);
-        assertThat(keys(ctx, victim)).describedAs("the key was destroyed anyway").isEqualTo(1);
-      } finally {
-        sql("drop trigger if exists shredding_probe_slow_trg on owned_note");
-      }
+      assertThat(outcome).isEqualTo(ErrorCodes.ERASURE_INDEX_RESIDUAL);
+      assertThat(keys(ctx, victim)).describedAs("the key was destroyed anyway").isEqualTo(1);
     }
   }
 

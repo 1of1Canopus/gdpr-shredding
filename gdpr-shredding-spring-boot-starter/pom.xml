@@ -41,6 +41,14 @@
       <artifactId>spring-boot-health</artifactId>
       <optional>true</optional>
     </dependency>
+    <!-- Optional: read only by EnversCopyCheck, and only when the application has Envers on its
+         classpath, to refuse an audit table that copies a blind-index column. Version managed by
+         the Spring Boot BOM (Hibernate 7.4.5, Apache-2.0). -->
+    <dependency>
+      <groupId>org.hibernate.orm</groupId>
+      <artifactId>hibernate-envers</artifactId>
+      <optional>true</optional>
+    </dependency>
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-configuration-processor</artifactId>
@@ -50,6 +58,11 @@
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.tngtech.archunit</groupId>
+      <artifactId>archunit-junit5</artifactId>
       <scope>test</scope>
     </dependency>
     <dependency>
