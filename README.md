@@ -110,6 +110,9 @@ what was destroyed, when, by whom, and the date the erasure is also complete in 
   `KEY_DESTROYED` (terminal) are different failures.
 - **An erasure nulls the subject's blind-index columns.** Not configurable: an index that survives
   keeps the erased subject searchable for ever.
+- **Planner statistics must be off on blind-index columns** (`ALTER TABLE ... ALTER COLUMN
+  <index column> SET STATISTICS 0`; upgrade step 3a). `pg_stats` keeps sampled index values that no
+  erasure removes, so a column that keeps them refuses startup and every erasure.
 - **The plaintext leak paths fail at startup**, not by convention: a second-level cached
   `@Shredded` entity, a converter that names the wrong field, a subject expression that reaches a
   bean or a static type, or a sample-looking master key are all startup failures.

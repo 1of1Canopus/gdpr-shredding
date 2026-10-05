@@ -703,7 +703,51 @@ support ticket or a PDF the application itself produced. Those are the applicati
 `PostErasureHook` is the seam for dealing with them - which is why a failed hook makes the erasure
 `PARTIAL` and never `COMPLETE`.
 
-### Mapping admission: what the erasure's three legs cannot see (SHRED-SCHEMA-009)
+### Planner statistics are a copy of the blind index (SHRED-SCHEMA-010)
+
+`ANALYZE` (autovacuum included) stores sampled values of every column in `pg_statistic`: most common
+values and histogram bounds. `pg_stats` shows them to any role with `SELECT` on the column, and an
+erasure's `UPDATE` does not touch them. Measured on PostgreSQL 16: the runtime role read 101 HMAC
+values of a blind-index column back from `pg_stats`, an erased one among them, after the erasure
+had cleared the row. `SET STATISTICS 0` alone stops future sampling and keeps the stored rows.
+
+So mapping admission reads, for each blind-index column over the table and every partition and
+inheritance child, each path by which statistics can exist, and refuses any of them with
+`SHRED-SCHEMA-010` at startup and before every erasure's first statement:
+
+- the column's statistics target is not 0 (PostgreSQL 16 stores the default as `-1`, 17 as `NULL`;
+  `NULL` is not 0);
+- `pg_stats` holds a row for it, `inherited` or not;
+- an expression index computes over it, read from the stored expression tree (`pg_index.indexprs`),
+  a whole-row reference included. A predicate-only partial index is admitted: PostgreSQL stores
+  statistics for index expressions only (measured: 0 rows on 16 and 17). A tree whose column
+  references the reader cannot parse is `SHRED-SCHEMA-005`, never "reads nothing";
+- an extended-statistics object covers it, by key or by expression (`pg_depend`; its data is
+  invisible to a non-owner, so the check reads the definition);
+- a stored generated column computed from it has any of the above. Measured on 16, 17 and 18: a
+  `GENERATED ALWAYS AS (lower(email_idx)) STORED` column gets its own `pg_stats` histogram of
+  derived values. A virtual generated column (18) stores nothing and cannot be given a target.
+
+A partition or child whose `pg_stats` rows the runtime role cannot see - no `SELECT` on the column,
+or row level security that applies to the role, both of which `pg_stats` filters on - is
+`SHRED-SCHEMA-005`.
+
+The verdict cannot change under an erasure: `ANALYZE`, `ALTER COLUMN ... SET STATISTICS`,
+`CREATE STATISTICS` and `CREATE INDEX CONCURRENTLY` take `SHARE UPDATE EXCLUSIVE` and `CREATE INDEX`
+takes `SHARE`, all of which conflict with the erasure's locks on the table and its descendants.
+
+Residuals, named:
+
+- **Values written as literals into catalogue definitions** - an index predicate, a `CHECK`, a
+  column default, a view's text - are operator-authored, never touched by an erasure, and not
+  scanned by this module. The predicate-only partial index is admitted on that basis.
+- **An expression index over a function that reads the column indirectly** (an immutable function
+  taking the row's identifier and looking the index up elsewhere) is not visible in the stored tree.
+  An immutable function that reads another relation is already outside what PostgreSQL guarantees.
+- **The superuser `pg_statistic` delete** that upgrade step 3a documents for 16 and 17 is the
+  operator's statement, not the module's; the module's re-read at the next startup is the control.
+
+
 
 The erasure's three legs - the blind-index `UPDATE`, the same-text read-back and the read-back
 Hibernate renders - are built independently, but they all ask the entity's relation the same

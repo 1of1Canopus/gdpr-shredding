@@ -431,13 +431,22 @@ abstract class PlannerStatisticsPostgresTest {
         owner,
         "ALTER TABLE app.s11b ALTER COLUMN email_idx SET STATISTICS 0",
         "ALTER TABLE app.s11b ALTER COLUMN email_low SET STATISTICS 0");
+    String index = attnum("app.s11b", "email_idx");
+    String derived = attnum("app.s11b", "email_low");
+    String scope =
+        "(starelid = 'app.s11b'::regclass AND staattnum = "
+            + index
+            + ") OR (starelid = 'app.s11b'::regclass AND staattnum = "
+            + derived
+            + ")";
+    assertThat(text(su, "SELECT pg_catalog.count(*) FROM pg_catalog.pg_statistic WHERE " + scope))
+        .isEqualTo("2");
     exec(
         su,
-        "BEGIN; DO $$ DECLARE n bigint; BEGIN DELETE FROM pg_catalog.pg_statistic s USING"
-            + " pg_catalog.pg_attribute a WHERE a.attrelid = s.starelid AND a.attnum = s.staattnum"
-            + " AND s.starelid = 'app.s11b'::regclass AND a.attname IN ('email_idx', 'email_low');"
-            + " GET DIAGNOSTICS n = ROW_COUNT; IF n <> 2 THEN RAISE EXCEPTION 'expected 2 rows,"
-            + " deleted %', n; END IF; END $$; COMMIT;");
+        "BEGIN; DO $$ DECLARE n bigint; BEGIN DELETE FROM pg_catalog.pg_statistic WHERE "
+            + scope
+            + "; GET DIAGNOSTICS n = ROW_COUNT; IF n <> 2 THEN RAISE EXCEPTION 'expected 2"
+            + " pg_statistic rows, deleted %', n; END IF; END $$; COMMIT;");
 
     analyze("app.s11b");
     assertThat(verdict("app.s11b")).isInstanceOf(Admitted.class);
@@ -540,6 +549,16 @@ abstract class PlannerStatisticsPostgresTest {
 
   private void zero(String table) {
     exec(owner, "ALTER TABLE " + table + " ALTER COLUMN email_idx SET STATISTICS 0");
+  }
+
+  private String attnum(String table, String column) {
+    return text(
+        su,
+        "SELECT attnum FROM pg_attribute WHERE attrelid = '"
+            + table
+            + "'::regclass AND attname = '"
+            + column
+            + "'");
   }
 
   private String stored(String table, String attnum) {
