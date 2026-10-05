@@ -408,7 +408,7 @@ failure inside this step, because the script's second build runs tests.
 
 Fix (fix pass, script): `scripts/verify-reproducible.sh` exits a distinct status (e.g. `3`) when an
 enforced artifact differs or is missing, and keeps its other non-zero exits for a failed build;
-grep its callers (`release.yml`, `ci.yml`, RELEASING) and confirm each still fails on any non-zero.
+grep its callers (`release.yml`, `ci.yml`, the release runbook) and confirm each still fails on any non-zero.
 In `probe_sources_jar_differs_from_a_build_that_actually_ran_tests`, map that status to WEAK with the
 `DIFFERS`/`MISSING` lines printed, any other non-zero to ERROR; relabel the step "build 1 skips
 tests, build 2 runs them". Add the internal probe to the fixer's probe set; it flips when the verdict
