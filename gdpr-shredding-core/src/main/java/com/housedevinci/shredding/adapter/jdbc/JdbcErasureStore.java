@@ -706,11 +706,14 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
       int end = start;
       int seen = 0;
       while (end < material.length() && seen < byteLength) {
+        // P-1: advance by code point, not by UTF-16 char. A character outside the BMP is a
+        // surrogate pair whose UTF-8 form (4 bytes) only exists for the pair; counting each half
+        // alone (1 byte each, as '?') loses the field boundary. Encoding side
+        // (ErasureChain.field) encodes the whole string, so this is the symmetric count.
+        int next = end + Character.charCount(material.codePointAt(end));
         seen +=
-            String.valueOf(material.charAt(end))
-                .getBytes(java.nio.charset.StandardCharsets.UTF_8)
-                .length;
-        end++;
+            material.substring(end, next).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        end = next;
       }
       fields.add(material.substring(start, end));
       i = end;
