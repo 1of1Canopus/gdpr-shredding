@@ -51,6 +51,9 @@
 # runs) - override with REPRODUCIBLE_SHA_FILE to put it somewhere that survives that
 # clean, e.g. $RUNNER_TEMP in CI.
 #
+# Exit status: 0 reproducible; 3 an enforced artifact DIFFERS or is MISSING between the two builds
+# (a verdict); any other non-zero is a build or tool failure (no verdict). Callers fail on any
+# non-zero; the probe suite tells the two apart (RC-12).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 SHA_FILE="${REPRODUCIBLE_SHA_FILE:-reproducible-sha256.txt}"
@@ -128,7 +131,7 @@ for f in "$WORK/one"/*.jar "$WORK/one"/*.pom; do
   other="$WORK/two/$name"
   if [ ! -e "$other" ]; then
     printf '%-56s %-8s %s\n' "$name" "MISSING" "-"
-    status=1
+    status=3
     continue
   fi
   a="$(shasum -a 256 "$f" | cut -d' ' -f1)"
@@ -146,7 +149,7 @@ for f in "$WORK/one"/*.jar "$WORK/one"/*.pom; do
         ;;
       *)
         printf '%-56s %-8s %s\n' "$name" "DIFFERS" "$a vs $b"
-        status=1
+        status=3
         ;;
     esac
   fi

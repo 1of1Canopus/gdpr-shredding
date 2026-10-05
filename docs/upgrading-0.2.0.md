@@ -155,7 +155,7 @@ Each erasure now takes `LOCK TABLE ... IN SHARE UPDATE EXCLUSIVE MODE` on every 
 the set of partitions and inheritance children cannot change between the check and the `UPDATE`.
 It does not block your application's reads or writes. It does make two erasures of the same table
 run one after the other, and an erasure waits behind a manual `VACUUM`, `ANALYZE` or
-`CREATE INDEX CONCURRENTLY` on that table. An erasure also waits behind an autovacuum run to prevent transaction ID wraparound, which, unlike an ordinary autovacuum, does not give way to a waiting lock, for as long as that run takes; while it waits it holds the subject's advisory lock and key rows, and later erasures of the same table queue behind it. Set a `lock_timeout` on the erasure's connection if that wait must be bounded.
+`CREATE INDEX CONCURRENTLY` on that table. An erasure also waits behind an autovacuum run to prevent transaction ID wraparound, which, unlike an ordinary autovacuum, does not give way to a waiting lock, for as long as that run takes; while it waits it holds the subject's advisory lock and key rows, and later erasures of the same table queue behind it. Set a `lock_timeout` on the erasure's connection if that wait must be bounded. When that bound fires, or the database picks the erasure as a deadlock victim, the erasure is refused with `SHRED-ERASURE-LOCK-WAIT` (SQLState `55P03` or `40P01`): the lock wait was exceeded, the erasure was not performed, nothing was destroyed, cleared or recorded, and the call can be retried once the other session has finished. It is not a key-store outage.
 
 ## Steps
 
@@ -396,6 +396,7 @@ no WARN. If instead you get:
 | `SHRED-SCHEMA-007` | a privilege the application needs is missing. Step 5 is incomplete |
 | `SHRED-SCHEMA-010` | a blind-index column keeps planner statistics (its target, stored rows, an expression index, extended statistics, or a generated column computed from it). Step 3a did not run, or not on every column; the message names each fact and prints the remedy |
 | `SHRED-CONFIG-001` naming an entity and a schema | a `@Shredded` entity's mapping names no schema. See "Every installation: name the schema your entities live in" above |
+| `SHRED-SCHEMA-009` | mapping admission refused a `@Shredded` entity's table or one of its columns. The message names the entity, the column and the catalogue fact. The change most installations meet is the column-type rule, a tenant or subject column that is not `text`, `varchar` or `char(n)` (a `uuid` subject, for one); see "Every installation: what your entity tables must be" above. The refusal reads, with your entity and column in place of the angle brackets: `@Shredded entity <entity>: the subject column <schema>.<table>.<column> is of type uuid. This module compares tenant and subject columns against the request's string, and only text, varchar and char(n) compare that string as written: another type parses it (a uuid or a number, so one spelling of a subject clears another subject's index), truncates it (name, "char"), lets a cast the application's role owns decide the comparison (an enum), or has no comparison with a string at all. Map the tenant and subject columns as text, varchar or char(n). A UUID or numeric subject id is stored in a text column.` The remedy for a `uuid` column is `ALTER TABLE <schema>.<table> ALTER COLUMN <column> TYPE text USING <column>::text;`, and the mapping then stores the id as a string |
 
 Every message lists **every** problem it found, so one round of fixes is enough.
 
@@ -430,6 +431,44 @@ ownership of one table when owning one guard function is enough to replace every
 
 ## Rolling back
 
-0.1.1 ignores both new properties and boots as before. The only schema changes 0.2.0 makes are the
-guard-function bodies and `ENABLE ALWAYS`, and 0.1.1 tolerates both, so a rollback is an
-application rollback with nothing to undo in the database.
+**0.1.1 cannot run against the schema these steps produce.** 0.1.1 runs its bundled schema script with
+the application's own credentials at every boot, with no property to skip it. After steps 2 and 4 the
+application role owns none of the tables or guard functions and holds no `CREATE` on the schema, so
+that script fails (`permission denied for schema ...`) and the rolled-back application does not
+start. Rolling back the jar alone is therefore not enough. Choose one of two ways.
+
+**A. Boot 0.1.1 as the owner role.** Give the rolled-back application the owner role's credentials
+(`spring.datasource.username` / `password`) for the time it runs 0.1.1. That role owns the objects
+and the schema, so the boot script runs and no statement has to be undone; going forward again is
+switching the credentials back. The role must be able to read and write your own business tables;
+a role that cannot is the reason to use B.
+
+**B. Undo steps 2 and 4 for the application role.** As the owner role or a superuser:
+
+```sql
+ALTER TABLE    shredding_data_key                     OWNER TO <application role>;
+ALTER TABLE    shredding_erased_subject               OWNER TO <application role>;
+ALTER TABLE    shredding_erasure                      OWNER TO <application role>;
+ALTER TABLE    shredding_erasure_anchor               OWNER TO <application role>;
+ALTER FUNCTION shredding_erasure_append_only()        OWNER TO <application role>;
+ALTER FUNCTION shredding_erasure_anchor_monotonic()   OWNER TO <application role>;
+ALTER FUNCTION shredding_erasure_anchor_append_only() OWNER TO <application role>;
+GRANT  CREATE ON SCHEMA <schema> TO <application role>;
+```
+
+(If step 2 also moved the schema to the owner role, `ALTER SCHEMA <schema> OWNER TO <application
+role>` instead of the last line works too; the test does not run that alternative.) Variant A, and
+the seven `ALTER` statements plus the `GRANT` of B, were executed against a 0.1.x install that had
+been upgraded by steps 2 to 5; 0.1.1's boot script then ran to completion.
+
+**What both variants cost.** In both, the whole application runs as a role that can replace the
+guards: 0.1.1 has one `DataSource`, so under A every query the application runs, and anything that
+can make it run SQL, runs as the owner of the four tables, the three guard functions and the schema,
+and under B the application role owns them again. In either case that role can disable the
+append-only trigger or replace a guard function, and delete from `shredding_erasure`, so the
+append-only erasure log and the erasure tombstone are advisory for as long as 0.1.1 runs. Record that
+in your processing documentation for that window, and do not present the log as append-only to a
+supervisory authority in it. The variants differ only in effort: A has no statement to undo, B
+returns ownership with the statements above. Neither variant needs the 0.2.0 properties: 0.1.1 ignores them, and
+tolerates the changed guard bodies, `ENABLE ALWAYS`, a column already changed to `text`, and a
+schema already named in a mapping. To go forward again, repeat steps 2 to 7.

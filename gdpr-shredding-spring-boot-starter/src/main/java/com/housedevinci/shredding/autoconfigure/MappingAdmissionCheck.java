@@ -84,7 +84,8 @@ public final class MappingAdmissionCheck {
       throw new ShreddingException(
           ErrorCodes.MAPPING_INADMISSIBLE,
           String.join(" ", refusals)
-              + " See docs/upgrading-0.2.0.md, \"Mapping admission\"."
+              + " See docs/upgrading-0.2.0.md, \"Every installation: what your entity tables must"
+              + " be\"."
               + (copies.isEmpty()
                   ? ""
                   : " Also refused, with "
