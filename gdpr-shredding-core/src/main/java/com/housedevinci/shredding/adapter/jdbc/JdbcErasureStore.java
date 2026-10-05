@@ -104,25 +104,31 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
           // CIPHER-03: the (tenant, subject) advisory lock first, ahead of the FOR UPDATE. It is
           // what makes a write racing the *first* mint for a subject line up behind (or in front
           // of) this erasure instead of both observing "no row, no tombstone" at once.
-          JdbcSupport.lockSubject(c, tenant, subject);
+          step("the subject's advisory lock", () -> JdbcSupport.lockSubject(c, tenant, subject));
           // FOR UPDATE next: a concurrent write that is about to encrypt under this key blocks
           // here and then finds the row gone (control 6, probe on the erasure/write race).
-          List<Integer> versions = lockKeyRows(c, tenant, subject);
-          if (versions.isEmpty() && alreadyErased(c, tenant, subject)) {
+          List<Integer> versions =
+              step("the subject's key rows", () -> lockKeyRows(c, tenant, subject));
+          if (versions.isEmpty()
+              && step("the erasure tombstone", () -> alreadyErased(c, tenant, subject))) {
             // Idempotent: a repeat erasure writes no second record and claims nothing new.
             return new Outcome(true, 0, 0, null);
           }
-          int cleared = clearBlindIndexes(c, tenant, subject);
-          int destroyed = deleteKeyRows(c, tenant, subject);
-          tombstone(c, tenant, subject);
-          ErasureRecord record = appendInTransaction(c, factory.create(destroyed, cleared));
+          int cleared = step("the blind-index update", () -> clearBlindIndexes(c, tenant, subject));
+          int destroyed = step("the key-row delete", () -> deleteKeyRows(c, tenant, subject));
+          step("the erasure tombstone", () -> tombstone(c, tenant, subject));
+          ErasureRecord record =
+              step(
+                  "the erasure-log append",
+                  () -> appendInTransaction(c, factory.create(destroyed, cleared)));
           return new Outcome(false, destroyed, cleared, record);
         });
   }
 
   @Override
   public ErasureRecord append(ErasureRecord record) {
-    return JdbcSupport.inTransaction(dataSource, c -> appendInTransaction(c, record));
+    return JdbcSupport.inTransaction(
+        dataSource, c -> step("the erasure-log append", () -> appendInTransaction(c, record)));
   }
 
   private ErasureRecord appendInTransaction(Connection c, ErasureRecord record)
@@ -352,6 +358,15 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
       ps.execute();
     } catch (SQLException e) {
       String state = String.valueOf(e.getSQLState());
+      if (isLockWait(e)) {
+        throw lockWait(
+            "the table lock on "
+                + target.table()
+                + " (wanted: "
+                + sql.substring(sql.indexOf(" IN ") + 4)
+                + ")",
+            e);
+      }
       String why =
           switch (state) {
             case "42P01" -> "does not exist";
@@ -372,6 +387,66 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
               + "). Create the table, map the entity to an ordinary table, or grant the runtime"
               + " role SELECT and UPDATE on it (SECURITY-NOTES.md, \"Database roles\").");
     }
+  }
+
+  /** One statement of the erasure transaction, so a lock wait inside it can be named (RC-10). */
+  @FunctionalInterface
+  private interface Step<T> {
+    T run() throws SQLException;
+  }
+
+  @FunctionalInterface
+  private interface VoidStep {
+    void run() throws SQLException;
+  }
+
+  private static <T> T step(String what, Step<T> step) throws SQLException {
+    try {
+      return step.run();
+    } catch (SQLException e) {
+      if (isLockWait(e)) {
+        throw lockWait(what, e);
+      }
+      throw e;
+    }
+  }
+
+  private static void step(String what, VoidStep step) throws SQLException {
+    step(
+        what,
+        () -> {
+          step.run();
+          return null;
+        });
+  }
+
+  private static boolean isLockWait(SQLException e) {
+    return "55P03".equals(e.getSQLState()) || "40P01".equals(e.getSQLState());
+  }
+
+  /**
+   * RC-7, RC-10: a {@code lock_timeout} that fired (55P03) or a deadlock this transaction lost
+   * (40P01) at any wait of the erasure. The transaction rolls back whole, so nothing is destroyed,
+   * cleared or recorded, and the caller is not sent to the key store.
+   */
+  private static ShreddingException lockWait(String what, SQLException e) {
+    String state = e.getSQLState();
+    return new ShreddingException(
+        ErrorCodes.ERASURE_LOCK_WAIT,
+        "shredding: the erasure waited on "
+            + what
+            + " ("
+            + ("55P03".equals(state)
+                ? "lock wait exceeded the connection's lock_timeout"
+                : "deadlock detected, this transaction was chosen as the victim")
+            + ", SQLState "
+            + state
+            + "). The erasure was not performed: no key is destroyed, no blind index is touched"
+            + " and no record is appended. Another session holds a conflicting lock (another"
+            + " erasure, an application transaction open on the subject's row, a manual VACUUM,"
+            + " ANALYZE or CREATE INDEX CONCURRENTLY, or an autovacuum to prevent wraparound)."
+            + " This is not a key-store outage. Retry the erasure later.",
+        e);
   }
 
   private static ShreddingException refusedBeforeFirstStatement(String message) {
@@ -700,7 +775,12 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
       }
       int byteLength;
       try {
-        byteLength = Integer.parseInt(material.substring(i + 1, colon));
+        String digits = material.substring(i + 1, colon);
+        // P-2: only the digits the encoder writes (no sign, no leading zero).
+        if (!digits.matches("0|[1-9][0-9]*")) {
+          throw new NumberFormatException(digits);
+        }
+        byteLength = Integer.parseInt(digits);
       } catch (NumberFormatException e) {
         // L10: this column is writable by exactly the attacker the chain exists to detect, so a
         // malformed length must be a typed, catchable error - never a raw NumberFormatException
@@ -712,11 +792,19 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
       int end = start;
       int seen = 0;
       while (end < material.length() && seen < byteLength) {
+        // P-1: advance by code point, not by UTF-16 char. A character outside the BMP is a
+        // surrogate pair whose UTF-8 form (4 bytes) only exists for the pair; counting each half
+        // alone (1 byte each, as '?') loses the field boundary. Encoding side
+        // (ErasureChain.field) encodes the whole string, so this is the symmetric count.
+        int next = end + Character.charCount(material.codePointAt(end));
         seen +=
-            String.valueOf(material.charAt(end))
-                .getBytes(java.nio.charset.StandardCharsets.UTF_8)
-                .length;
-        end++;
+            material.substring(end, next).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        end = next;
+      }
+      if (seen != byteLength) {
+        // P-2: the length ended inside a character or ran past the material; the encoder never
+        // writes either.
+        throw new ShreddingException(ErrorCodes.INVALID, "hook_outcomes is not in canonical form");
       }
       fields.add(material.substring(start, end));
       i = end;

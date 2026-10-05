@@ -1,5 +1,6 @@
 package com.housedevinci.shredding.autoconfigure;
 
+import com.housedevinci.shredding.application.ErasureService;
 import com.housedevinci.shredding.application.FieldCipher;
 import com.housedevinci.shredding.domain.ErasedValuePolicy;
 import com.housedevinci.shredding.domain.ErrorCodes;
@@ -58,6 +59,7 @@ public final class ShreddingStartupCheck implements InitializingBean {
     // then refuses the application's very first shredded write - checked here, before it is ever
     // handed to WriteVerification.
     refuseIfLedgerCapBelowOne();
+    refuseIfBackupRetentionOutOfRange();
     WriteVerification.configureMaxOutstanding(
         properties.getWriteVerification().getMaxOutstanding());
     refuseIfVerifierNotRegisteredFirst();
@@ -145,6 +147,19 @@ public final class ShreddingStartupCheck implements InitializingBean {
     // Read once so the field is not merely held: the gate has already refused or warned, and this
     // is the line that ties the two log lines together for an operator reading one boot log.
     log.debug("shredding: writing to schema {}", schemaGate.schema());
+  }
+
+  /**
+   * RC-5 and RC-9: {@code shredding.erasure.backup-retention} outside 0 to 100 years boots and then
+   * either dates the proof's backup clearance before the erasure (negative) or refuses every
+   * erasure (too large to date or store). Refused at the property boundary; zero stays legal (no
+   * backups).
+   */
+  private void refuseIfBackupRetentionOutOfRange() {
+    var retention = properties.getErasure().getBackupRetention();
+    if (retention != null) {
+      ErasureService.requireValidBackupRetention(retention);
+    }
   }
 
   /**

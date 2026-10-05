@@ -728,6 +728,18 @@ inheritance child, each path by which statistics can exist, and refuses any of t
   `GENERATED ALWAYS AS (lower(email_idx)) STORED` column gets its own `pg_stats` histogram of
   derived values. A virtual generated column (18) stores nothing and cannot be given a target.
 
+An expression index, an expression in extended statistics, or a stored generated column on the
+table or a descendant that calls a function or operator outside `pg_catalog` is
+`SHRED-SCHEMA-005`, whatever columns it names: the function body is invisible to the expression
+tree, and an `IMMUTABLE` SQL function taking the row's identifier can return the blind index
+(measured by the security review: the index's own `pg_stats` row held the index values while the
+tree named only `id`).
+
+The remedy the message prints is read with `search_path` pinned to `pg_catalog, pg_temp` and opens
+with the same setting, so a view or policy re-created from it cannot re-bind a name to a
+same-named object on the operator's path; a view under default privileges is named rather than
+re-created, because `CREATE VIEW` would widen its grants.
+
 A partition or child whose `pg_stats` rows the runtime role cannot see - no `SELECT` on the column,
 or row level security that applies to the role, both of which `pg_stats` filters on - is
 `SHRED-SCHEMA-005`.
@@ -741,9 +753,6 @@ Residuals, named:
 - **Values written as literals into catalogue definitions** - an index predicate, a `CHECK`, a
   column default, a view's text - are operator-authored, never touched by an erasure, and not
   scanned by this module. The predicate-only partial index is admitted on that basis.
-- **An expression index over a function that reads the column indirectly** (an immutable function
-  taking the row's identifier and looking the index up elsewhere) is not visible in the stored tree.
-  An immutable function that reads another relation is already outside what PostgreSQL guarantees.
 - **The superuser `pg_statistic` delete** that upgrade step 3a documents for 16 and 17 is the
   operator's statement, not the module's; the module's re-read at the next startup is the control.
 
@@ -799,7 +808,7 @@ against the first, so the set of relations the `UPDATE` routes to could change a
 described it - including gaining a foreign table over a hiding view. Measured on an ordinary table as
 well as a partitioned one, which is why the second lock is taken on every table. Its cost: two
 erasures of the same table run one after the other, and an erasure waits behind a manual `VACUUM`,
-`ANALYZE` or `CREATE INDEX CONCURRENTLY` on that table. An erasure also waits behind an autovacuum run to prevent transaction ID wraparound, which, unlike an ordinary autovacuum, does not give way to a waiting lock, for as long as that run takes; while it waits it holds the subject's advisory lock and key rows, and later erasures of the same table queue behind it. Set a `lock_timeout` on the erasure's connection if that wait must be bounded. The application's own reads and
+`ANALYZE` or `CREATE INDEX CONCURRENTLY` on that table. An erasure also waits behind an autovacuum run to prevent transaction ID wraparound, which, unlike an ordinary autovacuum, does not give way to a waiting lock, for as long as that run takes; while it waits it holds the subject's advisory lock and key rows, and later erasures of the same table queue behind it. Set a `lock_timeout` on the erasure's connection if that wait must be bounded. When that bound fires, or the database picks the erasure as a deadlock victim, the erasure is refused with `SHRED-ERASURE-LOCK-WAIT` (SQLState `55P03` or `40P01`): nothing is destroyed, cleared or recorded, it is not a key-store outage, and it can be retried. The application's own reads and
 writes are not blocked. A `LOCK` that fails because the relation does not exist, is a foreign table, or may
 not be locked by the role is the same refusal, reached one statement earlier.
 

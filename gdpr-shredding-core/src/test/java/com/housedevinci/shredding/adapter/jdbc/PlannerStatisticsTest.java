@@ -48,6 +48,21 @@ class PlannerStatisticsTest {
   }
 
   @Test
+  void calls_read_function_and_operator_nodes_and_refuse_one_they_cannot_parse() {
+    String tree =
+        "({FUNCEXPR :funcid 16400 :funcresulttype 25 :args ({OPEXPR :opno 98 :opfuncid 67"
+            + " :opresulttype 16})})";
+    var calls = PlannerStatistics.calls(tree);
+    assertThat(calls.functions()).containsExactly(16400L, 67L);
+    assertThat(calls.operators()).containsExactly(98L);
+
+    assertThatThrownBy(
+            () -> PlannerStatistics.calls(tree.replace(":funcid 16400", ":funcresulttype 25")))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("2 call nodes in a stored expression, 1 of them readable");
+  }
+
+  @Test
   void attnum_lists_parse_as_int2vector_and_string_agg_print_them() {
     assertThat(PlannerStatistics.attnums("2 3")).containsExactly(2, 3);
     assertThat(PlannerStatistics.attnums(" 4 ")).containsExactly(4);

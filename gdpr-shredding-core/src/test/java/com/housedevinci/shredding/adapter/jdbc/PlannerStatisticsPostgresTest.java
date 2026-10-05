@@ -133,10 +133,10 @@ abstract class PlannerStatisticsPostgresTest {
                 + defaultTargetFact
                 + ". Statistics store sampled values of the column (most common values, histogram"
                 + " bounds); any role with SELECT on the table reads them from pg_stats, and an"
-                + " erasure does not remove them. As the table owner run: SET lock_timeout ="
-                + " '5s'; ALTER TABLE app.s1 ALTER COLUMN email_idx SET STATISTICS 0; ALTER TABLE"
+                + " erasure does not remove them. As the table owner run: SET search_path ="
+                + " pg_catalog, pg_temp; SET lock_timeout = '5s'; ALTER TABLE app.s1 ALTER COLUMN email_idx SET STATISTICS 0; ALTER TABLE"
                 + " app.s1 ALTER COLUMN email_idx TYPE character varying(64) USING email_idx; The"
-                + " second statement deletes the statistics already stored; it does not rewrite"
+                + " TYPE statement deletes the statistics already stored; it does not rewrite"
                 + " the table but takes an ACCESS EXCLUSIVE lock briefly. See"
                 + " docs/upgrading-0.2.0.md, step 3a.");
   }
@@ -202,15 +202,63 @@ abstract class PlannerStatisticsPostgresTest {
   void s4b_whole_row_expression_index_is_refused() {
     table("app.s4b", "");
     zero("app.s4b");
-    exec(
-        owner,
-        "CREATE FUNCTION app.s4b_key(app.s4b) RETURNS text LANGUAGE sql IMMUTABLE"
-            + " AS 'SELECT $1.email_idx'",
-        "CREATE INDEX s4b_whole ON app.s4b (app.s4b_key(s4b))");
+    exec(owner, "CREATE INDEX s4b_whole ON app.s4b ((s4b IS NULL))");
 
     assertThat(copied("app.s4b"))
         .contains(
             "expression index app.s4b_whole computes over it (drop it: DROP INDEX app.s4b_whole)");
+  }
+
+  /** C-24-4: a function outside pg_catalog is opaque, whatever columns the tree names. */
+  @Test
+  void s14_index_extended_statistics_or_generated_column_calling_a_user_function_is_unverifiable() {
+    exec(
+        owner,
+        "CREATE FUNCTION app.s14_peek(i bigint) RETURNS varchar LANGUAGE sql IMMUTABLE"
+            + " AS 'SELECT md5(i::text)'");
+    table("app.s14a", "");
+    zero("app.s14a");
+    exec(owner, "CREATE INDEX s14a_peek ON app.s14a (app.s14_peek(id))");
+    table("app.s14b", "");
+    zero("app.s14b");
+    exec(owner, "CREATE STATISTICS app.s14b_st ON (app.s14_peek(id)), tenant FROM app.s14b");
+    table("app.s14c", ", peek varchar GENERATED ALWAYS AS (app.s14_peek(id)) STORED");
+    zero("app.s14c");
+    exec(owner, "ALTER TABLE app.s14c ALTER COLUMN peek SET STATISTICS 0");
+
+    for (String[] c :
+        new String[][] {
+          {"app.s14a", "expression index app.s14a_peek"},
+          {"app.s14b", "extended statistics app.s14b_st"},
+          {"app.s14c", "stored generated column app.s14c.peek"}
+        }) {
+      Throwable thrown = catchThrowable(() -> verdict(c[0]));
+      assertThat(code(thrown)).isEqualTo(ErrorCodes.SCHEMA_UNVERIFIABLE);
+      assertThat(thrown)
+          .hasMessageStartingWith(
+              "shredding: "
+                  + c[1]
+                  + " on a blind-indexed table calls app.s14_peek, which is outside pg_catalog.");
+    }
+  }
+
+  /** C-24-3: a view under default privileges is named, never re-created with wider grants. */
+  @Test
+  void s11c_view_under_default_privileges_is_named_not_recreated() {
+    table("app.s11c", "");
+    exec(
+        owner,
+        "CREATE VIEW app.s11c_v AS SELECT id, email_idx FROM app.s11c",
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA app GRANT SELECT ON TABLES TO shred_reader");
+    try {
+      assertThat(copied("app.s11c"))
+          .contains("view app.s11c_v (default privileges would change its grants)")
+          .doesNotContain("CREATE VIEW");
+    } finally {
+      exec(
+          owner,
+          "ALTER DEFAULT PRIVILEGES IN SCHEMA app REVOKE SELECT ON TABLES FROM shred_reader");
+    }
   }
 
   @Test
@@ -361,7 +409,11 @@ abstract class PlannerStatisticsPostgresTest {
         .contains(
             "Objects that depend on the column and are not re-created by a generated statement:"
                 + " stored generated column app.s13.email_low.")
-        .contains("Do the same for the stored generated column app.s13.email_low");
+        .contains(
+            "As the table owner run: SET search_path = pg_catalog, pg_temp; ALTER TABLE app.s13"
+                + " ALTER COLUMN email_idx SET STATISTICS 0; ALTER TABLE app.s13 ALTER COLUMN"
+                + " email_low SET STATISTICS 0; The rows already stored for app.s13.email_idx,"
+                + " app.s13.email_low then need");
   }
 
   @Test
@@ -401,7 +453,9 @@ abstract class PlannerStatisticsPostgresTest {
         .contains(
             "Objects that depend on the column and must be dropped and re-created with it: view"
                 + " app.s11_v; policy s11_tenant on app.s11.")
-        .contains("BEGIN; SET LOCAL lock_timeout = '5s'; DROP VIEW app.s11_v;")
+        .contains(
+            "BEGIN; SET LOCAL search_path = pg_catalog, pg_temp; SET LOCAL lock_timeout = '5s';"
+                + " DROP VIEW app.s11_v;")
         .contains("COMMIT;");
 
     exec(owner, remedy(message));
@@ -471,11 +525,13 @@ abstract class PlannerStatisticsPostgresTest {
                 + " erasure does not remove them. Objects that depend on the column and are not"
                 + " re-created by a generated statement: stored generated column"
                 + " app.s12.email_low; view app.s12_v1 (other views depend on it). Clear the"
-                + " statistics instead: on PostgreSQL 18 or later, as the table owner, SET"
-                + " STATISTICS 0 then pg_catalog.pg_clear_attribute_stats for the column; on 16"
-                + " or 17, a superuser deletes the column's pg_statistic rows after SET STATISTICS"
-                + " 0. Do the same for the stored generated column app.s12.email_low, which holds"
-                + " values computed from it. See docs/upgrading-0.2.0.md, step 3a.");
+                + " statistics without retyping. As the table owner run: SET search_path ="
+                + " pg_catalog, pg_temp; ALTER TABLE app.s12 ALTER COLUMN email_idx SET STATISTICS"
+                + " 0; ALTER TABLE app.s12 ALTER COLUMN email_low SET STATISTICS 0; The rows"
+                + " already stored for app.s12.email_idx, app.s12.email_low then need a statement"
+                + " this module does not generate: on PostgreSQL 18 or later, as the table owner,"
+                + " pg_catalog.pg_clear_attribute_stats for each column; on 16 or 17, a superuser"
+                + " deletes their pg_statistic rows. See docs/upgrading-0.2.0.md, step 3a.");
   }
 
   // --------------------------------------------------------- row 47: after boot, at erasure

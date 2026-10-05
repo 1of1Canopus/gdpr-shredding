@@ -213,6 +213,18 @@ public final class ErrorCodes {
   public static final String BLIND_INDEX_COPIED = "SHRED-SCHEMA-010";
 
   /**
+   * RC-7, RC-10: an erasure waited on a lock and gave up: another session held a conflicting lock
+   * longer than the connection's {@code lock_timeout} (SQLState 55P03), or the database chose this
+   * transaction as a deadlock victim (40P01). Raised at every wait of the erasure transaction: the
+   * subject's advisory lock, the key rows, the table locks mapping admission takes, the blind-index
+   * {@code UPDATE} (an application transaction open on the subject's row) and the erasure-log
+   * append. Nothing was destroyed, cleared or recorded: the transaction rolled back whole. It says
+   * nothing about the key store, and nothing about the mapping. Retry once the other session has
+   * finished.
+   */
+  public static final String ERASURE_LOCK_WAIT = "SHRED-ERASURE-LOCK-WAIT";
+
+  /**
    * C-20: a Spring Data repository call was bracketed, but the module could not establish that
    * every {@code EntityManagerFactory} bean in the application is the one instance {@code
    * ShreddingIntegrator} is wired to. A bracket that cannot tell which Hibernate session it is
