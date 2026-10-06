@@ -429,9 +429,14 @@ final class HibernateCopyCheck {
   }
 
   static String clear(String rawTable, String rawColumn) {
-    // C-26-2: the mapping renders these; printed escaped, as every identifier in a message.
-    String table = com.housedevinci.shredding.application.LogText.escape(rawTable);
-    String column = com.housedevinci.shredding.application.LogText.escape(rawColumn);
+    // RC2-2: a statement the operator runs, so the identifiers are spelled as SQL (C-26-3), not as
+    // log text.
+    String table =
+        com.housedevinci.shredding.adapter.jdbc.JdbcSupport.sqlIdentifier(
+            com.housedevinci.shredding.application.LogText.escape(rawTable));
+    String column =
+        com.housedevinci.shredding.adapter.jdbc.JdbcSupport.sqlIdentifier(
+            com.housedevinci.shredding.application.LogText.escape(rawColumn));
     return "UPDATE "
         + table
         + " SET "
