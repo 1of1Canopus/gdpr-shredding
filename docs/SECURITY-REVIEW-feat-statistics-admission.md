@@ -229,3 +229,93 @@ All four are corrections inside the mechanism this PR built, so the builder of t
 them, together with the C-24-1 build ruled on the design page (rev 4, approved with changes), in
 this PR. Pass 3 runs the seven probes and the A-tests and attacks nothing new unless the build
 departs from the ruled design.
+
+## Pass 3 (probe check) (2026-10-06), head 951bad6
+
+**Verdict: MERGE WITH FIXES.** No HIGH. C-24-1 to C-24-8 are closed: every probe is green and
+none is weakened beyond the ruling. Ruling the builder's "several parents" wording reproduced one
+new MEDIUM, C-24-9: rule R-i reads the target's own parents only.
+
+| check | result |
+|---|---|
+| `CIPHER_PROBE_MAVEN=1 ./mvnw -B verify` (Docker up), at 951bad6 | BUILD SUCCESS, 694 tests, 0 failures, 0 skipped (core 428, starter 249, sample 17) |
+| pass-1 probes `CipherProbePr24Test` | 6 green, 0 skipped (C-24-1 x2, C-24-2 x2, C-24-3, C-24-4) |
+| pass-2 probes `CipherProbePr24Pass2Test` | 5 green (C-24-5, C-24-6 x2, C-24-7, C-24-8) |
+| pass-3 probe `CipherProbePr24Pass3Test` | 1 RED (C-24-9); file in the internal probes folder for the fixer, not in this branch |
+
+### Probe integrity
+
+- `CipherProbePr24Test`: the two C-24-1 probes lose `@Disabled`, and their assertion goes from
+  `isInstanceOf(Copied.class)` to "`Copied`, or `Refused` with rule `R-i`". Fixtures and every other
+  line are unchanged. That is exactly the widening the ruling allowed.
+- `CipherProbePr24Pass2Test`: the diff only reformats two assertions. The accepted outcomes are
+  the same (`Copied` or `SHRED-SCHEMA-005`).
+
+### The four LOW fixes, checked against what was prescribed
+
+- C-24-5: `withPinnedPath` restores the path in `finally` on every exit outside auto-commit. If
+  the restore fails after the work threw, the restore error is added to the primary as suppressed,
+  and it is thrown only when there is no primary. As prescribed.
+- C-24-6: `INDEXES_SQL` returns `indpred`. The predicate goes into the call-scan trees, and a
+  blind-index attnum in the predicate makes the index a carrier ("drop the index"). Both scans read
+  it. As prescribed.
+- C-24-7: the named branch prints `SET STATISTICS 0` for `root || generated` carriers, so it
+  covers a generated column that only a child has, and lists them in "rows already stored". As
+  prescribed.
+- C-24-8: `FOREIGN_FUNCTIONS_SQL` and `FOREIGN_OPERATORS_SQL` (through `oprcode`) add
+  `provolatile <> 'i'`, and the message says "outside pg_catalog or not immutable". As prescribed.
+
+### Rule R-i against the design ruling
+
+These match the ruling: a blind-indexed target with any `pg_inherits` parent is refused in
+`MappingAdmission`, at startup and at every erasure, under `SHRED-SCHEMA-009` (A7 runs a real
+erasure after an `ATTACH` and records nothing; A8 shows the erasure's lock makes `ATTACH` wait).
+The only remedy is to map the root. The message warns about the second start. No message offers
+`DETACH` or `NO INHERIT` (A11). SECURITY-NOTES "A former parent keeps the values" and upgrade step
+1 give the clearing steps for 16/17 and 18. QUESTIONS #C-29 is closed.
+
+What does not match is the gap below. The ruling said "refuse any blind-index table with a
+parent". The build applies this to the mapped target only, so a descendant's other parents are
+never read.
+
+### Rulings on the builder's deviations
+
+1. Wording for several parents ("map the entity to the table at the top of the hierarchy"):
+   **rejected.** Under multiple inheritance there can be more than one top, and mapping one of
+   them is admitted while the other keeps the values. See C-24-9.
+2. Splitting S8 into s8b (an expression index whose predicate selects by the blind index is now
+   refused, and a plain partial index stays admitted in S8): **accepted.** This is the C-24-6 intent.
+3. A short `RelationFacts` constructor with no ancestors: **accepted.** In production it is used
+   only for an absent relation, where no parent can exist.
+4. The partition root falls back to the parent list when `pg_partition_root` returns nothing:
+   **accepted.** The refusal still fires, and only the naming is affected.
+5. A9, a detached partition is admitted: **accepted.** The ruling chose to document the
+   former-parent residue rather than detect it, because no catalogue trace remains.
+
+### New finding
+
+**C-24-9 MEDIUM: R-i reads the target's own parents only. A descendant of the mapped root that
+has a second parent keeps its values in that parent's statistics.**
+Repro (PostgreSQL 16): `app.m1` holds the blind index. `app.m2 (email_idx)` is a separate table.
+`app.mkid () INHERITS (app.m1, app.m2)` has 500 rows. `SET STATISTICS 0` is set on `app.m1` (which
+recurses to `app.mkid`). The runtime role has `SELECT` on `app.m2`, and `ANALYZE app.m2` runs.
+Mapping `app.mkid` is refused by R-i, and the message says to map "the table at the top of the
+hierarchy". Mapping `app.m1`, which is such a table, is `Admitted[warnings=[]]`. Meanwhile
+`pg_stats` for `app.m2.email_idx` (`inherited`) lists the child's `idx-*` values to the runtime
+role. An erasure through `app.m1` never reaches them.
+Probe: `CipherProbePr24Pass3Test.probe_second_parent_of_a_root_descendant_keeps_the_index_values`.
+Fix (this is not a new mechanism, it widens the relation set R-i reads, so it stays in the fix
+list):
+- In `MappingAdmission`, R-i also refuses when any descendant of the target (the `pg_inherits`
+  closure the walk already visits) has a parent outside the target and its descendants. It names
+  that descendant and the outside parent, under `SHRED-SCHEMA-009`, at startup and at every erasure.
+- For more than one parent, the message stops offering "the table at the top of the hierarchy".
+  It says that a blind-indexed table with more than one parent is not supported, names every
+  parent, and points to the clearing steps for the values already stored. It still offers neither
+  `DETACH` nor `NO INHERIT` (A11 covers the new message).
+- Tests: the probe above, unchanged. An A-test where a second parent is added by `ALTER TABLE ...
+  INHERIT` after boot, which must refuse the next erasure and record nothing. A grandchild variant.
+- SECURITY-NOTES and upgrade guide: add one row for the multiple-inheritance shape.
+
+Routing: this correction sits inside the R-i rule that this PR built, so it goes to the builder of
+this PR. Pass 4 is a probe check of C-24-9 only.
