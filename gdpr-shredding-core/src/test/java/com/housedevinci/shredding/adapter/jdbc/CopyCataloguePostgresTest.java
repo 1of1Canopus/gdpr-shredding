@@ -756,6 +756,148 @@ class CopyCataloguePostgresTest {
         .contains("app.all_aud has a column email_idx");
   }
 
+  // ------------------------------------------------- C-25-1: the erasure's isolation level
+
+  @ParameterizedTest(name = "{0}")
+  @org.junit.jupiter.params.provider.ValueSource(
+      strings = {
+        "TRANSACTION_READ_UNCOMMITTED",
+        "TRANSACTION_READ_COMMITTED",
+        "TRANSACTION_REPEATABLE_READ",
+        "TRANSACTION_SERIALIZABLE"
+      })
+  void i1_every_pool_isolation_level_erases_at_read_committed_and_is_restored(String level)
+      throws SQLException {
+    String table = "app.i1_" + level.substring("TRANSACTION_".length()).toLowerCase();
+    table(table);
+    var config = new HikariConfig();
+    config.setJdbcUrl(POSTGRES.getJdbcUrl());
+    config.setUsername(APP);
+    config.setPassword("pw");
+    config.setMaximumPoolSize(1);
+    config.setTransactionIsolation(level);
+    var ds = new HikariDataSource(config);
+    pools.add(ds);
+    var seen = new java.util.concurrent.atomic.AtomicReference<String>();
+    var store =
+        new JdbcErasureStore(
+            ds,
+            schema,
+            ErasureChain.keyed(SECRET, "k1"),
+            List.of(
+                new BlindIndexColumn(
+                    TableRef.parse(table),
+                    ColumnRef.unquoted("email_idx"),
+                    ColumnRef.unquoted("subject"),
+                    ColumnRef.unquoted("tenant"),
+                    Optional.of("tenant"),
+                    Optional.of("subject"))),
+            (c, col, tenant, subject) -> {
+              try (Statement st = c.createStatement();
+                  ResultSet rs = st.executeQuery("SHOW transaction_isolation")) {
+                rs.next();
+                seen.set(rs.getString(1));
+              } catch (SQLException e) {
+                throw new IllegalStateException(e);
+              }
+              return 0L;
+            },
+            CopySignatures.defaults());
+
+    erase(store, table + "-s-1");
+
+    assertThat(seen.get()).isEqualTo("read committed");
+    assertThat(indexed(table, table + "-s-1")).isZero();
+    try (Connection c = ds.getConnection()) {
+      assertThat(c.getTransactionIsolation())
+          .describedAs("the pool's own level is restored")
+          .isEqualTo(Connection.class.getField(level).getInt(null));
+    } catch (ReflectiveOperationException e) {
+      throw new IllegalStateException(e);
+    }
+  }
+
+  @Test
+  void i2_a_role_default_of_serializable_still_erases_at_read_committed() {
+    exec(su, "CREATE ROLE i2_app LOGIN PASSWORD 'pw' IN ROLE " + APP);
+    exec(su, "ALTER ROLE i2_app SET default_transaction_isolation = 'serializable'");
+    table("app.i2");
+    exec(owner, "GRANT SELECT, UPDATE ON app.i2 TO i2_app");
+    HikariDataSource ds = pool("i2_app", "pw", null);
+    var store =
+        new JdbcErasureStore(
+            ds,
+            schema,
+            ErasureChain.keyed(SECRET, "k1"),
+            List.of(
+                new BlindIndexColumn(
+                    TableRef.parse("app.i2"),
+                    ColumnRef.unquoted("email_idx"),
+                    ColumnRef.unquoted("subject"),
+                    ColumnRef.unquoted("tenant"),
+                    Optional.of("tenant"),
+                    Optional.of("subject"))),
+            (c, col, tenant, subject) -> 0L,
+            CopySignatures.defaults());
+
+    erase(store, "app.i2-s-1");
+
+    assertThat(indexed("app.i2", "app.i2-s-1")).isZero();
+  }
+
+  @Test
+  void i3_an_isolation_level_that_cannot_be_set_refuses_with_008() {
+    table("app.i3");
+    DataSource refusing =
+        (DataSource)
+            Proxy.newProxyInstance(
+                DataSource.class.getClassLoader(),
+                new Class<?>[] {DataSource.class},
+                (proxy, method, args) -> {
+                  Object out = method.invoke(app, args);
+                  if (!"getConnection".equals(method.getName())) {
+                    return out;
+                  }
+                  Connection c = (Connection) out;
+                  return Proxy.newProxyInstance(
+                      Connection.class.getClassLoader(),
+                      new Class<?>[] {Connection.class},
+                      (p2, m2, a2) -> {
+                        if ("setTransactionIsolation".equals(m2.getName())) {
+                          throw new SQLException("probe: isolation refused", "25001");
+                        }
+                        try {
+                          return m2.invoke(c, a2);
+                        } catch (java.lang.reflect.InvocationTargetException e) {
+                          throw e.getCause();
+                        }
+                      });
+                });
+    var store =
+        new JdbcErasureStore(
+            refusing,
+            schema,
+            ErasureChain.keyed(SECRET, "k1"),
+            List.of(
+                new BlindIndexColumn(
+                    TableRef.parse("app.i3"),
+                    ColumnRef.unquoted("email_idx"),
+                    ColumnRef.unquoted("subject"),
+                    ColumnRef.unquoted("tenant"),
+                    Optional.of("tenant"),
+                    Optional.of("subject"))),
+            (c, col, tenant, subject) -> 0L,
+            CopySignatures.defaults());
+    long records = records();
+
+    Throwable thrown = catchThrowable(() -> erase(store, "app.i3-s-1"));
+
+    assertThat(code(thrown)).isEqualTo(ErrorCodes.SCHEMA_NAME_ISOLATION);
+    assertThat(thrown).hasMessageContaining("must run at READ COMMITTED");
+    assertThat(records()).isEqualTo(records);
+    assertThat(indexed("app.i3", "app.i3-s-1")).isEqualTo(1);
+  }
+
   // --------------------------------------------------------- row 32: hostile path, failure, cost
 
   @Test

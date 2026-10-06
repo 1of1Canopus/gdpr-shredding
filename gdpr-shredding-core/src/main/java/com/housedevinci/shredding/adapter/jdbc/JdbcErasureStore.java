@@ -117,7 +117,8 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
 
   @Override
   public Outcome erase(TenantId tenant, SubjectId subject, RecordFactory factory) {
-    return JdbcSupport.inTransaction(
+    // C-25-1: READ COMMITTED whatever the pool or the role says; see JdbcSupport.
+    return JdbcSupport.inReadCommittedTransaction(
         dataSource,
         c -> {
           // CIPHER-03: the (tenant, subject) advisory lock first, ahead of the FOR UPDATE. It is
