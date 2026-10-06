@@ -208,9 +208,10 @@ final class HibernateCopyCheck {
       Map<String, Admitted> admitted,
       List<CopySignatures.NamedCopy> named,
       List<CopySignatures.RevisionSignature> signatures) {
-    String prefix = setting(properties, "audit_table_prefix", "");
-    String suffix = setting(properties, "audit_table_suffix", "_AUD");
-    String schema = setting(properties, "default_schema", "");
+    String prefix = foldedSetting(properties, "audit_table_prefix", "", "[a-z0-9_]*");
+    String suffix = foldedSetting(properties, "audit_table_suffix", "_aud", "[a-z0-9_]*");
+    String schema = foldedSetting(properties, "default_schema", "", "([a-z_][a-z0-9_]*)?");
+    schema = truncate(schema);
     signatures.add(
         new CopySignatures.RevisionSignature(
             "Hibernate Envers",
@@ -219,14 +220,57 @@ final class HibernateCopyCheck {
             stored(setting(properties, "revision_type_field_name", "REVTYPE"))));
     for (Admitted a : admitted.values()) {
       String inSchema = schema.isEmpty() ? a.table().schema().orElse("") : schema;
-      String name = stored(prefix + a.table().name() + suffix);
-      named.add(
-          new CopySignatures.NamedCopy(
-              a.table(),
-              table(inSchema.isEmpty() ? name : inSchema + "." + name),
-              "Hibernate Envers",
-              "audit"));
+      // C-25-5: PostgreSQL folds and truncates (63 bytes) the name Envers creates; so do we.
+      String name = truncate(prefix + a.table().name() + suffix);
+      TableRef audit;
+      try {
+        audit = new TableRef(inSchema.isEmpty() ? Optional.empty() : Optional.of(inSchema), name);
+      } catch (ShreddingException e) {
+        throw configRefused(
+            "the audit table name derived from org.hibernate.envers.audit_table_prefix, "
+                + "audit_table_suffix and default_schema (\""
+                + name
+                + "\") cannot be used as a PostgreSQL identifier by this module",
+            e);
+      }
+      named.add(new CopySignatures.NamedCopy(a.table(), audit, "Hibernate Envers", "audit"));
     }
+  }
+
+  /**
+   * Configured value folded as PostgreSQL folds it; a value that cannot be used is
+   * SHRED-CONFIG-001.
+   */
+  private static String foldedSetting(
+      Map<String, Object> properties, String key, String fallback, String allowed) {
+    String configured = setting(properties, key, fallback);
+    String folded = stored(configured);
+    if (!folded.matches(allowed)) {
+      throw configRefused(
+          "org.hibernate.envers." + key + " (\"" + configured + "\") cannot be used by this module",
+          null);
+    }
+    return folded;
+  }
+
+  private static ShreddingException configRefused(String what, Throwable cause) {
+    return new ShreddingException(
+        ErrorCodes.CONFIG,
+        "shredding: " + what + ". Unverifiable is not clean, so this is a refusal.",
+        cause);
+  }
+
+  /** PostgreSQL's NAMEDATALEN: an identifier is cut to 63 bytes, never inside a character. */
+  static String truncate(String identifier) {
+    var bytes = identifier.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    if (bytes.length <= 63) {
+      return identifier;
+    }
+    int end = 63;
+    while (end > 0 && (bytes[end] & 0xC0) == 0x80) {
+      end--;
+    }
+    return new String(bytes, 0, end, java.nio.charset.StandardCharsets.UTF_8);
   }
 
   private static String setting(Map<String, Object> properties, String key, String fallback) {

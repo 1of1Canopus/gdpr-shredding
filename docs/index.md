@@ -397,7 +397,9 @@ HibernatePropertiesCustomizer enversFirst() {
 documentation shows; the starter's test `CopyMappingStarterTest` holds a working copy
 (`e8_envers_documented_composition_boots_erases_and_audit_holds_no_index`). An audit table left by
 an earlier configuration that still holds the index column is refused at every erasure until the
-column is cleared and dropped.
+column is cleared and dropped. The names Envers would give its audit tables are folded to lower
+case and cut to 63 bytes as PostgreSQL does, so `default_schema=Audit` and long table names work;
+an unusable configured name is refused with `SHRED-CONFIG-001` naming the property.
 
 ### Hibernate's own audit and history
 

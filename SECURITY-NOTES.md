@@ -214,6 +214,13 @@ the `UPDATE`'s snapshot. It carries a live index for a subject whose key is abou
 it **refuses** the erasure — under READ COMMITTED, REPEATABLE READ and SERIALIZABLE alike. That is
 the intended answer, not a race to retry away.
 
+**The erasure's isolation level is pinned per transaction, never per session (C-25-1, C-25-4).**
+`SET TRANSACTION ISOLATION LEVEL READ COMMITTED` is the transaction's first statement, ahead of the
+advisory lock, and the level is read back; a failure is `SHRED-SCHEMA-008` and nothing runs. Because
+it is transaction-scoped the pool's idea of the connection's level is never dirtied and nothing is
+restored: an application that sets `SERIALIZABLE` in its init SQL keeps it. A connection handed over
+inside a caller's transaction is refused with the same code, untouched.
+
 **Two entities cannot share one of these checks (S-22, addendum 4 revision correction, E-1).** The
 check above is keyed on `(table, index column)` — deliberately not on the subject/tenant axis, since
 that axis is exactly what a mis-addressed erasure gets wrong. Two entities mapped to the same table

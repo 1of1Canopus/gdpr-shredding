@@ -72,6 +72,12 @@ class CopyMappingStarterTest {
   @SpringBootConfiguration
   @EnableAutoConfiguration
   @EntityScan(
+      basePackageClasses = com.housedevinci.shredding.autoconfigure.copies.p2long.LongNote.class)
+  static class LongNameApp extends Tenant {}
+
+  @SpringBootConfiguration
+  @EnableAutoConfiguration
+  @EntityScan(
       basePackageClasses =
           com.housedevinci.shredding.autoconfigure.copies.enverswhole.EnvWholeNote.class)
   static class EnvWholeApp extends Tenant {}
@@ -509,6 +515,42 @@ class CopyMappingStarterTest {
         .hasMessageContaining(
             "audit.pre_env_idx_note_hist has a column email_idx and is the audit table Hibernate"
                 + " Envers writes for public.env_idx_note.");
+  }
+
+  @Test
+  void e20_envers_names_folded_and_truncated_like_postgresql() throws Exception {
+    String truncated = "a".repeat(55) + "_note_aud";
+    truncated = truncated.substring(0, 63);
+    try (var c =
+            DriverManager.getConnection(
+                POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+        var st = c.createStatement()) {
+      st.execute("DROP SCHEMA IF EXISTS audit CASCADE");
+      // PostgreSQL cuts the 64-character name to 63 bytes, as it does for Envers' own table.
+      st.execute(
+          "CREATE TABLE public.\"" + "a".repeat(55) + "_note_aud\" (id bigint, email_idx bytea)");
+    }
+
+    ShreddingException refusal =
+        refusal(
+            LongNameApp.class,
+            "spring.jpa.properties.hibernate.integration.envers.enabled=false",
+            "spring.jpa.properties.org.hibernate.envers.default_schema=PUBLIC");
+
+    assertThat(refusal.code()).isEqualTo(ErrorCodes.BLIND_INDEX_COPIED);
+    assertThat(refusal).hasMessageContaining("public." + truncated + " has a column email_idx");
+  }
+
+  @Test
+  void e21_an_unusable_configured_envers_name_is_config_001_naming_the_property() {
+    ShreddingException refusal =
+        refusal(
+            EnvIdxApp.class,
+            "spring.jpa.properties.hibernate.integration.envers.enabled=false",
+            "spring.jpa.properties.org.hibernate.envers.audit_table_suffix=-hist");
+
+    assertThat(refusal.code()).isEqualTo(ErrorCodes.CONFIG);
+    assertThat(refusal).hasMessageContaining("org.hibernate.envers.audit_table_suffix");
   }
 
   // ---------------------------------------------------------------------- associations

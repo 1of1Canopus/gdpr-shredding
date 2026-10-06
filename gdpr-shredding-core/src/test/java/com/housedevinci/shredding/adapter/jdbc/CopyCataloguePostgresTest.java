@@ -769,7 +769,7 @@ class CopyCataloguePostgresTest {
         "TRANSACTION_REPEATABLE_READ",
         "TRANSACTION_SERIALIZABLE"
       })
-  void i1_every_pool_isolation_level_erases_at_read_committed_and_is_restored(String level)
+  void i1_every_pool_isolation_level_erases_at_read_committed_and_is_left_untouched(String level)
       throws SQLException {
     String table = "app.i1_" + level.substring("TRANSACTION_".length()).toLowerCase();
     table(table);
@@ -813,7 +813,7 @@ class CopyCataloguePostgresTest {
     assertThat(indexed(table, table + "-s-1")).isZero();
     try (Connection c = ds.getConnection()) {
       assertThat(c.getTransactionIsolation())
-          .describedAs("the pool's own level is restored")
+          .describedAs("the pool's own level is never changed, so nothing is restored")
           .isEqualTo(Connection.class.getField(level).getInt(null));
     } catch (ReflectiveOperationException e) {
       throw new IllegalStateException(e);
@@ -849,7 +849,7 @@ class CopyCataloguePostgresTest {
   }
 
   @Test
-  void i3_an_isolation_level_that_cannot_be_set_refuses_with_008() {
+  void i3_a_pin_statement_that_fails_refuses_with_008_and_nothing_is_restored() {
     table("app.i3");
     DataSource refusing =
         (DataSource)
@@ -867,10 +867,28 @@ class CopyCataloguePostgresTest {
                       new Class<?>[] {Connection.class},
                       (p2, m2, a2) -> {
                         if ("setTransactionIsolation".equals(m2.getName())) {
-                          throw new SQLException("probe: isolation refused", "25001");
+                          throw new AssertionError("the session's level must never be touched");
                         }
                         try {
-                          return m2.invoke(c, a2);
+                          Object r = m2.invoke(c, a2);
+                          if (!"createStatement".equals(m2.getName())) {
+                            return r;
+                          }
+                          Statement real = (Statement) r;
+                          return Proxy.newProxyInstance(
+                              Statement.class.getClassLoader(),
+                              new Class<?>[] {Statement.class},
+                              (p3, m3, a3) -> {
+                                if ("execute".equals(m3.getName())
+                                    && String.valueOf(a3[0]).startsWith("SET TRANSACTION")) {
+                                  throw new SQLException("probe: isolation refused", "25001");
+                                }
+                                try {
+                                  return m3.invoke(real, a3);
+                                } catch (java.lang.reflect.InvocationTargetException e) {
+                                  throw e.getCause();
+                                }
+                              });
                         } catch (java.lang.reflect.InvocationTargetException e) {
                           throw e.getCause();
                         }
