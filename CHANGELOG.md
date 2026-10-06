@@ -303,6 +303,21 @@ All notable changes to this project. The format follows
   a comment saying so, rather than inheriting it by omission: reading that file now tells you which
   controls are off in the demo.
 
+### Fixed (security review pass 1 of audit-table coverage)
+- C-25-1 (MEDIUM): an erasure now always runs at `READ COMMITTED`, whatever the pool or the role
+  sets, and restores the connection's level afterwards; a level that cannot be set refuses with
+  `SHRED-SCHEMA-008`. Under `REPEATABLE READ` or `SERIALIZABLE` every catalogue check inside the
+  erasure read the catalogue as of the transaction's first statement, before the table locks, so a
+  trigger committed while the erasure waited fired unseen and the check after the `UPDATE` missed
+  a materialized view created during the erasure.
+- C-25-2 (LOW): Envers' table prefix, suffix, default schema and revision column names are read
+  from the persistence unit's settings even when Envers is switched off, so a leftover audit table
+  written under configured names is refused.
+- A `@SecondaryTable` audited by `@org.hibernate.annotations.Audited` is checked under the audit
+  table Hibernate names for it, excluded or not.
+- C-25-3 (INFO): the upgrade guide gives the order in which a 0.1.x installation with Envers meets
+  the 0.2.0 refusals, with the change that clears each.
+
 ### Fixed (security review of the audit-table design)
 - **P-1 (LOW)** - `JdbcErasureStore.decodeHooks` counted the UTF-8 length of a hook outcome field one
   UTF-16 char at a time, so a hook name holding a character outside the Basic Multilingual Plane
