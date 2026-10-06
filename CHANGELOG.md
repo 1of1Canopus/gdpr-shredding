@@ -305,8 +305,8 @@ All notable changes to this project. The format follows
 
 ### Fixed (security review pass 1 of audit-table coverage)
 - C-25-1 (MEDIUM): an erasure now always runs at `READ COMMITTED`, whatever the pool or the role
-  sets, and restores the connection's level afterwards; a level that cannot be set refuses with
-  `SHRED-SCHEMA-008`. Under `REPEATABLE READ` or `SERIALIZABLE` every catalogue check inside the
+  sets (see C-25-4: the level is set for the transaction only); a level that cannot be set refuses
+  with `SHRED-SCHEMA-008`. Under `REPEATABLE READ` or `SERIALIZABLE` every catalogue check inside the
   erasure read the catalogue as of the transaction's first statement, before the table locks, so a
   trigger committed while the erasure waited fired unseen and the check after the `UPDATE` missed
   a materialized view created during the erasure.
@@ -317,6 +317,17 @@ All notable changes to this project. The format follows
   table Hibernate names for it, excluded or not.
 - C-25-3 (INFO): the upgrade guide gives the order in which a 0.1.x installation with Envers meets
   the 0.2.0 refusals, with the change that clears each.
+
+### Fixed (security review pass 2 of audit-table coverage)
+- C-25-4 (LOW): the erasure no longer changes the connection's session isolation. It sends `SET
+  TRANSACTION ISOLATION LEVEL READ COMMITTED` as the transaction's first statement, before the
+  advisory lock, and reads the level back; nothing is restored, so a pool that sets `SERIALIZABLE`
+  in its init SQL keeps it after an erasure. A connection that arrives inside a caller's
+  transaction is refused with `SHRED-SCHEMA-008` and neither joined nor committed.
+- C-25-5 (LOW): Envers' configured prefix, suffix and default schema are folded to lower case and
+  the resulting names truncated to 63 bytes as PostgreSQL does, so a 60-character blind-indexed
+  table and `default_schema=Audit` boot. A configured value that still cannot be used refuses with
+  `SHRED-CONFIG-001` naming the `org.hibernate.envers.*` property; a default never refuses.
 
 ### Fixed (security review of the audit-table design)
 - **P-1 (LOW)** - `JdbcErasureStore.decodeHooks` counted the UTF-8 length of a hook outcome field one
