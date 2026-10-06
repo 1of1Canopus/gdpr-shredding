@@ -180,6 +180,38 @@ class CipherProbePr26PostgresTest {
         .doesNotContain("\n");
   }
 
+  // --------------------------------------------------------------------- C-26-3, pass 2
+
+  /**
+   * Pass 2: the remedy statement a {@code SHRED-SCHEMA-010} trigger finding prints must still be
+   * the statement that fixes the finding when the name holds a control character. Escaped as log
+   * text ({@code \\u000A} inside a plain quoted identifier) it names a different object; PostgreSQL's
+   * {@code U&"..."} form is one line and exact.
+   */
+  @Test
+  void probe_printed_disable_trigger_statement_does_not_disable_the_trigger() {
+    table("app.c263");
+    exec(
+        owner,
+        "CREATE TABLE app.c263_log (LIKE app.c263)",
+        "CREATE FUNCTION app.c263_f() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO"
+            + " app.c263_log SELECT OLD.*; RETURN NULL; END $$",
+        "CREATE TRIGGER \"c263\nx\" AFTER UPDATE ON app.c263 FOR EACH ROW EXECUTE"
+            + " FUNCTION app.c263_f()");
+    String message = ((Copied) verdict("app.c263")).message();
+    int start = message.indexOf("ALTER TABLE ");
+    String statement = message.substring(start, message.indexOf(". Or, if", start));
+
+    Throwable thrown = catchThrowable(() -> exec(owner, statement));
+
+    assertThat(thrown).describedAs("printed statement: " + statement).isNull();
+    assertThat(
+            text(
+                "SELECT tgenabled FROM pg_trigger WHERE tgrelid = 'app.c263'::regclass AND tgname ="
+                    + " E'c263\\nx'"))
+        .isEqualTo("D");
+  }
+
   // ----------------------------------------------------------------------------- fixtures
 
   private static void table(String table) {
