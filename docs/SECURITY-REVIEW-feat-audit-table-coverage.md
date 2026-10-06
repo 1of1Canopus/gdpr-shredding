@@ -202,3 +202,142 @@ C-25-2 closes 10; N5 closes 33.
 - Messages against design section 4: the Envers, native, temporal, stale-by-name, stale-by-shape,
   matview, FK, publication, slot and association frames match, with deviations 1 and 5 and the
   temporal remedy of deviation 6.
+
+## Pass 2 (2026-10-06)
+
+Reviewed head `0110205` (contains PR 24 final `a508e00`, R-i and C-24-9). Fix commits `78ad882`
+(C-25-1), `ef6302f` (C-25-2, N5, n5b), `ecf6899` (C-25-3).
+
+### Verdict: MERGE WITH FIXES
+
+The five pass 1 probes are green, unmodified. The integration surface's 1a rows have **0
+missing**. Attacking the fixes found two new LOWs, both caused by them. Each has a probe that fails
+on `0110205`. Both are corrections, not new mechanisms.
+
+### Build and tests (full `CIPHER_PROBE_MAVEN=1 ./mvnw clean verify`, Docker up)
+
+| module | tests | failures | skipped |
+| --- | --- | --- | --- |
+| core | 486 | 0 | 0 (the #C-29 probes now run) |
+| starter | 276 | 0 | 1 (#C-30, for 1b) |
+| sample | 21 | 0 | 0 |
+
+These match the builder's numbers. Pass 1 probes: `CipherProbePr25Test` 3/3 and
+`CipherProbePr25StarterTest` 2/2 green, unchanged. Pass 2 probes added: core 2 (1 fails, 1 passes
+as a regression guard), starter 2 (both fail).
+
+### Pass 1 findings
+
+| id | status |
+| --- | --- |
+| C-25-1 | closed: probes green. The caller-transaction attack below shows the pin refuses with `-008` and commits nothing |
+| C-25-2 | closed: probe green, e19 |
+| C-25-3 | closed: probe green, the order test in the starter |
+| N5 (ruling 6) | closed: n5, n5b |
+
+### New findings
+
+#### C-25-4 LOW: an erasure leaves the host application's session isolation downgraded on a pooled connection
+
+`JdbcSupport.inReadCommittedTransaction` calls `Connection.setTransactionIsolation`. pgjdbc turns
+that into `SET SESSION CHARACTERISTICS`, and Hikari marks the connection's isolation dirty. The
+fix then restores the level it read (correct). But when the connection is returned, Hikari resets a
+dirty isolation to the pool default it recorded at connection setup. It recorded that default
+**before** `connectionInitSql` ran. So an application that sets SERIALIZABLE per session in its
+init SQL gets that pooled connection back at READ COMMITTED after any erasure. Its own later
+transactions on the connection lose SERIALIZABLE, and nothing reports it. Without this module, the
+pool never touches that setting. A role default (`ALTER ROLE ... SET`) is not affected: Hikari reads
+the role default at setup, which is the builder's role-default test.
+
+Repro: `CipherProbePr25Pass2Test.probe_session_default_serializable_from_init_sql_is_pinned_and_restored`.
+It is red: the erasure refuses correctly, then `SHOW transaction_isolation` reads `read committed`
+where `serializable` is expected.
+
+Fix (the builder): stop changing the session. Send `SET TRANSACTION ISOLATION LEVEL READ
+COMMITTED` as the first statement of the erasure transaction, before the subject's advisory-lock
+`SELECT`. It is transaction-scoped, so nothing needs restoring, there is no dirty pool state and no
+failing-restore path. Keep the read-back of `transaction_isolation` as the second statement. Before
+any statement, refuse with `-008` when the arriving connection is not in auto-commit: it was
+handed over inside a caller's transaction, and that transaction must be neither joined nor rolled
+back. `probe_connection_inside_a_callers_repeatable_read_transaction_is_refused_not_committed`
+passes today and must stay green. Remove the restore and its WARN. The builder's per-level tests
+stay as they are.
+
+#### C-25-5 LOW: the Envers naming fix refuses valid configurations, Envers or not
+
+`HibernateCopyCheck.enversSettings` runs for every admitted table whether or not Envers is
+present. It builds `<default_schema>.<prefix><table><suffix>` from raw configuration text and passes
+it through `TableRef.parse`, which only accepts lowercase identifiers of at most 63 characters.
+Anything else becomes `SHRED-SCHEMA-005` at startup:
+- a blind-indexed table whose name is 60 to 63 characters long: the default suffix makes
+  `<name>_aud` 64 or more characters. That refuses boot for **every** application with such a
+  table, including those without Envers. Before `ef6302f` this shape was admitted. PostgreSQL
+  truncates identifiers to 63 bytes, and Envers' audit table gets that truncated name.
+- `org.hibernate.envers.default_schema=Audit`, unquoted, which PostgreSQL folds to `audit`. This
+  is a valid setting, and the documented composition does not boot with it.
+
+Repro: `CipherProbePr25Pass2StarterTest`. Both probes are red with `SHRED-SCHEMA-005`:
+- `probe_sixty_character_table_without_envers_boots`, using fixture `copies.p2long.LongNote`.
+- `probe_documented_envers_composition_with_unquoted_mixed_case_default_schema_boots`.
+
+Fix (the builder): fold each computed name the way PostgreSQL does. Lowercase unquoted parts, keep
+quoted parts as written, and truncate each part to 63 bytes. Only after that build the `TableRef`.
+If a name the user configured still cannot be a `TableRef` (for example a quoted mixed-case
+suffix), refuse with `SHRED-CONFIG-001` naming the `org.hibernate.envers.*` property, never with
+`-005`. A default must never refuse. Both probes flip green. Add the test
+`e20_envers_names_folded_and_truncated_like_postgresql`, which checks that the truncated
+leftover `_aud` table of a 61-character table is still found by name.
+
+### Attacks on the fixes, closed without a finding
+
+- **`SET` placement against the advisory-lock `SELECT`:** on `0110205` the level is set on the
+  session before `setAutoCommit(false)`, and the read-back is the transaction's first statement, so
+  the advisory lock's snapshot is a READ COMMITTED one. The C-25-4 fix moves the pin into the
+  transaction, ahead of that `SELECT`.
+- **Connection inside a caller's REPEATABLE READ transaction** (a transaction-aware `DataSource`
+  under `@Transactional`, where the snapshot is already taken): pgjdbc refuses to change the level
+  mid-transaction, the erasure refuses with `-008` before `inTransaction`, and the caller's row is
+  not committed. The probe is green and stays as a regression guard for C-25-4's fix.
+- **Failing restore:** it is caught, logged and does not mask the result. It disappears with C-25-4.
+- **Envers settings with programmatic metadata:** the settings are read from
+  `SessionFactoryImplementor.getProperties()`, which collects `hibernate.properties`, the
+  `Configuration`/`MetadataSources` settings and the Spring properties alike. When Envers is on,
+  `EnversService` stays authoritative, and the property-derived name is an extra, de-duplicated by
+  `CopySignatures.plus`.
+- **N5 across schemas:** the audit name comes from `AuditMapping.resolveTableName` for the table
+  that holds the column, as Hibernate renders it, so a secondary table in another schema keeps its
+  schema. n5b covers the leftover column. C-25-5's folding applies to these names too.
+- **R-i merged into 1a:** `MappingAdmission.verdict` returns every relation-leg refusal (R-i,
+  outside parents, C-24-9) before the copy and statistics legs run. The post-`UPDATE` run is the
+  same function. So 1a cannot admit what PR 24 refuses. The pass 1 ancestor paths (a publication
+  via the root, a matview or FK on the parent) are refused as `-009` first, and the C-29 probes are
+  enabled and green.
+
+### Integration surface, 1a rows, final
+
+| rows | status |
+| --- | --- |
+| 1-8, 11-16, 18, 20, 22, 24, 26, 27b, 31, 32, 34-36, 41, 43-45 | verified (unchanged from pass 1, re-run green) |
+| 10 | verified: e19 and the C-25-2 probe |
+| 17, 19, 21, 23, 25 | verified at every isolation level: the C-25-1 probes and the builder's per-level tests |
+| 33 | verified: n1, n4, n5, n5b |
+| 9, 27a, 28, 29, 38, 39, 40, 46 | out of scope or not a path |
+| 30, 37, 47, 48 | PR 24 |
+| 42, 49, 50 | PR 1b |
+
+1a: in-scope rows 40, verified 40, **missing 0**. MERGE is held only by C-25-4 and C-25-5.
+
+### Design rev 5 (Work repo `0834636`, the builder's three additions for PR 1b)
+
+- **A12, an acknowledgement entry naming an ancestor is refused and `-009` stays the verdict:
+  accepted.** It matches the order verified above, where relation refusals come before leg K. An
+  entry that could only ever match something `-009` refuses would grant silently if that order
+  changed.
+- **Item 2 also refuses a null or blank hook name: accepted.** A name that cannot be recorded
+  cannot be answered, and refusing it fails closed.
+- **Item 1 also applies to the record written inside the erasure transaction: accepted,** on one
+  condition. The latest-record read used by the guard runs after `appendInTransaction` takes its
+  advisory lock and under the C-25-4 READ COMMITTED pin, so it reads the committed latest record
+  and not a snapshot from before the lock.
+
+Nothing is struck.
