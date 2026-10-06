@@ -608,6 +608,41 @@ class AcknowledgedCopiesPostgresTest {
         .isEqualTo(ErasureOutcome.COMPLETE);
   }
 
+  /**
+   * The security review's condition on rev 5 item 1: the guard reads the subject's latest record
+   * after the append's advisory lock and inside the READ COMMITTED pin. A pool that hands out
+   * connections already inside a transaction cannot be pinned, so an append through it is refused
+   * with the pin's own code: append goes through the pin, never around it.
+   */
+  @Test
+  void y10_append_runs_inside_the_read_committed_pin() {
+    table("app.y10p");
+    var config = new HikariConfig();
+    config.setJdbcUrl(POSTGRES.getJdbcUrl());
+    config.setUsername(APP);
+    config.setPassword("pw");
+    config.setMaximumPoolSize(2);
+    config.setAutoCommit(false);
+    var inTransaction = new HikariDataSource(config);
+    pools.add(inTransaction);
+    var store =
+        new JdbcErasureStore(
+            inTransaction,
+            schema,
+            ErasureChain.keyed(SECRET, "k1"),
+            List.of(),
+            (c, col, tenant, subject) -> 0L,
+            CopySignatures.defaults(),
+            List.of());
+    long rows = records();
+
+    Throwable thrown =
+        catchThrowable(() -> store.append(record("app.y10p-s-1", ErasureOutcome.COMPLETE)));
+
+    assertThat(code(thrown)).isEqualTo(ErrorCodes.SCHEMA_NAME_ISOLATION);
+    assertThat(records()).isEqualTo(rows);
+  }
+
   // ---------------------------------------------------------------------------- fixtures
 
   private static void table(String table) {
