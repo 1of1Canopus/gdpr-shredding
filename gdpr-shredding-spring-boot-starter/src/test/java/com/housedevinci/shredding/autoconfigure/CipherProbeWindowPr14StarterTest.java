@@ -6,9 +6,12 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.housedevinci.shredding.application.ErasureRequest;
 import com.housedevinci.shredding.application.ErasureService;
+import com.housedevinci.shredding.application.PostErasureHook;
 import com.housedevinci.shredding.autoconfigure.blindindexambient.OwnedNote;
 import com.housedevinci.shredding.autoconfigure.blindindexambient.OwnedNoteRepository;
+import com.housedevinci.shredding.domain.ErasureOutcome;
 import com.housedevinci.shredding.domain.ErrorCodes;
+import com.housedevinci.shredding.domain.HookOutcome;
 import com.housedevinci.shredding.domain.ShreddingException;
 import com.housedevinci.shredding.domain.SubjectId;
 import com.housedevinci.shredding.domain.TenantId;
@@ -18,6 +21,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Base64;
+import java.util.concurrent.atomic.AtomicLong;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -92,7 +96,21 @@ class CipherProbeWindowPr14StarterTest {
     registry.add(
         "spring.datasource.hikari.connection-init-sql",
         () -> "SET search_path = public, pg_catalog");
+    // #C-30: the application trigger exists from the first boot, created right after Hibernate's
+    // schema export, and is acknowledged with the hook that clears what it writes. An
+    // unacknowledged trigger on a blind-indexed table is refused (SHRED-SCHEMA-010).
+    registry.add(
+        "spring.jpa.properties.hibernate.hbm2ddl.import_files",
+        () -> "shredding-test/c30-acknowledged-trigger.sql");
+    registry.add("shredding.jdbc.acknowledged-copies[0].kind", () -> "trigger");
+    registry.add("shredding.jdbc.acknowledged-copies[0].schema", () -> "public");
+    registry.add("shredding.jdbc.acknowledged-copies[0].table", () -> "owned_note");
+    registry.add("shredding.jdbc.acknowledged-copies[0].name", () -> "shredding_probe_audit");
+    registry.add("shredding.jdbc.acknowledged-copies[0].cleared-by", () -> "probeAuditLogScrubber");
   }
+
+  /** What the clearing hook found in the audit log for the erased note, before it cleared it. */
+  static final AtomicLong SEEN_BY_HOOK = new AtomicLong(-1);
 
   private static String b64(String s) {
     return Base64.getEncoder().encodeToString(s.getBytes(StandardCharsets.UTF_8));
@@ -107,6 +125,39 @@ class CipherProbeWindowPr14StarterTest {
     ShreddingEventListener.TenantSupplier tenantSupplier() {
       return () -> TenantId.of("org-a");
     }
+
+    /** Clears what the acknowledged trigger wrote for the erased subject's notes. */
+    @Bean
+    PostErasureHook probeAuditLogScrubber(DataSource dataSource) {
+      return new PostErasureHook() {
+        @Override
+        public String name() {
+          return "probeAuditLogScrubber";
+        }
+
+        @Override
+        public void afterErasure(TenantId tenant, SubjectId subject) {
+          String notes =
+              " FROM public.probe_audit_log WHERE note_id IN (SELECT id FROM public.owned_note"
+                  + " WHERE owner_id OPERATOR(pg_catalog.=) ? AND tenant_id OPERATOR(pg_catalog.=) ?)";
+          try (Connection c = dataSource.getConnection();
+              var count = c.prepareStatement("SELECT pg_catalog.count(*)" + notes);
+              var delete = c.prepareStatement("DELETE" + notes)) {
+            count.setString(1, subject.value());
+            count.setString(2, tenant.value());
+            try (ResultSet rs = count.executeQuery()) {
+              rs.next();
+              SEEN_BY_HOOK.set(rs.getLong(1));
+            }
+            delete.setString(1, subject.value());
+            delete.setString(2, tenant.value());
+            delete.executeUpdate();
+          } catch (SQLException e) {
+            throw new IllegalStateException(e);
+          }
+        }
+      };
+    }
   }
 
   @Autowired OwnedNoteRepository ownedNotes;
@@ -117,7 +168,6 @@ class CipherProbeWindowPr14StarterTest {
   void removeTheFixture() {
     execute(
         "DROP TRIGGER IF EXISTS shredding_probe_keep_idx ON public.owned_note",
-        "DROP TRIGGER IF EXISTS shredding_probe_audit ON public.owned_note",
         "DROP OPERATOR IF EXISTS public.= (pg_catalog.varchar, pg_catalog.varchar)");
   }
 
@@ -231,33 +281,33 @@ class CipherProbeWindowPr14StarterTest {
    * the framework-rendered {@code SELECT} inside the window fires no trigger.
    */
   @Test
-  @org.junit.jupiter.api.Disabled(
-      "QUESTIONS #C-30: since audit-table coverage (PR 1a) any enabled trigger on a blind-indexed"
-          + " table is refused at admission (CopyCataloguePostgresTest T1-T8), so no trigger can"
-          + " fire on an erasure. PR 1b (acknowledged copies) admits a named trigger again and"
-          + " re-enables this probe with an acknowledgement.")
   void probe_an_application_trigger_with_an_unqualified_body_still_fires_on_the_erasure() {
     String owner = "trigger-window-" + System.nanoTime();
-    ownedNotes.saveAndFlush(new OwnedNote(owner, "org-b", "victim@example.test"));
-    execute(
-        "CREATE TABLE IF NOT EXISTS public.probe_audit_log (note_id bigint)",
-        "CREATE OR REPLACE FUNCTION public.shredding_probe_audit() RETURNS trigger AS $$ BEGIN"
-            + " INSERT INTO probe_audit_log (note_id) VALUES (NEW.id); RETURN NEW; END;"
-            + " $$ LANGUAGE plpgsql",
-        "CREATE TRIGGER shredding_probe_audit AFTER UPDATE ON public.owned_note"
-            + " FOR EACH ROW EXECUTE FUNCTION public.shredding_probe_audit()");
+    OwnedNote note = ownedNotes.saveAndFlush(new OwnedNote(owner, "org-b", "victim@example.test"));
+    long before =
+        count("SELECT count(*) FROM public.probe_audit_log WHERE note_id = " + note.getId());
+    SEEN_BY_HOOK.set(-1);
 
     var result =
         erasures.erase(
             new ErasureRequest(TenantId.of("org-b"), SubjectId.of(owner), "dpo", "art 17"));
 
     assertThat(result.blindIndexColumnsCleared()).isEqualTo(1);
-    assertThat(count("SELECT count(*) FROM public.probe_audit_log"))
+    assertThat(SEEN_BY_HOOK.get())
         .describedAs(
             "the application's trigger resolved `probe_audit_log` on the path the transaction"
-                + " arrived with. A window around the whole transaction would have failed it with"
-                + " `relation \"probe_audit_log\" does not exist` and refused the erasure")
-        .isEqualTo(1);
+                + " arrived with, so the clearing hook found its row. A window around the whole"
+                + " transaction would have failed it with `relation \"probe_audit_log\" does not"
+                + " exist` and refused the erasure")
+        .isEqualTo(before + 1);
+    String object = "trigger \"public\".\"owned_note\".\"shredding_probe_audit\"";
+    assertThat(result.records().get(0).outcome()).isEqualTo(ErasureOutcome.PARTIAL);
+    assertThat(result.records().get(0).hookOutcomes())
+        .containsExactly(
+            new HookOutcome("probeAuditLogScrubber", false, "pending; clears " + object));
+    assertThat(result.outcome()).isEqualTo(ErasureOutcome.COMPLETE);
+    assertThat(result.records().get(result.records().size() - 1).hookOutcomes())
+        .containsExactly(new HookOutcome("probeAuditLogScrubber", true, "clears " + object));
   }
 
   /**
