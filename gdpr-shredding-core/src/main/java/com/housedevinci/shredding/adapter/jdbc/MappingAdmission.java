@@ -470,6 +470,10 @@ public final class MappingAdmission {
       if (!(verdict instanceof Admitted)) {
         return verdict;
       }
+      Optional<Refused> outside = outsideParents(c, target, oid, descendants);
+      if (outside.isPresent()) {
+        return outside.get();
+      }
       var family = new ArrayList<Long>();
       family.add(oid);
       descendants.forEach(d -> family.add(d.oid()));
@@ -874,6 +878,23 @@ public final class MappingAdmission {
                   + " check then covers the root; if the root already holds statistics of the"
                   + " column, the next start names them with their own remedy."));
     }
+    if (several) {
+      return Optional.of(
+          new Refused(
+              "R-i",
+              head
+                  + ", which inherits from "
+                  + parents
+                  + ". "
+                  + MULTIPLE_PARENTS
+                  + ": ANALYZE on each of "
+                  + parents
+                  + " stores statistics computed from this table's rows under its own columns, "
+                  + columns
+                  + " included, any role with SELECT on one of them reads them from pg_stats, and"
+                  + " mapping any one of them leaves the others holding the values. "
+                  + SINGLE_CHAIN));
+    }
     return Optional.of(
         new Refused(
             "R-i",
@@ -881,20 +902,99 @@ public final class MappingAdmission {
                 + ", which inherits from "
                 + parents
                 + ". ANALYZE on "
-                + (several ? "each of them" : parents)
+                + parents
                 + " stores statistics computed from this table's rows under its own columns, "
                 + columns
                 + " included, and any role with SELECT on "
-                + (several ? "one of them" : parents)
+                + parents
                 + " reads them from pg_stats; no erasure of "
                 + table
                 + " reaches them. Map the entity to "
-                + (several ? "the table at the top of the hierarchy" : parents)
+                + parents
                 + ": its descendants are then checked and erased through it. The statistics"
                 + " check then covers "
-                + (several ? "that table" : parents)
+                + parents
                 + "; if it already holds statistics of the column, the next start names them with"
                 + " their own remedy."));
+  }
+
+  private static final String MULTIPLE_PARENTS =
+      "A table holding blind-indexed rows with more than one parent is not supported";
+
+  private static final String SINGLE_CHAIN =
+      "Restructure the tables so that every table holding blind-indexed rows has a single parent"
+          + " chain, and map the root of that chain.";
+
+  /**
+   * Rule R-i, descendant half (security review C-24-9): a descendant of the mapped table that also
+   * inherits from a table outside the mapped hierarchy puts its rows, blind index included, into
+   * that other parent's statistics, which no erasure of this hierarchy reaches. One row per such
+   * descendant, every parent named in {@code inhseqno} order. The descendant set is the one the
+   * admission walk found, bound twice.
+   */
+  static final String OUTSIDE_PARENTS_SQL =
+      "SELECT pg_catalog.concat_ws('.', pg_catalog.quote_ident(cn.nspname),"
+          + " pg_catalog.quote_ident(cc.relname)) AS child,"
+          + " (SELECT pg_catalog.string_agg(pg_catalog.concat_ws('.',"
+          + " pg_catalog.quote_ident(pn.nspname), pg_catalog.quote_ident(pc.relname)), ', '"
+          + " ORDER BY a.inhseqno)"
+          + " FROM pg_catalog.pg_inherits a"
+          + " JOIN pg_catalog.pg_class pc ON (pc.oid OPERATOR(pg_catalog.=) a.inhparent)"
+          + " JOIN pg_catalog.pg_namespace pn ON (pn.oid OPERATOR(pg_catalog.=) pc.relnamespace)"
+          + " WHERE (a.inhrelid OPERATOR(pg_catalog.=) cc.oid)) AS parents"
+          + " FROM pg_catalog.unnest(?) AS f"
+          + " JOIN pg_catalog.pg_class cc ON (cc.oid OPERATOR(pg_catalog.=) CAST(f.f AS pg_catalog.oid))"
+          + " JOIN pg_catalog.pg_namespace cn ON (cn.oid OPERATOR(pg_catalog.=) cc.relnamespace)"
+          + " WHERE ((SELECT pg_catalog.count(*) FROM pg_catalog.pg_inherits o"
+          + " WHERE (o.inhrelid OPERATOR(pg_catalog.=) cc.oid)"
+          + " AND ((SELECT pg_catalog.count(*) FROM pg_catalog.unnest(?) AS g"
+          + " WHERE (CAST(g.g AS pg_catalog.oid) OPERATOR(pg_catalog.=) o.inhparent))"
+          + " OPERATOR(pg_catalog.=) 0)) OPERATOR(pg_catalog.>) 0)"
+          + " ORDER BY 1";
+
+  private static Optional<Refused> outsideParents(
+      Connection c, Target target, long root, List<Descendant> descendants) throws SQLException {
+    if (descendants.isEmpty()
+        || target.columns().stream().noneMatch(col -> BLIND_INDEX.equals(col.role()))) {
+      return Optional.empty();
+    }
+    var family = new ArrayList<Long>();
+    family.add(root);
+    descendants.forEach(d -> family.add(d.oid()));
+    var found = new ArrayList<String>();
+    Array oids = c.createArrayOf("int8", family.toArray(new Long[0]));
+    try (PreparedStatement ps = c.prepareStatement(OUTSIDE_PARENTS_SQL)) {
+      ps.setArray(1, oids);
+      ps.setArray(2, oids);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          found.add(rs.getString("child") + " (parents " + rs.getString("parents") + ")");
+        }
+      }
+    } finally {
+      oids.free();
+    }
+    if (found.isEmpty()) {
+      return Optional.empty();
+    }
+    String who = who(target);
+    String head = target.entity().isPresent() ? who + " maps table " + target.table() : who;
+    return Optional.of(
+        new Refused(
+            "R-i",
+            head
+                + ", whose descendant"
+                + (found.size() == 1 ? " " : "s ")
+                + String.join(", ", found)
+                + (found.size() == 1 ? " also inherits" : " also inherit")
+                + " from a table outside this hierarchy. "
+                + MULTIPLE_PARENTS
+                + ": ANALYZE on that other parent stores statistics computed from the"
+                + " descendant's rows under its own columns, the blind index included, and any"
+                + " role with SELECT on it reads them from pg_stats; no erasure of "
+                + target.table()
+                + " reaches them. "
+                + SINGLE_CHAIN));
   }
 
   private static Optional<Refused> judgeColumn(String who, TableRef table, ColumnFacts col) {

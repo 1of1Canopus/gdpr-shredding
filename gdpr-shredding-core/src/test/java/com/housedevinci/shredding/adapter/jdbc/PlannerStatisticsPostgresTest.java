@@ -680,7 +680,8 @@ abstract class PlannerStatisticsPostgresTest {
 
     assertThat(refusedRi(app, "app.a4_kid"))
         .contains("which inherits from app.a4_p2, app.a4_p1.")
-        .contains("Map the entity to the table at the top of the hierarchy");
+        .contains("A table holding blind-indexed rows with more than one parent is not supported")
+        .doesNotContain("top of the hierarchy");
   }
 
   @Test
@@ -786,6 +787,60 @@ abstract class PlannerStatisticsPostgresTest {
 
     assertThat(verdict("app.a10")).isInstanceOf(Admitted.class);
     refusedRi(app, "app.a10_t1");
+  }
+
+  /** C-24-9: a second parent added to a descendant after boot refuses the next erasure. */
+  @Test
+  void a12_second_parent_added_to_a_descendant_after_boot_refuses_the_next_erasure() {
+    table("app.a12", "");
+    exec(
+        owner,
+        "CREATE TABLE app.a12_kid () INHERITS (app.a12)",
+        "GRANT SELECT, UPDATE ON app.a12_kid TO " + APP);
+    zero("app.a12");
+    JdbcErasureStore store = store("app.a12");
+    assertThat(erase(store, "s-121").blindIndexColumnsCleared()).isEqualTo(1);
+    exec(
+        owner,
+        "CREATE TABLE app.a12_other (email_idx varchar(64))",
+        "ALTER TABLE app.a12_kid INHERIT app.a12_other");
+    long before = Long.parseLong(text(su, "SELECT count(*) FROM public.shredding_erasure"));
+
+    Throwable thrown = catchThrowable(() -> erase(store, "s-122"));
+
+    assertThat(code(thrown)).isEqualTo(ErrorCodes.MAPPING_INADMISSIBLE);
+    assertThat(thrown)
+        .hasMessageStartingWith(
+            "shredding: the blind-indexed table app.a12, whose descendant app.a12_kid (parents"
+                + " app.a12, app.a12_other) also inherits from a table outside this hierarchy.")
+        .hasMessageContaining("This erasure is refused before its first statement");
+    assertThat(Long.parseLong(text(su, "SELECT count(*) FROM public.shredding_erasure")))
+        .isEqualTo(before);
+    assertThat(
+            text(su, "SELECT count(*) FROM app.a12 WHERE subject = 's-122' AND email_idx IS NULL"))
+        .isEqualTo("0");
+  }
+
+  /** C-24-9: the outside parent may hang off any level of the descendant set. */
+  @Test
+  void a13_grandchild_with_an_outside_parent_is_refused_at_the_root() {
+    columnsTable("app.a13", "");
+    columnsTable("app.a13_other", "");
+    exec(
+        owner,
+        "CREATE TABLE app.a13_kid () INHERITS (app.a13)",
+        "CREATE TABLE app.a13_gkid () INHERITS (app.a13_kid, app.a13_other)",
+        "GRANT SELECT, UPDATE ON app.a13, app.a13_kid, app.a13_gkid TO " + APP);
+    zero("app.a13");
+
+    String message = refusedRi(app, "app.a13");
+
+    assertThat(message)
+        .contains("whose descendant app.a13_gkid (parents app.a13_kid, app.a13_other)")
+        .contains("more than one parent is not supported");
+    assertThat(message.toUpperCase(java.util.Locale.ROOT))
+        .doesNotContain("DETACH")
+        .doesNotContain("NO INHERIT");
   }
 
   @Test
