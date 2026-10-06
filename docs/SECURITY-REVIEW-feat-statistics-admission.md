@@ -319,3 +319,28 @@ list):
 
 Routing: this correction sits inside the R-i rule that this PR built, so it goes to the builder of
 this PR. Pass 4 is a probe check of C-24-9 only.
+
+## Pass 4 (probe check) (2026-10-06), head a508e00
+
+**Verdict: MERGE.** C-24-9 is closed. No finding is open.
+
+| check | result |
+|---|---|
+| `CIPHER_PROBE_MAVEN=1 ./mvnw -B verify` (Docker up), at a508e00 | BUILD SUCCESS, 699 tests, 0 failures, 0 skipped (core 433, starter 249, sample 17) |
+| `CipherProbePr24Test` / `Pass2Test` / `Pass3Test` | 6 / 5 / 1 green |
+| A12, A13 on PostgreSQL 16 and 17 | green |
+
+- Probe integrity: 19a58b4 adds `CipherProbePr24Pass3Test` byte-identical to the file this review
+  handed over. a508e00 changes it in two ways only: it drops an unused `ShreddingException` import
+  and joins two `describedAs` arguments onto one line. The fixture and the assertion
+  (`isNotInstanceOf(Admitted)`) are unchanged. The probe was RED at 19a58b4 and is green at a508e00.
+- The fix takes the descendant set that the existing walk already collects and refuses the
+  mapping, under `SHRED-SCHEMA-009`, when any descendant has a parent outside that set. The
+  message names the descendant and every one of its parents. It says "more than one parent is not
+  supported". It no longer says "top of the hierarchy", and it offers neither DETACH nor NO INHERIT.
+- A12 adds a second parent with `ALTER TABLE ... INHERIT` after a successful erasure. The next
+  erasure is refused before its first statement with `SHRED-SCHEMA-009`, no erasure row is
+  recorded, and no blind index is cleared. A13 refuses at the root a grandchild whose second
+  parent sits outside the hierarchy, and it asserts that DETACH and NO INHERIT are absent.
+  Both claims hold.
+- SECURITY-NOTES and the upgrade guide each carry the multiple-inheritance row.
