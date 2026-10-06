@@ -89,8 +89,8 @@ class CipherProbeRc2UpgradeOrderTest {
 
   /**
    * RED on 333a4a1: positions 1 and 3 cannot be met by a running 0.1.x install. Repro outside the
-   * suite (0.1.1 from Central, PostgreSQL 16, see the pass 2 review): 0.1.1 refuses
-   * an audited {@code @Shredded} field ("Patient_AUD.email is mapped by ... but has no field-level
+   * suite (0.1.1 from Central, PostgreSQL 16, see the pass 2 review): 0.1.1 refuses an audited
+   * {@code @Shredded} field ("Patient_AUD.email is mapped by ... but has no field-level
    * {@code @Shredded}") and Envers' auto-registered listener ("this module's listener is registered
    * on post-insert but is not last"), both SHRED-CONFIG-001, so no 0.1.1 install that runs has
    * either shape.
