@@ -48,8 +48,8 @@ import org.testcontainers.utility.DockerImageName;
  *       {@code COMPLETE} answers it with success.
  *   <li>C-26-2 (#C-31): the {@code SHRED-SCHEMA-010} trigger finding and the {@code
  *       SHRED-SCHEMA-009} ancestor refusal print a quoted identifier raw, so a name holding a line
- *       break splits the exception message (and every log line that prints it) in two. Rev 5 item
- *       3 requires every message that prints an operator-chosen identifier to escape it.
+ *       break splits the exception message (and every log line that prints it) in two. Rev 5 item 3
+ *       requires every message that prints an operator-chosen identifier to escape it.
  * </ul>
  *
  * Fixture as {@code AcknowledgedCopiesPostgresTest}.
@@ -206,8 +206,7 @@ class CipherProbePr26PostgresTest {
               TableRef.parse(table),
               List.of(
                   new Column(ColumnRef.unquoted("tenant"), Use.COMPARED, MappingAdmission.TENANT),
-                  new Column(
-                      ColumnRef.unquoted("subject"), Use.COMPARED, MappingAdmission.SUBJECT),
+                  new Column(ColumnRef.unquoted("subject"), Use.COMPARED, MappingAdmission.SUBJECT),
                   new Column(ColumnRef.unquoted("id"), Use.COMPARED, MappingAdmission.IDENTIFIER),
                   new Column(
                       ColumnRef.unquoted("email_idx"),

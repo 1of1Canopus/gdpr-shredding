@@ -74,7 +74,9 @@ class CipherProbePr26Test {
             record(
                 ErasureOutcome.PARTIAL,
                 new HookOutcome(
-                    "scrubber", false, "pending; clears trigger \"public\".\"note\".\"note_audit\"")));
+                    "scrubber",
+                    false,
+                    "pending; clears trigger \"public\".\"note\".\"note_audit\"")));
   }
 
   @Test
@@ -108,8 +110,7 @@ class CipherProbePr26Test {
                 memory.append(
                     record(
                         ErasureOutcome.COMPLETE,
-                        HookOutcome.failed(
-                            "scrubber", OutstandingHooks.CARRIED_PREFIX + "1"))));
+                        HookOutcome.failed("scrubber", OutstandingHooks.CARRIED_PREFIX + "1"))));
 
     assertThat(thrown).isInstanceOf(ShreddingException.class);
     assertThat(memory.all()).hasSize(1);
@@ -120,11 +121,11 @@ class CipherProbePr26Test {
     partialNamingScrubberPending();
     var unused =
         catchThrowable(
-        () ->
-            memory.append(
-                record(
-                    ErasureOutcome.COMPLETE,
-                    HookOutcome.failed("scrubber", "java.lang.IllegalStateException"))));
+            () ->
+                memory.append(
+                    record(
+                        ErasureOutcome.COMPLETE,
+                        HookOutcome.failed("scrubber", "java.lang.IllegalStateException"))));
 
     // The application, scrubber removed, asks again for the DPO's proof.
     ErasureResult retry =
