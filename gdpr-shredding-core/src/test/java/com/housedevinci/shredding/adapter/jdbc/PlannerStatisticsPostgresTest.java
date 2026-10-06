@@ -238,7 +238,8 @@ abstract class PlannerStatisticsPostgresTest {
           .hasMessageStartingWith(
               "shredding: "
                   + c[1]
-                  + " on a blind-indexed table calls app.s14_peek, which is outside pg_catalog.");
+                  + " on a blind-indexed table calls app.s14_peek, which is outside pg_catalog or not"
+                  + " immutable.");
     }
   }
 
@@ -289,7 +290,6 @@ abstract class PlannerStatisticsPostgresTest {
     exec(
         owner,
         "CREATE INDEX s8_pred ON app.s8 (id) WHERE email_idx IS NOT NULL",
-        "CREATE INDEX s8_mixed ON app.s8 (lower(subject)) WHERE email_idx IS NOT NULL",
         "CREATE INDEX s8_plain_and_expr ON app.s8 (email_idx, lower(subject))",
         "CREATE INDEX s8_lookup ON app.s8 (email_idx)");
     analyze("app.s8");
@@ -304,6 +304,22 @@ abstract class PlannerStatisticsPostgresTest {
         .isEqualTo("0");
 
     assertThat(verdict("app.s8")).isInstanceOf(Admitted.class);
+  }
+
+  /**
+   * C-24-6: an expression index samples only the rows its predicate selects, so a predicate on the
+   * blind index is a carrier even when the expression names another column.
+   */
+  @Test
+  void s8b_expression_index_whose_predicate_selects_by_the_index_column_is_refused() {
+    table("app.s8b", "");
+    zero("app.s8b");
+    exec(owner, "CREATE INDEX s8b_mixed ON app.s8b (lower(subject)) WHERE email_idx IS NOT NULL");
+
+    assertThat(copied("app.s8b"))
+        .contains(
+            "expression index app.s8b_mixed samples only the rows its predicate selects by it"
+                + " (drop it: DROP INDEX app.s8b_mixed)");
   }
 
   // ---------------------------------------------------------- rows 30 and 48: descendants

@@ -115,7 +115,8 @@ final class PlannerStatistics {
           + " pg_catalog.quote_ident(ic.relname) AS rel,"
           + " pg_catalog.quote_ident(rn.nspname) AS root_nsp,"
           + " pg_catalog.quote_ident(rc.relname) AS root_rel,"
-          + " CAST(i.indexprs AS pg_catalog.text) AS exprs"
+          + " CAST(i.indexprs AS pg_catalog.text) AS exprs,"
+          + " CAST(i.indpred AS pg_catalog.text) AS pred"
           + " FROM pg_catalog.unnest(?) AS f"
           + " JOIN pg_catalog.pg_index i"
           + " ON (i.indrelid OPERATOR(pg_catalog.=) CAST(f.f AS pg_catalog.oid))"
@@ -165,7 +166,10 @@ final class PlannerStatistics {
           + " JOIN pg_catalog.pg_namespace n ON (n.oid OPERATOR(pg_catalog.=) c.relnamespace)"
           + " ORDER BY 1";
 
-  /** The functions among the given oids that are not in {@code pg_catalog}, by qualified name. */
+  /**
+   * The functions among the given oids that are not in {@code pg_catalog}, or are not immutable
+   * (C-24-8: {@code query_to_xml} is {@code pg_catalog}'s and runs any SQL), by qualified name.
+   */
   static final String FOREIGN_FUNCTIONS_SQL =
       "SELECT pg_catalog.concat_ws('.', pg_catalog.quote_ident(n.nspname),"
           + " pg_catalog.quote_ident(p.proname)) AS name"
@@ -173,6 +177,7 @@ final class PlannerStatistics {
           + " JOIN pg_catalog.pg_proc p ON (p.oid OPERATOR(pg_catalog.=) CAST(f.f AS pg_catalog.oid))"
           + " JOIN pg_catalog.pg_namespace n ON (n.oid OPERATOR(pg_catalog.=) p.pronamespace)"
           + " WHERE (n.nspname OPERATOR(pg_catalog.<>) 'pg_catalog')"
+          + " OR (p.provolatile OPERATOR(pg_catalog.<>) 'i')"
           + " ORDER BY 1";
 
   /**
@@ -189,6 +194,7 @@ final class PlannerStatistics {
           + " JOIN pg_catalog.pg_namespace pn ON (pn.oid OPERATOR(pg_catalog.=) p.pronamespace)"
           + " WHERE (n.nspname OPERATOR(pg_catalog.<>) 'pg_catalog')"
           + " OR (pn.nspname OPERATOR(pg_catalog.<>) 'pg_catalog')"
+          + " OR (p.provolatile OPERATOR(pg_catalog.<>) 'i')"
           + " ORDER BY 1";
 
   /** Reads and restores the session's search_path around the remedy's catalogue reads. */
@@ -324,7 +330,7 @@ final class PlannerStatistics {
   }
 
   /** One expression index on a family member. */
-  record ExpressionIndex(long relid, String name, String root, String exprs) {}
+  record ExpressionIndex(long relid, String name, String root, String exprs, String pred) {}
 
   /** One extended-statistics object on a family member, with the attnums it covers. */
   record ExtendedStatistics(long relid, String name, Set<Integer> attnums, String exprs) {}
@@ -541,7 +547,8 @@ final class PlannerStatistics {
                   rs.getLong("indrelid"),
                   rs.getString("nsp") + "." + rs.getString("rel"),
                   rs.getString("root_nsp") + "." + rs.getString("root_rel"),
-                  rs.getString("exprs")));
+                  rs.getString("exprs"),
+                  rs.getString("pred")));
         }
       }
     } finally {
@@ -589,6 +596,9 @@ final class PlannerStatistics {
     var trees = new LinkedHashMap<String, String>();
     for (ExpressionIndex index : indexes) {
       trees.put("expression index " + index.name(), index.exprs());
+      if (index.pred() != null) {
+        trees.put("the predicate of expression index " + index.name(), index.pred());
+      }
     }
     for (ExtendedStatistics stats : extended) {
       if (stats.exprs() != null) {
@@ -623,7 +633,7 @@ final class PlannerStatistics {
             tree.getKey(),
             String.join(", ", foreign)
                 + (foreign.size() == 1 ? ", which is" : ", which are")
-                + " outside pg_catalog",
+                + " outside pg_catalog or not immutable",
             null);
       }
     }
@@ -659,8 +669,8 @@ final class PlannerStatistics {
             + calls
             + ". Its statistics hold whatever that function reads, which this module cannot see,"
             + " so it cannot tell whether they hold a blind-index column. Unverifiable is not"
-            + " clean, so this is a refusal. Drop it, or replace the function by a pg_catalog"
-            + " expression.",
+            + " clean, so this is a refusal. Drop it, or replace the function by an immutable"
+            + " pg_catalog expression.",
         cause);
   }
 
@@ -726,8 +736,10 @@ final class PlannerStatistics {
     var dropped = new LinkedHashSet<String>();
     for (ExpressionIndex index : indexes) {
       Set<Integer> read;
+      Set<Integer> selects;
       try {
         read = referencedAttnums(index.exprs());
+        selects = index.pred() == null ? Set.of() : referencedAttnums(index.pred());
       } catch (IllegalArgumentException e) {
         throw new ShreddingException(
             ErrorCodes.SCHEMA_UNVERIFIABLE,
@@ -740,6 +752,19 @@ final class PlannerStatistics {
             e);
       }
       for (Carrier k : carriers) {
+        if (k.relid() == index.relid()
+            && !(read.contains(k.attnum()) || read.contains(0))
+            && (selects.contains(k.attnum()) || selects.contains(0))
+            && dropped.add(index.name())) {
+          // C-24-6: ANALYZE samples an expression index only from the rows its predicate selects,
+          // so a predicate on the blind index keeps, under the index, which values it held.
+          facts.add(
+              "expression index "
+                  + index.name()
+                  + " samples only the rows its predicate selects by it (drop it: DROP INDEX "
+                  + index.root()
+                  + ")");
+        }
         if (k.relid() == index.relid()
             && (read.contains(k.attnum()) || read.contains(0))
             && dropped.add(index.name())) {
@@ -803,18 +828,29 @@ final class PlannerStatistics {
     if (auto) {
       c.setAutoCommit(false);
     }
-    boolean done = false;
+    Throwable primary = null;
     try {
       setPath(c, JdbcSupport.PINNED_PATH);
-      T result = work.run();
-      done = true;
-      return result;
+      return work.run();
+    } catch (RuntimeException | SQLException | Error e) {
+      primary = e;
+      throw e;
     } finally {
       if (auto) {
         c.rollback();
         c.setAutoCommit(true);
-      } else if (done) {
-        setPath(c, arrived);
+      } else {
+        // C-24-5: restored on every exit, a refusal included: a caller of the public verdict that
+        // catches it keeps working in its own transaction. A restore that fails because the work
+        // aborted the transaction (25P02) is attached to the primary, never in its place.
+        try {
+          setPath(c, arrived);
+        } catch (SQLException restore) {
+          if (primary == null) {
+            throw restore;
+          }
+          primary.addSuppressed(restore);
+        }
       }
     }
   }
@@ -891,7 +927,7 @@ final class PlannerStatistics {
       var cleared = new ArrayList<String>();
       for (Finding f : retyped) {
         for (Carrier k : f.carriers()) {
-          if (k.root()) {
+          if (k.root() || k.generated()) {
             zero.append(" ALTER TABLE ")
                 .append(k.relation())
                 .append(" ALTER COLUMN ")

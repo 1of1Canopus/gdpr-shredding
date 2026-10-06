@@ -210,8 +210,7 @@ class CipherProbePr24Pass2Test {
     Object outcome = thrown != null ? thrown : verdict(app, "app.q5");
     assertThat(
             outcome instanceof Copied
-                || (outcome instanceof ShreddingException e
-                    && "SHRED-SCHEMA-005".equals(e.code())))
+                || (outcome instanceof ShreddingException e && "SHRED-SCHEMA-005".equals(e.code())))
         .describedAs("a non-immutable call in a statistics expression is refused, got %s", outcome)
         .isTrue();
   }
@@ -223,9 +222,9 @@ class CipherProbePr24Pass2Test {
     Object outcome = thrown != null ? thrown : verdict(app, table);
     assertThat(
             outcome instanceof Copied
-                || (outcome instanceof ShreddingException e
-                    && "SHRED-SCHEMA-005".equals(e.code())))
-        .describedAs("a partial index selecting rows by the blind index is refused, got %s", outcome)
+                || (outcome instanceof ShreddingException e && "SHRED-SCHEMA-005".equals(e.code())))
+        .describedAs(
+            "a partial index selecting rows by the blind index is refused, got %s", outcome)
         .isTrue();
   }
 
