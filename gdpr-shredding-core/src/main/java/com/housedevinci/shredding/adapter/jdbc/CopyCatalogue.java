@@ -396,7 +396,7 @@ final class CopyCatalogue {
                     try {
                       return new Member(
                           k,
-                          rs.getString("nsp") + "." + rs.getString("rel"),
+                          JdbcSupport.printed(rs, "nsp") + "." + JdbcSupport.printed(rs, "rel"),
                           rs.getBoolean("relispartition"),
                           rs.getString("relkind"),
                           new LinkedHashMap<>());
@@ -410,7 +410,7 @@ final class CopyCatalogue {
                   new IndexColumn(
                       blind.get(rs.getInt("wanted") - 1),
                       rs.getString("raw"),
-                      rs.getString("col")));
+                      JdbcSupport.printed(rs, "col")));
         }
       } catch (IllegalStateException e) {
         if (e.getCause() instanceof SQLException sql) {
@@ -460,13 +460,13 @@ final class CopyCatalogue {
               new Trigger(
                   rs.getLong("oid"),
                   rs.getLong("tgrelid"),
-                  rs.getString("name"),
+                  JdbcSupport.printed(rs, "name"),
                   rs.getLong("tgparentid"),
                   rs.getInt("tgtype"),
                   rs.getString("tgenabled"),
                   rs.getBoolean("is_constraint"),
-                  rs.getString("function"),
-                  Optional.ofNullable(rs.getString("columns")),
+                  JdbcSupport.printed(rs, "function"),
+                  Optional.ofNullable(JdbcSupport.printed(rs, "columns")),
                   rs.getString("raw_nsp"),
                   rs.getString("raw_rel"),
                   rs.getString("raw_name")));
@@ -615,7 +615,7 @@ final class CopyCatalogue {
                 case "4" -> "DELETE";
                 default -> "an event";
               };
-          String name = rs.getString("name");
+          String name = JdbcSupport.printed(rs, "name");
           out.add(
               "shredding: "
                   + root.name()
@@ -664,7 +664,8 @@ final class CopyCatalogue {
               long ref = rs.getLong("refobjid");
               int sub = rs.getInt("refobjsubid");
               long view = rs.getLong("view");
-              String viewName = rs.getString("nsp") + "." + rs.getString("rel");
+              String viewName =
+                  JdbcSupport.printed(rs, "nsp") + "." + JdbcSupport.printed(rs, "rel");
               boolean wholeRow = rs.getBoolean("whole_row");
               Optional<Reach> reach = reach(ref, sub, wholeRow, members, carrying);
               if (reach.isEmpty()) {
@@ -749,9 +750,9 @@ final class CopyCatalogue {
       ps.setArray(1, oids);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          String name = rs.getString("name");
-          String referencing = rs.getString("referencing");
-          String referenced = rs.getString("referenced");
+          String name = JdbcSupport.printed(rs, "name");
+          String referencing = JdbcSupport.printed(rs, "referencing");
+          String referenced = JdbcSupport.printed(rs, "referenced");
           Member from = members.get(rs.getLong("conrelid"));
           Member to = members.get(rs.getLong("confrelid"));
           Optional<IndexColumn> own =
@@ -866,7 +867,7 @@ final class CopyCatalogue {
       ps.setArray(1, oids);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          String name = rs.getString("name");
+          String name = JdbcSupport.printed(rs, "name");
           Member m = members.get(rs.getLong("relid"));
           if (m == null || reported.contains(name)) {
             continue;
@@ -955,7 +956,7 @@ final class CopyCatalogue {
                   entry.get(),
                   entries.get(entry.get()),
                   "(plugin "
-                      + rs.getString("plugin")
+                      + JdbcSupport.printed(rs, "plugin")
                       + ") decoding a table with "
                       + indexColumns(root),
                   "its consumer keeps",
@@ -964,9 +965,9 @@ final class CopyCatalogue {
         }
         out.add(
             "shredding: logical replication slot "
-                + rs.getString("name")
+                + JdbcSupport.printed(rs, "name")
                 + " (plugin "
-                + rs.getString("plugin")
+                + JdbcSupport.printed(rs, "plugin")
                 + ") decodes every table of this database, including "
                 + root.name()
                 + " with "
@@ -1019,8 +1020,8 @@ final class CopyCatalogue {
           if (reported.contains(oid)) {
             continue;
           }
-          String relation = rs.getString("nsp") + "." + rs.getString("rel");
-          String quotedCol = rs.getString("col");
+          String relation = JdbcSupport.printed(rs, "nsp") + "." + JdbcSupport.printed(rs, "rel");
+          String quotedCol = JdbcSupport.printed(rs, "col");
           String clear =
               "UPDATE "
                   + relation
@@ -1078,7 +1079,10 @@ final class CopyCatalogue {
             continue;
           }
           List<String> cols = strings(rs.getArray("cols"));
-          List<String> quoted = strings(rs.getArray("quoted"));
+          List<String> quoted =
+              strings(rs.getArray("quoted")).stream()
+                  .map(com.housedevinci.shredding.application.LogText::escape)
+                  .toList();
           for (CopySignatures.RevisionSignature s : signatures.signatures()) {
             int first = cols.indexOf(s.first());
             int second = cols.indexOf(s.second());

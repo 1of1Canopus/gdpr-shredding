@@ -512,13 +512,13 @@ final class PlannerStatistics {
                   relid,
                   relid == root,
                   rs.getBoolean("relispartition"),
-                  rs.getString("nsp") + "." + rs.getString("rel"),
+                  JdbcSupport.printed(rs, "nsp") + "." + JdbcSupport.printed(rs, "rel"),
                   rs.getInt("base_attnum"),
                   rs.getInt("attnum"),
-                  rs.getString("col"),
+                  JdbcSupport.printed(rs, "col"),
                   "s".equals(rs.getString("attgenerated")),
                   stored,
-                  rs.getString("spelled"),
+                  JdbcSupport.printed(rs, "spelled"),
                   rs.getBoolean("may_read"),
                   rs.getBoolean("rls_active"),
                   rs.getLong("stats_rows")));
@@ -545,8 +545,8 @@ final class PlannerStatistics {
           out.add(
               new ExpressionIndex(
                   rs.getLong("indrelid"),
-                  rs.getString("nsp") + "." + rs.getString("rel"),
-                  rs.getString("root_nsp") + "." + rs.getString("root_rel"),
+                  JdbcSupport.printed(rs, "nsp") + "." + JdbcSupport.printed(rs, "rel"),
+                  JdbcSupport.printed(rs, "root_nsp") + "." + JdbcSupport.printed(rs, "root_rel"),
                   rs.getString("exprs"),
                   rs.getString("pred")));
         }
@@ -570,7 +570,7 @@ final class PlannerStatistics {
           out.add(
               new ExtendedStatistics(
                   rs.getLong("stxrelid"),
-                  rs.getString("nsp") + "." + rs.getString("name"),
+                  JdbcSupport.printed(rs, "nsp") + "." + JdbcSupport.printed(rs, "name"),
                   covered,
                   rs.getString("exprs")));
         }
@@ -610,7 +610,8 @@ final class PlannerStatistics {
       ps.setArray(1, oids);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          trees.put("stored generated column " + rs.getString("col"), rs.getString("exprs"));
+          trees.put(
+              "stored generated column " + JdbcSupport.printed(rs, "col"), rs.getString("exprs"));
         }
       }
     } finally {
@@ -651,7 +652,7 @@ final class PlannerStatistics {
       ps.setArray(1, array);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          out.add(rs.getString("name"));
+          out.add(JdbcSupport.printed(rs, "name"));
         }
       }
     } finally {
@@ -1041,7 +1042,7 @@ final class PlannerStatistics {
             case "pg_attrdef" -> {
               String kind = rs.getString("generated");
               if (kind != null && !kind.isEmpty()) {
-                String column = rs.getString("generated_column");
+                String column = JdbcSupport.printed(rs, "generated_column");
                 named.put(
                     ("s".equals(kind) ? "stored generated column " : "virtual generated column ")
                         + column,
@@ -1083,7 +1084,7 @@ final class PlannerStatistics {
         if (!rs.next()) {
           throw new SQLException("no pg_class row for view oid " + oid, "XX000");
         }
-        String name = rs.getString("nsp") + "." + rs.getString("rel");
+        String name = JdbcSupport.printed(rs, "nsp") + "." + JdbcSupport.printed(rs, "rel");
         return "v".equals(rs.getString("relkind")) ? "v:" + name : "x:materialized view " + name;
       }
     }
@@ -1125,7 +1126,7 @@ final class PlannerStatistics {
         if (!rs.next()) {
           throw new SQLException("no pg_class row for view oid " + oid, "XX000");
         }
-        name = rs.getString("nsp") + "." + rs.getString("rel");
+        name = JdbcSupport.printed(rs, "nsp") + "." + JdbcSupport.printed(rs, "rel");
         String def = rs.getString("def").strip();
         if (def.endsWith(";")) {
           def = def.substring(0, def.length() - 1);
@@ -1140,13 +1141,13 @@ final class PlannerStatistics {
         out.append(" ALTER VIEW ")
             .append(name)
             .append(" OWNER TO ")
-            .append(rs.getString("owner"))
+            .append(JdbcSupport.printed(rs, "owner"))
             .append(';');
         if (!rs.getBoolean("default_acl")) {
           out.append(" REVOKE ALL ON ")
               .append(name)
               .append(" FROM ")
-              .append(rs.getString("owner"))
+              .append(JdbcSupport.printed(rs, "owner"))
               .append(';');
         }
         String remark = rs.getString("remark");
@@ -1164,7 +1165,7 @@ final class PlannerStatistics {
               .append(" ON ")
               .append(name)
               .append(" TO ")
-              .append(rs.getString("grantee"))
+              .append(JdbcSupport.printed(rs, "grantee"))
               .append(rs.getBoolean("is_grantable") ? " WITH GRANT OPTION" : "")
               .append(';');
         }
@@ -1184,7 +1185,9 @@ final class PlannerStatistics {
           throw new SQLException("no pg_policy row for oid " + oid, "XX000");
         }
         return new PolicyRef(
-            oid, rs.getString("name"), rs.getString("nsp") + "." + rs.getString("rel"));
+            oid,
+            JdbcSupport.printed(rs, "name"),
+            JdbcSupport.printed(rs, "nsp") + "." + JdbcSupport.printed(rs, "rel"));
       }
     }
   }
@@ -1196,7 +1199,7 @@ final class PlannerStatistics {
         if (!rs.next()) {
           throw new SQLException("no pg_policy row for oid " + oid, "XX000");
         }
-        String relation = rs.getString("nsp") + "." + rs.getString("rel");
+        String relation = JdbcSupport.printed(rs, "nsp") + "." + JdbcSupport.printed(rs, "rel");
         String cmd =
             switch (rs.getString("polcmd")) {
               case "r" -> "SELECT";
@@ -1207,14 +1210,14 @@ final class PlannerStatistics {
             };
         var out =
             new StringBuilder(" CREATE POLICY ")
-                .append(rs.getString("name"))
+                .append(JdbcSupport.printed(rs, "name"))
                 .append(" ON ")
                 .append(relation)
                 .append(rs.getBoolean("polpermissive") ? " AS PERMISSIVE" : " AS RESTRICTIVE")
                 .append(" FOR ")
                 .append(cmd)
                 .append(" TO ")
-                .append(rs.getString("roles"));
+                .append(JdbcSupport.printed(rs, "roles"));
         String qual = rs.getString("qual");
         if (qual != null) {
           out.append(" USING (").append(qual).append(')');
@@ -1227,7 +1230,7 @@ final class PlannerStatistics {
         String remark = rs.getString("remark");
         if (remark != null) {
           out.append(" COMMENT ON POLICY ")
-              .append(rs.getString("name"))
+              .append(JdbcSupport.printed(rs, "name"))
               .append(" ON ")
               .append(relation)
               .append(" IS ")

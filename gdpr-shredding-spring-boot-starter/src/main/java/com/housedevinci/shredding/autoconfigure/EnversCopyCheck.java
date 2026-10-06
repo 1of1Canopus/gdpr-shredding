@@ -132,7 +132,7 @@ final class EnversCopyCheck {
                           + attribute.getAttributeName()
                           + "), which maps the same table,")
                   + " into its audit table "
-                  + auditTable
+                  + com.housedevinci.shredding.application.LogText.escape(auditTable)
                   + ". An erasure clears the index in "
                   + a.table()
                   + " only, so every audit row keeps the erased subject's index, matchable with the"

@@ -40,6 +40,18 @@ public final class JdbcSupport {
    * letting either escape would report a refusal the work raised on purpose - {@code
    * SHRED-SCHEMA-005} for a catalogue that could not be read, say - as a key-store outage.
    */
+  /**
+   * C-26-2: an identifier read from the catalogue for a message, escaped as {@link
+   * com.housedevinci.shredding.application.LogText#escape} does, so a line break or separator in an
+   * operator-chosen name cannot split a refusal or a WARN into lines this module did not write.
+   * Applied where the identifier is read for display, never to a composed message, and never to a
+   * value that is compared with configuration or bound again (those stay raw).
+   */
+  static String printed(java.sql.ResultSet rs, String column) throws SQLException {
+    String value = rs.getString(column);
+    return value == null ? null : com.housedevinci.shredding.application.LogText.escape(value);
+  }
+
   static <T> T inTransaction(DataSource ds, SqlWork<T> work) {
     try (Connection c = ds.getConnection()) {
       boolean previous = c.getAutoCommit();

@@ -168,7 +168,7 @@ final class HibernateCopyCheck {
                           + "): @org.hibernate.annotations.Audited on "
                           + entity
                           + " writes it into "
-                          + copy
+                          + com.housedevinci.shredding.application.LogText.escape(copy)
                           + " on every insert and update. An erasure clears "
                           + a.table()
                           + " only. Mark the field @Audited.Excluded, then clear the copies already"
@@ -229,7 +229,7 @@ final class HibernateCopyCheck {
         throw configRefused(
             "the audit table name derived from org.hibernate.envers.audit_table_prefix, "
                 + "audit_table_suffix and default_schema (\""
-                + name
+                + com.housedevinci.shredding.application.LogText.escape(name)
                 + "\") cannot be used as a PostgreSQL identifier by this module",
             e);
       }
@@ -328,7 +328,7 @@ final class HibernateCopyCheck {
                       "shredding: Hibernate keeps history of "
                           + entity
                           + " in "
-                          + history
+                          + com.housedevinci.shredding.application.LogText.escape(history)
                           + " (@Temporal, history-table strategy), which holds the blind-index"
                           + " column "
                           + a.column()
@@ -386,9 +386,9 @@ final class HibernateCopyCheck {
               "shredding: entity "
                   + entity
                   + " maps column "
-                  + keyColumn
+                  + com.housedevinci.shredding.application.LogText.escape(keyColumn)
                   + " of "
-                  + keyTable
+                  + com.housedevinci.shredding.application.LogText.escape(keyTable)
                   + " as a reference to "
                   + a.qualified()
                   + ", the blind-index column of "
@@ -398,7 +398,7 @@ final class HibernateCopyCheck {
                   + "."
                   + attribute.getAttributeName()
                   + "). "
-                  + keyTable
+                  + com.housedevinci.shredding.application.LogText.escape(keyTable)
                   + " therefore holds index values, with or without a foreign key, and no erasure"
                   + " reaches it. Reference "
                   + a.entityName()
@@ -428,7 +428,10 @@ final class HibernateCopyCheck {
     return canonical + '\u0000' + column;
   }
 
-  static String clear(String table, String column) {
+  static String clear(String rawTable, String rawColumn) {
+    // C-26-2: the mapping renders these; printed escaped, as every identifier in a message.
+    String table = com.housedevinci.shredding.application.LogText.escape(rawTable);
+    String column = com.housedevinci.shredding.application.LogText.escape(rawColumn);
     return "UPDATE "
         + table
         + " SET "
@@ -448,7 +451,7 @@ final class HibernateCopyCheck {
       throw new ShreddingException(
           ErrorCodes.SCHEMA_UNVERIFIABLE,
           "shredding: the audit or history table "
-              + rendered
+              + com.housedevinci.shredding.application.LogText.escape(rendered)
               + " that the mapping names cannot be checked for a copy of a blind-index column ("
               + e.getMessage()
               + "). Unverifiable is not clean, so this is a refusal.",

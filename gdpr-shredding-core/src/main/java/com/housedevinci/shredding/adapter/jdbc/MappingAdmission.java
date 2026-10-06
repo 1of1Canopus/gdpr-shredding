@@ -576,9 +576,9 @@ public final class MappingAdmission {
                     rs.getBoolean("may_write"),
                     rs.getBoolean("bypassrls"),
                     rs.getLong("children"),
-                    Optional.ofNullable(rs.getString("parents")),
+                    Optional.ofNullable(JdbcSupport.printed(rs, "parents")),
                     rs.getBoolean("relispartition"),
-                    Optional.ofNullable(rs.getString("partition_root")));
+                    Optional.ofNullable(JdbcSupport.printed(rs, "partition_root")));
         if (rs.next()) {
           throw new SQLException("the relation leg returned a second row", "XX000");
         }
@@ -726,11 +726,11 @@ public final class MappingAdmission {
               rs.getString("typtype"),
               rs.getString("typcategory"),
               rs.getLong("typbasetype"),
-              rs.getString("nspname"),
-              rs.getString("spelled"),
-              Optional.ofNullable(rs.getString("own_eq_schema")),
+              JdbcSupport.printed(rs, "nspname"),
+              JdbcSupport.printed(rs, "spelled"),
+              Optional.ofNullable(JdbcSupport.printed(rs, "own_eq_schema")),
               implicit == null || implicit.isEmpty() ? List.of() : List.of(implicit.split(",", -1)),
-              Optional.ofNullable(rs.getString("declared_shadow_eq_schema")));
+              Optional.ofNullable(JdbcSupport.printed(rs, "declared_shadow_eq_schema")));
       seen.put(oid, facts);
       return facts;
     }
@@ -1017,7 +1017,11 @@ public final class MappingAdmission {
       ps.setArray(2, oids);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          found.add(rs.getString("child") + " (parents " + rs.getString("parents") + ")");
+          found.add(
+              JdbcSupport.printed(rs, "child")
+                  + " (parents "
+                  + JdbcSupport.printed(rs, "parents")
+                  + ")");
         }
       }
     } finally {
