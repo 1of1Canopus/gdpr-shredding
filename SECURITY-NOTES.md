@@ -719,9 +719,11 @@ inheritance child, each path by which statistics can exist, and refuses any of t
   `NULL` is not 0);
 - `pg_stats` holds a row for it, `inherited` or not;
 - an expression index computes over it, read from the stored expression tree (`pg_index.indexprs`),
-  a whole-row reference included. A predicate-only partial index is admitted: PostgreSQL stores
-  statistics for index expressions only (measured: 0 rows on 16 and 17). A tree whose column
-  references the reader cannot parse is `SHRED-SCHEMA-005`, never "reads nothing";
+  a whole-row reference included, or selects the rows it samples by it in its predicate (an
+  expression index is sampled only from the rows its predicate selects). A plain partial index
+  is admitted: PostgreSQL stores statistics for index expressions only (measured: 0 rows on 16 and
+  17). A tree whose column references the reader cannot parse is `SHRED-SCHEMA-005`, never "reads
+  nothing";
 - an extended-statistics object covers it, by key or by expression (`pg_depend`; its data is
   invisible to a non-owner, so the check reads the definition);
 - a stored generated column computed from it has any of the above. Measured on 16, 17 and 18: a
@@ -729,11 +731,31 @@ inheritance child, each path by which statistics can exist, and refuses any of t
   derived values. A virtual generated column (18) stores nothing and cannot be given a target.
 
 An expression index, an expression in extended statistics, or a stored generated column on the
-table or a descendant that calls a function or operator outside `pg_catalog` is
+table or a descendant (an expression index's predicate included) that calls a function or
+operator outside `pg_catalog`, or one that is not immutable, is
 `SHRED-SCHEMA-005`, whatever columns it names: the function body is invisible to the expression
 tree, and an `IMMUTABLE` SQL function taking the row's identifier can return the blind index
 (measured by the security review: the index's own `pg_stats` row held the index values while the
-tree named only `id`).
+tree named only `id`). Not immutable covers `pg_catalog` too: `CREATE STATISTICS` accepts a
+volatile expression, and `pg_catalog.query_to_xml` run from one stored every blind-index value in
+`pg_stats_ext_exprs` (measured by the security review).
+
+**A table with an ancestor is refused** (rule R-i, `SHRED-SCHEMA-009`). `ANALYZE` on a partitioned
+or inheritance parent stores `inherited` statistics computed from every descendant's rows under
+the parent's columns, readable by any role with `SELECT` on the parent, and the erasure's locks on
+the child do not reach the parent (`ALTER TABLE ONLY <parent> ... SET STATISTICS` and `ANALYZE
+<parent>` complete while an erasure holds the child, measured). Locking every ancestor would make
+every erasure of every partition wait on the parent, so the shape is refused and the remedy is to
+map the root, whose descendants the check already walks. A table cannot gain a parent during an
+erasure: `ATTACH PARTITION` and `INHERIT` wait behind its locks (measured), and the next verdict
+refuses.
+
+**A former parent keeps the values.** Detaching a partition, or `ALTER TABLE ... NO INHERIT`,
+leaves the child's blind-index values in the former parent's `inherited` statistics, and `ANALYZE`
+of the former parent does not clear them when it has no child left; autovacuum never analyzes a
+partitioned table (measured by the security review). No catalogue trace links the former parent
+to the table, so a detached table is admitted and this residue is the operator's to clear (upgrade
+guide, step 1). For the same reason no refusal message offers either statement as a remedy.
 
 The remedy the message prints is read with `search_path` pinned to `pg_catalog, pg_temp` and opens
 with the same setting, so a view or policy re-created from it cannot re-bind a name to a

@@ -53,7 +53,14 @@ All notable changes to this project. The format follows
   `ddl-auto` creates. The message prints the remedy with the column's own type, as one
   transaction that drops and re-creates dependent views and policies when there are any, or names
   the dependents it does not re-create and the two ways to clear statistics without retyping. A
-  predicate-only partial index on the column is admitted.
+  plain partial index whose predicate names the column is admitted; an expression index whose
+  predicate does is refused. An index, statistics or generated expression calling a function or
+  operator outside `pg_catalog`, or a non-immutable one, is `SHRED-SCHEMA-005`.
+- **BREAKING. A table with a blind index that is a partition or an inheritance child is refused
+  (`SHRED-SCHEMA-009`, rule R-i).** `ANALYZE` on the parent kept the child's index values in the
+  parent's statistics, beyond any erasure. Map the entity to the root; the statistics check then
+  covers it, so an upgraded installation may see a second, `SHRED-SCHEMA-010`, refusal on the
+  next start.
 - **BREAKING. Mapping admission: a `@Shredded` entity's table, and the columns of it this module
   compares, are checked against the PostgreSQL catalogue before the first erasure, and refused when
   the erasure could not be trusted on them.** A hiding view, a row-level-security policy the runtime

@@ -227,7 +227,22 @@ public final class MappingAdmission {
           + " (SELECT r.rolbypassrls FROM pg_catalog.pg_roles r"
           + " WHERE (r.rolname OPERATOR(pg_catalog.=) CURRENT_USER)) AS bypassrls,"
           + " (SELECT pg_catalog.count(*) FROM pg_catalog.pg_inherits i"
-          + " WHERE (i.inhparent OPERATOR(pg_catalog.=) c.oid)) AS children"
+          + " WHERE (i.inhparent OPERATOR(pg_catalog.=) c.oid)) AS children,"
+          + " (SELECT pg_catalog.string_agg(pg_catalog.concat_ws('.',"
+          + " pg_catalog.quote_ident(an.nspname), pg_catalog.quote_ident(ap.relname)), ', '"
+          + " ORDER BY a.inhseqno)"
+          + " FROM pg_catalog.pg_inherits a"
+          + " JOIN pg_catalog.pg_class ap ON (ap.oid OPERATOR(pg_catalog.=) a.inhparent)"
+          + " JOIN pg_catalog.pg_namespace an ON (an.oid OPERATOR(pg_catalog.=) ap.relnamespace)"
+          + " WHERE (a.inhrelid OPERATOR(pg_catalog.=) c.oid)) AS parents,"
+          + " c.relispartition,"
+          + " (SELECT pg_catalog.concat_ws('.', pg_catalog.quote_ident(rn.nspname),"
+          + " pg_catalog.quote_ident(rc.relname))"
+          + " FROM pg_catalog.pg_class rc"
+          + " JOIN pg_catalog.pg_namespace rn ON (rn.oid OPERATOR(pg_catalog.=) rc.relnamespace)"
+          + " WHERE c.relispartition AND (rc.oid OPERATOR(pg_catalog.=)"
+          + " CAST(pg_catalog.pg_partition_root(CAST(c.oid AS pg_catalog.regclass))"
+          + " AS pg_catalog.oid))) AS partition_root"
           + " FROM (SELECT pg_catalog.cardinality(pg_catalog.parse_ident(?)) AS parts,"
           + " (SELECT p.p FROM pg_catalog.unnest(pg_catalog.parse_ident(?)) WITH ORDINALITY AS p"
           + " WHERE (p.ordinality OPERATOR(pg_catalog.=) 1)) AS sch,"
@@ -353,7 +368,41 @@ public final class MappingAdmission {
       boolean mayRead,
       boolean mayWrite,
       boolean bypassRls,
-      long children) {}
+      long children,
+      Optional<String> parents,
+      boolean partition,
+      Optional<String> partitionRoot) {
+
+    /** A relation with no ancestor, as every test fixture before rule R-i built it. */
+    RelationFacts(
+        int parts,
+        Optional<Long> oid,
+        String relkind,
+        String persistence,
+        boolean rowSecurity,
+        boolean forceRowSecurity,
+        boolean owns,
+        boolean mayRead,
+        boolean mayWrite,
+        boolean bypassRls,
+        long children) {
+      this(
+          parts,
+          oid,
+          relkind,
+          persistence,
+          rowSecurity,
+          forceRowSecurity,
+          owns,
+          mayRead,
+          mayWrite,
+          bypassRls,
+          children,
+          Optional.empty(),
+          false,
+          Optional.empty());
+    }
+  }
 
   /** One member of the descendant set. */
   record Descendant(long oid, String relkind, String persistence, long children) {}
@@ -473,7 +522,10 @@ public final class MappingAdmission {
                     rs.getBoolean("may_read"),
                     rs.getBoolean("may_write"),
                     rs.getBoolean("bypassrls"),
-                    rs.getLong("children"));
+                    rs.getLong("children"),
+                    Optional.ofNullable(rs.getString("parents")),
+                    rs.getBoolean("relispartition"),
+                    Optional.ofNullable(rs.getString("partition_root")));
         if (rs.next()) {
           throw new SQLException("the relation leg returned a second row", "XX000");
         }
@@ -673,6 +725,16 @@ public final class MappingAdmission {
     if (!"r".equals(kind) && !"p".equals(kind)) {
       return new Refused("R-c", head + relkindMessage(kind));
     }
+    // R-i (C-24-1): a blind-indexed table with an ancestor. ANALYZE on the ancestor stores
+    // statistics computed from this table's rows under the ancestor's own columns, the blind index
+    // included, readable by any role with SELECT on the ancestor; the erasure's locks on this
+    // table do not reach it. Refused rather than locked: locking the parent would serialise every
+    // erasure of every partition. A table cannot gain an ancestor while an erasure holds its locks
+    // (ATTACH PARTITION and INHERIT wait, measured), and the next verdict sees one.
+    Optional<Refused> ancestor = ancestorRefusal(target, relation, head);
+    if (ancestor.isPresent()) {
+      return ancestor.get();
+    }
     // R-d / R-e (S-3): one rule over the whole descendant set.
     for (Descendant d : descendants) {
       boolean leaf = d.children() == 0;
@@ -761,6 +823,78 @@ public final class MappingAdmission {
       }
     }
     return new Admitted(warnings);
+  }
+
+  /**
+   * Rule R-i. Scoped to targets carrying a blind-index column: a {@code @Shredded} entity with none
+   * has only ciphertext to leave in a parent's statistics. The remedy is the mapping, never a
+   * detach or a {@code NO INHERIT}: both leave the values in the former parent's statistics
+   * (measured by the security review), where nothing this module reads can find them.
+   */
+  static Optional<Refused> ancestorRefusal(Target target, RelationFacts relation, String head) {
+    if (relation.parents().isEmpty()) {
+      return Optional.empty();
+    }
+    var indexes = new ArrayList<String>();
+    for (Column col : target.columns()) {
+      if (BLIND_INDEX.equals(col.role())) {
+        indexes.add(col.ref().sql());
+      }
+    }
+    if (indexes.isEmpty()) {
+      return Optional.empty();
+    }
+    String parents = relation.parents().get();
+    boolean several = parents.contains(", ");
+    String columns =
+        (indexes.size() == 1 ? "the blind-index column " : "the blind-index columns ")
+            + String.join(", ", indexes);
+    String table = target.table().toString();
+    if (relation.partition()) {
+      String root = relation.partitionRoot().orElse(parents);
+      return Optional.of(
+          new Refused(
+              "R-i",
+              head
+                  + ", which is a partition of "
+                  + parents
+                  + " (root "
+                  + root
+                  + "). ANALYZE on "
+                  + parents
+                  + " stores statistics computed from this partition's rows under its own columns, "
+                  + columns
+                  + " included, and any role with SELECT on "
+                  + parents
+                  + " reads them from pg_stats; no erasure of "
+                  + table
+                  + " reaches them. Map the entity to the root, "
+                  + root
+                  + ": every partition is then checked and erased through it. The statistics"
+                  + " check then covers the root; if the root already holds statistics of the"
+                  + " column, the next start names them with their own remedy."));
+    }
+    return Optional.of(
+        new Refused(
+            "R-i",
+            head
+                + ", which inherits from "
+                + parents
+                + ". ANALYZE on "
+                + (several ? "each of them" : parents)
+                + " stores statistics computed from this table's rows under its own columns, "
+                + columns
+                + " included, and any role with SELECT on "
+                + (several ? "one of them" : parents)
+                + " reads them from pg_stats; no erasure of "
+                + table
+                + " reaches them. Map the entity to "
+                + (several ? "the table at the top of the hierarchy" : parents)
+                + ": its descendants are then checked and erased through it. The statistics"
+                + " check then covers "
+                + (several ? "that table" : parents)
+                + "; if it already holds statistics of the column, the next start names them with"
+                + " their own remedy."));
   }
 
   private static Optional<Refused> judgeColumn(String who, TableRef table, ColumnFacts col) {

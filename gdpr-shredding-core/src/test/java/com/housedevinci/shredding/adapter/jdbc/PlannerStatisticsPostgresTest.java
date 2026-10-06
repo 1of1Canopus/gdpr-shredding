@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.catchThrowable;
 import com.housedevinci.shredding.adapter.jdbc.MappingAdmission.Admitted;
 import com.housedevinci.shredding.adapter.jdbc.MappingAdmission.Column;
 import com.housedevinci.shredding.adapter.jdbc.MappingAdmission.Copied;
+import com.housedevinci.shredding.adapter.jdbc.MappingAdmission.Refused;
 import com.housedevinci.shredding.adapter.jdbc.MappingAdmission.Target;
 import com.housedevinci.shredding.adapter.jdbc.MappingAdmission.Use;
 import com.housedevinci.shredding.adapter.jdbc.MappingAdmission.Verdict;
@@ -238,7 +239,8 @@ abstract class PlannerStatisticsPostgresTest {
           .hasMessageStartingWith(
               "shredding: "
                   + c[1]
-                  + " on a blind-indexed table calls app.s14_peek, which is outside pg_catalog.");
+                  + " on a blind-indexed table calls app.s14_peek, which is outside pg_catalog or not"
+                  + " immutable.");
     }
   }
 
@@ -289,7 +291,6 @@ abstract class PlannerStatisticsPostgresTest {
     exec(
         owner,
         "CREATE INDEX s8_pred ON app.s8 (id) WHERE email_idx IS NOT NULL",
-        "CREATE INDEX s8_mixed ON app.s8 (lower(subject)) WHERE email_idx IS NOT NULL",
         "CREATE INDEX s8_plain_and_expr ON app.s8 (email_idx, lower(subject))",
         "CREATE INDEX s8_lookup ON app.s8 (email_idx)");
     analyze("app.s8");
@@ -304,6 +305,22 @@ abstract class PlannerStatisticsPostgresTest {
         .isEqualTo("0");
 
     assertThat(verdict("app.s8")).isInstanceOf(Admitted.class);
+  }
+
+  /**
+   * C-24-6: an expression index samples only the rows its predicate selects, so a predicate on the
+   * blind index is a carrier even when the expression names another column.
+   */
+  @Test
+  void s8b_expression_index_whose_predicate_selects_by_the_index_column_is_refused() {
+    table("app.s8b", "");
+    zero("app.s8b");
+    exec(owner, "CREATE INDEX s8b_mixed ON app.s8b (lower(subject)) WHERE email_idx IS NOT NULL");
+
+    assertThat(copied("app.s8b"))
+        .contains(
+            "expression index app.s8b_mixed samples only the rows its predicate selects by it"
+                + " (drop it: DROP INDEX app.s8b_mixed)");
   }
 
   // ---------------------------------------------------------- rows 30 and 48: descendants
@@ -576,6 +593,220 @@ abstract class PlannerStatisticsPostgresTest {
     assertThat(stored("app.s6", attnum)).isEqualTo("0");
   }
 
+  // ------------------------------------------------------------- C-24-1: rule R-i, ancestors
+
+  private static final String TAIL =
+      " The statistics check then covers the root; if the root already holds statistics of the"
+          + " column, the next start names them with their own remedy.";
+
+  private void columnsTable(String table, String suffix) {
+    exec(
+        owner,
+        "CREATE TABLE "
+            + table
+            + " (id bigint, tenant varchar(64), subject varchar(64), email_idx varchar(64))"
+            + suffix);
+  }
+
+  private String refusedRi(DataSource ds, String table) {
+    Verdict verdict = copiedOrAdmitted(ds, table);
+    assertThat(verdict).describedAs("verdict on %s", table).isInstanceOf(Refused.class);
+    assertThat(((Refused) verdict).rule()).isEqualTo("R-i");
+    return ((Refused) verdict).message();
+  }
+
+  @Test
+  void a1_partition_mapped_directly_is_refused_naming_the_root() {
+    columnsTable("app.a1", " PARTITION BY LIST (tenant)");
+    exec(
+        owner,
+        "CREATE TABLE app.a1_t1 PARTITION OF app.a1 FOR VALUES IN ('T1')",
+        "GRANT SELECT, UPDATE ON app.a1_t1 TO " + APP);
+
+    assertThat(refusedRi(app, "app.a1_t1"))
+        .isEqualTo(
+            "@Shredded entity Note maps table app.a1_t1, which is a partition of app.a1 (root"
+                + " app.a1). ANALYZE on app.a1 stores statistics computed from this partition's"
+                + " rows under its own columns, the blind-index column email_idx included, and any"
+                + " role with SELECT on app.a1 reads them from pg_stats; no erasure of app.a1_t1"
+                + " reaches them. Map the entity to the root, app.a1: every partition is then"
+                + " checked and erased through it."
+                + TAIL);
+  }
+
+  @Test
+  void a2_sub_partition_is_refused_naming_the_top_root() {
+    columnsTable("app.a2", " PARTITION BY RANGE (id)");
+    exec(
+        owner,
+        "CREATE TABLE app.a2_m PARTITION OF app.a2 FOR VALUES FROM (0) TO (1000000)"
+            + " PARTITION BY LIST (tenant)",
+        "CREATE TABLE app.a2_l PARTITION OF app.a2_m FOR VALUES IN ('T1')",
+        "GRANT SELECT, UPDATE ON app.a2_m, app.a2_l TO " + APP);
+
+    assertThat(refusedRi(app, "app.a2_m")).contains("a partition of app.a2 (root app.a2)");
+    assertThat(refusedRi(app, "app.a2_l"))
+        .contains("a partition of app.a2_m (root app.a2)")
+        .contains("Map the entity to the root, app.a2:");
+  }
+
+  @Test
+  void a3_inheritance_child_is_refused() {
+    columnsTable("app.a3", "");
+    exec(
+        owner,
+        "CREATE TABLE app.a3_kid () INHERITS (app.a3)",
+        "GRANT SELECT, UPDATE ON app.a3_kid TO " + APP);
+
+    assertThat(refusedRi(app, "app.a3_kid"))
+        .isEqualTo(
+            "@Shredded entity Note maps table app.a3_kid, which inherits from app.a3. ANALYZE on"
+                + " app.a3 stores statistics computed from this table's rows under its own columns,"
+                + " the blind-index column email_idx included, and any role with SELECT on app.a3"
+                + " reads them from pg_stats; no erasure of app.a3_kid reaches them. Map the entity"
+                + " to app.a3: its descendants are then checked and erased through it. The"
+                + " statistics check then covers app.a3; if it already holds statistics of the"
+                + " column, the next start names them with their own remedy.");
+  }
+
+  @Test
+  void a4_multiple_parents_are_all_named_in_inheritance_order() {
+    columnsTable("app.a4_p2", "");
+    columnsTable("app.a4_p1", "");
+    exec(
+        owner,
+        "CREATE TABLE app.a4_kid () INHERITS (app.a4_p2, app.a4_p1)",
+        "GRANT SELECT, UPDATE ON app.a4_kid TO " + APP);
+
+    assertThat(refusedRi(app, "app.a4_kid"))
+        .contains("which inherits from app.a4_p2, app.a4_p1.")
+        .contains("Map the entity to the table at the top of the hierarchy");
+  }
+
+  @Test
+  void a5_parent_with_rls_and_no_grant_is_refused_not_unverifiable() {
+    columnsTable("app.a5", "");
+    exec(
+        owner,
+        "ALTER TABLE app.a5 ENABLE ROW LEVEL SECURITY",
+        "CREATE TABLE app.a5_kid () INHERITS (app.a5)",
+        "GRANT SELECT, UPDATE ON app.a5_kid TO " + APP);
+
+    assertThat(refusedRi(app, "app.a5_kid")).contains("which inherits from app.a5.");
+  }
+
+  @Test
+  void a6_parent_in_another_schema_is_named_qualified() {
+    exec(su, "CREATE SCHEMA \"Other\" AUTHORIZATION " + OWNER);
+    columnsTable("\"Other\".a6", "");
+    exec(
+        owner,
+        "CREATE TABLE app.a6_kid () INHERITS (\"Other\".a6)",
+        "GRANT SELECT, UPDATE ON app.a6_kid TO " + APP);
+
+    assertThat(refusedRi(app, "app.a6_kid")).contains("which inherits from \"Other\".a6.");
+  }
+
+  @Test
+  void a7_attach_after_boot_refuses_the_next_erasure_and_records_nothing() {
+    table("app.a7", "");
+    zero("app.a7");
+    JdbcErasureStore store = store("app.a7");
+    assertThat(erase(store, "s-71").blindIndexColumnsCleared()).isEqualTo(1);
+    columnsTable("app.a7_parent", " PARTITION BY RANGE (id)");
+    exec(owner, "ALTER TABLE app.a7_parent ATTACH PARTITION app.a7 FOR VALUES FROM (0) TO (1000)");
+    long before = Long.parseLong(text(su, "SELECT count(*) FROM public.shredding_erasure"));
+
+    Throwable thrown = catchThrowable(() -> erase(store, "s-72"));
+
+    assertThat(code(thrown)).isEqualTo(ErrorCodes.MAPPING_INADMISSIBLE);
+    assertThat(thrown)
+        .hasMessageStartingWith(
+            "shredding: the blind-indexed table app.a7, which is a partition of app.a7_parent")
+        .hasMessageContaining("This erasure is refused before its first statement");
+    assertThat(Long.parseLong(text(su, "SELECT count(*) FROM public.shredding_erasure")))
+        .isEqualTo(before);
+    assertThat(text(su, "SELECT count(*) FROM app.a7 WHERE subject = 's-72' AND email_idx IS NULL"))
+        .isEqualTo("0");
+  }
+
+  @Test
+  void a8_attach_partition_waits_for_the_erasure_lock() {
+    table("app.a8", "");
+    zero("app.a8");
+    columnsTable("app.a8_parent", " PARTITION BY RANGE (id)");
+    var attach = new java.util.concurrent.atomic.AtomicReference<String>();
+    JdbcErasureStore store =
+        new JdbcErasureStore(
+            app,
+            schema,
+            ErasureChain.keyed(SECRET, "k1"),
+            List.of(blindIndexColumn("app.a8")),
+            (c, col, tenant, subject) -> {
+              attach.set(
+                  sqlState(
+                      su,
+                      "SET lock_timeout = '1s'",
+                      "ALTER TABLE app.a8_parent ATTACH PARTITION app.a8"
+                          + " FOR VALUES FROM (0) TO (1000)"));
+              return 0L;
+            });
+
+    assertThat(erase(store, "s-81").blindIndexColumnsCleared()).isEqualTo(1);
+    assertThat(attach.get())
+        .describedAs("ATTACH PARTITION waited behind the erasure's locks and timed out")
+        .isEqualTo("55P03");
+    assertThat(text(su, "SELECT relispartition FROM pg_class WHERE oid = 'app.a8'::regclass"))
+        .isEqualTo("f");
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "A9 a detached partition is admitted (SECURITY-NOTES, \"A former parent keeps the values\")")
+  void a9_detached_partition_is_admitted() {
+    columnsTable("app.a9", " PARTITION BY LIST (tenant)");
+    exec(
+        owner,
+        "CREATE TABLE app.a9_t1 PARTITION OF app.a9 FOR VALUES IN ('T1')",
+        "GRANT SELECT, UPDATE ON app.a9_t1 TO " + APP,
+        "ALTER TABLE app.a9 DETACH PARTITION app.a9_t1");
+    zero("app.a9_t1");
+
+    assertThat(verdict("app.a9_t1")).isInstanceOf(Admitted.class);
+  }
+
+  @Test
+  void a10_root_and_partition_both_mapped_refuses_only_the_partition() {
+    columnsTable("app.a10", " PARTITION BY LIST (tenant)");
+    exec(
+        owner,
+        "CREATE TABLE app.a10_t1 PARTITION OF app.a10 FOR VALUES IN ('T1')",
+        "GRANT SELECT, UPDATE ON app.a10, app.a10_t1 TO " + APP);
+    zero("app.a10");
+
+    assertThat(verdict("app.a10")).isInstanceOf(Admitted.class);
+    refusedRi(app, "app.a10_t1");
+  }
+
+  @Test
+  void a11_inheritance_and_partition_messages_offer_no_detach_or_no_inherit() {
+    columnsTable("app.a11", " PARTITION BY LIST (tenant)");
+    columnsTable("app.a11_p1", "");
+    columnsTable("app.a11_p2", "");
+    exec(
+        owner,
+        "CREATE TABLE app.a11_t1 PARTITION OF app.a11 FOR VALUES IN ('T1')",
+        "CREATE TABLE app.a11_one () INHERITS (app.a11_p1)",
+        "CREATE TABLE app.a11_two () INHERITS (app.a11_p1, app.a11_p2)",
+        "GRANT SELECT, UPDATE ON app.a11_t1, app.a11_one, app.a11_two TO " + APP);
+
+    for (String table : List.of("app.a11_t1", "app.a11_one", "app.a11_two")) {
+      assertThat(refusedRi(app, table).toUpperCase(java.util.Locale.ROOT))
+          .doesNotContain("DETACH")
+          .doesNotContain("NO INHERIT");
+    }
+  }
+
   // ------------------------------------------------------------------------------ helpers
 
   private void table(String table, String extra) {
@@ -684,6 +915,32 @@ abstract class PlannerStatisticsPostgresTest {
 
   private DataSource reader() {
     return pool("shred_reader", "pw");
+  }
+
+  private static BlindIndexColumn blindIndexColumn(String table) {
+    return new BlindIndexColumn(
+        TableRef.parse(table),
+        ColumnRef.unquoted("email_idx"),
+        ColumnRef.unquoted("subject"),
+        ColumnRef.unquoted("tenant"),
+        Optional.of("tenant"),
+        Optional.of("subject"));
+  }
+
+  /**
+   * Runs the statements on a fresh connection of {@code ds}: "ok", or the SQLState they failed
+   * with.
+   */
+  private static String sqlState(DataSource ds, String... sql) {
+    try (Connection c = ds.getConnection();
+        Statement st = c.createStatement()) {
+      for (String one : sql) {
+        st.execute(one);
+      }
+      return "ok";
+    } catch (SQLException e) {
+      return e.getSQLState();
+    }
   }
 
   private JdbcErasureStore store(String table) {
