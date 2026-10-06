@@ -699,6 +699,24 @@ final class CopyCatalogue {
     return Optional.empty();
   }
 
+  /**
+   * The first blind-index attribute number a publication's column list carries. A NULL list is
+   * every column, never none (S-7): PostgreSQL 15 returns NULL for a publication without a column
+   * list; 16 and 17 return the full list (measured), so no fixture on the supported versions
+   * reaches the NULL branch and {@code CopyCatalogueTest} holds it.
+   */
+  static Optional<Integer> carried(List<Integer> indexAttnums, String attrs) {
+    if (attrs == null) {
+      return indexAttnums.stream().findFirst();
+    }
+    for (int attnum : attnums(attrs)) {
+      if (indexAttnums.contains(attnum)) {
+        return Optional.of(attnum);
+      }
+    }
+    return Optional.empty();
+  }
+
   /** Attribute numbers from an array's or an {@code int2vector}'s text form. */
   static List<Integer> attnums(String text) {
     var out = new ArrayList<Integer>();
@@ -727,14 +745,9 @@ final class CopyCatalogue {
           if (m == null || reported.contains(name)) {
             continue;
           }
-          String attrs = rs.getString("attrs");
-          Optional<IndexColumn> col;
-          if (attrs == null) {
-            // NULL is every column, never none (S-7).
-            col = Optional.of(m.byAttnum().values().iterator().next());
-          } else {
-            col = hit(m, attrs);
-          }
+          Optional<IndexColumn> col =
+              carried(List.copyOf(m.byAttnum().keySet()), rs.getString("attrs"))
+                  .map(m.byAttnum()::get);
           if (col.isEmpty()) {
             continue;
           }
