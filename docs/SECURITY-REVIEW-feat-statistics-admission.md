@@ -134,3 +134,98 @@ family member: both are statistics carriers reached through the same opacity. Pr
 C-24-1 goes to the builder for a design page, reviewed before code. C-24-2, C-24-3 and C-24-4 are
 corrections inside the mechanism this PR built, so the builder of this PR does them, in the same run
 if possible. Pass 2 checks that the six probes flip green and attacks the ancestor design.
+
+## Pass 2 (2026-10-05), head 33599c2
+
+**Verdict: MERGE WITH FIXES.** No HIGH. C-24-2, C-24-3 and C-24-4 are closed: their probes are
+green. C-24-1 (MEDIUM) stays open; its design (rev 4, option B) is APPROVED WITH CHANGES on the
+design page and is built inside this PR. Four new LOW findings, each with a probe that fails on
+33599c2: `internal/gdpr-shredding/probes/CipherProbePr24Pass2Test.java` (5 probes). The fixer adds
+it to `gdpr-shredding-core/src/test/java/.../adapter/jdbc/` before touching production code. Pass 3
+is a probe check only: the five probes here, the two C-24-1 probes enabled, and the A-tests.
+
+| check | result |
+|---|---|
+| `CIPHER_PROBE_MAVEN=1 ./mvnw -B verify` (Docker up) | BUILD SUCCESS, 665 tests, 0 failures, 2 skipped (core 399 with the two `@Disabled` C-24-1 probes, starter 249, sample 17) |
+| existing `CipherProbe*` tests, unchanged | all green |
+| pass-1 probes `CipherProbePr24Test` | 4 green (C-24-2 x2, C-24-3, C-24-4), 2 skipped (C-24-1, design ruled below) |
+| new probes `CipherProbePr24Pass2Test` | 5 run, 5 RED, each on its final assertion |
+
+### Attacks on the fixes that held
+
+- C-24-2: with the leg pinned, a view over a same-named table in another schema, a shadowed policy
+  function and an extension operator all deparse schema-qualified; `pg_temp` is never searched for
+  functions or operators, and a temporary relation is session-private. Every printed remedy opens
+  with the pin (`SET LOCAL` inside the transaction branch).
+- C-24-3: the default-privileges count is over-inclusive (any role's defaults for relations, global
+  or in the view's schema). Over-inclusion only moves a view to the named branch. Accepted.
+- C-24-4: user functions and operators are refused by namespace. The call nodes the scan does not
+  parse (`ROWCOMPAREEXPR` operator lists, `MINMAXEXPR`, `COERCEVIAIO`) can only reach code a
+  non-superuser cannot write: a row comparison needs a btree operator family and a type I/O needs a
+  base type, and both are superuser-only (measured: "must be superuser to create an operator
+  family", "... a base type"). A domain check does not change the stored value. Not findings.
+- The named branch's `SET STATISTICS 0` statements: `SHARE UPDATE EXCLUSIVE`, no rewrite, does not
+  block reads or writes, recurses to partitions and inheritance children. Safe, with C-24-7.
+
+### Rulings on the builder's four fix-round deviations
+
+1. The whole statistics leg runs in one pinned window (not the one-statement window of
+   `JdbcSupport`): **accepted**, because every statement inside is module-written and fully
+   qualified. The one-statement rule existed so that an exception cannot leave the path replaced;
+   that is exactly C-24-5, so the acceptance carries C-24-5's fix.
+2. Default privileges name the view instead of re-creating it: **accepted** (over-inclusive, safe).
+3. `-005` for foreign calls in expression indexes, extended-statistics expressions and stored
+   generated columns: **accepted**, with C-24-6 (index predicates) and C-24-8 (volatility).
+4. The named branch prints runnable `SET STATISTICS 0`: **accepted**, with C-24-7.
+
+### Findings
+
+**C-24-5 LOW: a refusal inside the caller's transaction leaves `search_path` pinned.**
+`PlannerStatistics.withPinnedPath` restores the arrived path only when the work succeeded. A
+`ShreddingException` thrown by `refuseOpaqueExpressions` is a Java-side refusal: the transaction is
+not aborted, so a caller of the public `MappingAdmission.verdict` that catches it keeps working on
+`pg_catalog, pg_temp`, and its unqualified names fail or resolve to its own temporary relations.
+The module's own paths roll back (erasure in `inTransaction`, startup on an auto-commit or
+pool-rolled-back connection), so the reach is the public API.
+Repro: `probe_refusal_inside_a_caller_transaction_leaves_search_path_pinned`.
+Fix: in `withPinnedPath`, restore in `finally` on every exit when the connection arrived outside
+auto-commit; a restore that fails because the work aborted the transaction (25P02) is added as
+suppressed to the primary, as `JdbcSupport.inOneStatementWindow` does.
+
+**C-24-6 LOW: a partial index predicate is read by neither scan.** ANALYZE samples an expression
+index only from rows that satisfy its predicate. `CREATE INDEX ... ((lower(subject))) WHERE
+email_idx = md5('1')` stores the subjects whose blind index had that value, and they stay in
+`pg_stats` after the erasure; a predicate through a user function hides the column completely.
+`INDEXES_SQL` reads `indexprs` only. Repro: `probe_partial_index_predicate_on_the_blind_index_is_not_read`,
+`probe_partial_index_predicate_through_a_user_function_is_not_read` (both `Admitted`).
+Fix: `INDEXES_SQL` returns `CAST(i.indpred AS pg_catalog.text)`; `PlannerStatistics.facts` treats
+a blind-index attnum in the predicate like one in the expressions (the index is a carrier, remedy
+"drop the index"), and `refuseOpaqueExpressions` scans the predicate tree with `calls` as well.
+
+**C-24-7 LOW: the named remedy leaves a child's stored generated column sampling.** The named
+branch prints `SET STATISTICS 0` for root carriers only. A legacy-inheritance child may add its own
+stored generated column computed from the inherited blind-index column; the root's statement
+recurses to the inherited column but not to a column the child alone has. After the printed
+statements and the clearing step the verdict is still `Copied`, and the next start prints the same
+remedy again. Repro: `probe_named_remedy_leaves_a_child_generated_column_sampling`.
+Fix: in `PlannerStatistics.message`, named branch, print `ALTER TABLE <relation> ALTER COLUMN
+<column> SET STATISTICS 0;` for every generated carrier whatever its relation, root carriers as
+now, and list them in the "rows already stored" sentence.
+
+**C-24-8 LOW: a `pg_catalog` function that runs SQL passes the call scan.** `CREATE STATISTICS`
+does not require an immutable expression (measured on 16). `CREATE STATISTICS ... ON
+(pg_catalog.query_to_xml('SELECT email_idx FROM app.q5 WHERE id = ' || id, ...)::text), id`
+stores every blind-index value in `pg_stats_ext_exprs`, with the blind-index column at statistics
+target 0; the Var scan sees `id`, the call scan sees a `pg_catalog` function. The same holds for
+`table_to_xml`, `cursor_to_xml` and the `*_to_xml_and_xmlschema` family.
+Repro: `probe_extended_statistics_through_a_catalogue_query_executor_is_admitted` (`Admitted`).
+Fix: `FOREIGN_FUNCTIONS_SQL` also returns every function whose `provolatile` is not `'i'`, and
+`FOREIGN_OPERATORS_SQL` every operator whose `oprcode` is not immutable; the `opaque` message says
+"outside pg_catalog or not immutable" and "replace it by an immutable pg_catalog expression".
+
+### Routing
+
+All four are corrections inside the mechanism this PR built, so the builder of this PR applies
+them, together with the C-24-1 build ruled on the design page (rev 4, approved with changes), in
+this PR. Pass 3 runs the seven probes and the A-tests and attacks nothing new unless the build
+departs from the ruled design.
