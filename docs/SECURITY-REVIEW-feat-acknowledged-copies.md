@@ -153,3 +153,86 @@ Missing: 1 (49). MERGE requires 0; C-26-1 closes it.
 
 core 531 + 6 probes (6 RED by design), starter 284, sample 22. Pass 2 confirms by the probes flipping
 green and attacks only what the fixes add.
+
+## Pass 2 (2026-10-06)
+
+Reviewed head `0aa71f6` (`9e61aac` guard, `0aa71f6` escaping, `eb23f5d` probe layout). The two
+probe files differ from `b5056a8` by layout only (`git diff -w`: line wraps, no assertion changed).
+
+### Verdict: MERGE WITH FIXES
+
+C-26-1 and C-26-2 are closed: their 6 probes are green. The fix added one new finding,
+C-26-3 LOW, with a probe that fails on `0aa71f6`. The integration surface has 0 rows missing.
+Fix C-26-3, then the PR is ready for merge with no third pass: the fix is a rendering
+correction, and its probe is the check.
+
+### Build and tests (`CIPHER_PROBE_MAVEN=1`, Docker up, per module under a 600 s limit per call)
+
+| module | tests | failures | skipped | note |
+| --- | --- | --- | --- | --- |
+| core | 539 | 1 | 0 | 538 builder + 1 pass 2 probe, the one failure is that probe (RED by design) |
+| starter | 285 | 0 | 0 | autoconfigure 263 + jpa 22, run separately |
+| sample | 22 | - | - | not re-measured here (no sample file changed since pass 1, 22/22 then); builder's 22 |
+
+### Prior findings
+
+- C-26-1: closed. `OutstandingHooks.requireAnswered` refuses a `COMPLETE` holding any outcome not
+  succeeded (failed, carried, pending), both stores, before the outstanding-name loop. The 4
+  probes are green.
+- C-26-2: closed. Identifiers in `-005`/`-009`/`-010` texts go through `JdbcSupport.printed`
+  where they are inserted. Raw values used for matching and SQL are unchanged. The 2 probes are
+  green.
+
+### Attacks on the fixes
+
+- A `COMPLETE` with an empty outcome list over an outstanding name is refused by the outstanding
+  name rule (Y9 green; read). It is not a gap.
+- Is `succeeded = true` trustworthy? The module does not check what a hook cleared. That is the
+  meaning of an acknowledgement (§3c.4), and the startup WARN says so. A direct `append` that
+  forges success sits at the same trust boundary as the hook reporting success. The append port
+  is application code, not an attacker boundary. Not a finding.
+- Hook names: the record keeps the raw text (`AcknowledgedCopy.object()`, `HookOutcome.hook()`).
+  This is hashed material, and W7 asserts the raw identifier. All four WARN and message sites
+  that print a hook name escape it. Verified by reading.
+- The printed SQL fixes: C-26-3 below.
+
+#### C-26-3 LOW: a printed remedy statement names a different object when the identifier holds a control character
+
+Since `0aa71f6`, the `ALTER TABLE ... DISABLE TRIGGER` statement inside a `SHRED-SCHEMA-010`
+message prints `"c263\u000Ax"`. Inside a plain quoted identifier, that is the literal text
+backslash-u-000A. Run as printed, the statement fails with `trigger "c263\u000Ax" ... does not
+exist`. Worse, it disables a decoy trigger if one has that literal name, while the real trigger
+stays enabled. The failure is closed: the next boot still refuses. The impact is a misleading
+remedy and DDL that can hit the wrong object, so LOW.
+
+**Coordinator's question: is it safer to refuse to print the fix?** No. An operator without a
+printed fix composes the statement from the same escaped prose and makes the same mistake.
+PostgreSQL has an exact single-line form, so printing the correct statement is both safe and
+usable.
+
+Repro (RED on `0aa71f6`):
+`CipherProbePr26PostgresTest.probe_printed_disable_trigger_statement_does_not_disable_the_trigger`.
+It executes the printed statement as the owner and asserts the trigger is disabled.
+
+Fix (fix pass): add one helper, `JdbcSupport.sqlIdentifier(String raw)`.
+- If `raw` holds no character that `LogText` escapes, it returns today's `quote_ident` text.
+- Otherwise it returns `U&"..."`: `"` doubled, `\` as `\\`, and every character `LogText`
+  escapes as `\XXXX`. For string literals inside a statement (a slot name in
+  `pg_drop_replication_slot('...')`), use the same rule in `U&'...'` form.
+- Use it for every identifier inside a printed SQL statement (trigger, statistics, publication
+  and slot remedies). Prose mentions keep `JdbcSupport.printed`.
+- The output is one line and executes exactly. With `standard_conforming_strings=off`, PostgreSQL
+  refuses `U&` loudly, which is acceptable.
+
+Tests: the probe green, plus one probe executing a printed publication remedy for a name holding
+U+2028. This replaces the PR body's note that the escaped fix is "not copy-paste safe".
+
+### Integration surface (1b rows, final)
+
+| # | status |
+| --- | --- |
+| 42 | verified (A1-A7, A12, Y11) |
+| 49 | verified: service side Y1-Y8; store side Y9, Y9m, Y10, the C-26-1 probes, and a `COMPLETE` with an unsucceeded outcome refused |
+| 50 | verified (W1-W6) |
+
+Missing: 0.
