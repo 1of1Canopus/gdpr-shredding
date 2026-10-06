@@ -1,5 +1,6 @@
 package com.housedevinci.shredding.application;
 
+import com.housedevinci.shredding.domain.ErasureOutcome;
 import com.housedevinci.shredding.domain.ErasureRecord;
 import com.housedevinci.shredding.domain.ErrorCodes;
 import com.housedevinci.shredding.domain.HookOutcome;
@@ -74,9 +75,11 @@ public final class OutstandingHooks {
   }
 
   /**
-   * Refuses {@code next} unless it answers every name {@code latest} left outstanding and names no
-   * hook twice. Called by a store under the lock that orders its appends, so {@code latest} is the
-   * subject's latest record at the moment {@code next} is written.
+   * Refuses {@code next} unless it answers every name {@code latest} left outstanding, names no
+   * hook twice, and, when it is {@code COMPLETE}, reports every hook it names as succeeded (C-26-1:
+   * an outstanding name answered by a failed or carried outcome is answered, not cleared). Called
+   * by a store under the lock that orders its appends, so {@code latest} is the subject's latest
+   * record at the moment {@code next} is written.
    *
    * @throws ShreddingException {@code SHRED-CONFIG-001}; nothing is written
    */
@@ -89,6 +92,19 @@ public final class OutstandingHooks {
             "shredding: refused to append an erasure record for this subject: it reports hook "
                 + LogText.escape(o.hook())
                 + " more than once.");
+      }
+    }
+    if (next.outcome() == ErasureOutcome.COMPLETE) {
+      for (HookOutcome o : next.hookOutcomes()) {
+        if (!o.succeeded()) {
+          throw new ShreddingException(
+              ErrorCodes.CONFIG,
+              "shredding: refused to append an erasure record for this subject: it is COMPLETE and"
+                  + " reports hook "
+                  + LogText.escape(o.hook())
+                  + " as not succeeded. A record is COMPLETE only when every hook it names"
+                  + " succeeded.");
+        }
       }
     }
     for (String name : of(latest).keySet()) {

@@ -356,6 +356,45 @@ class ErasureServiceAcknowledgementTest {
   }
 
   @Test
+  void c26_1_complete_record_with_a_hook_not_succeeded_is_refused_in_every_form() {
+    memory.erase(
+        TENANT,
+        SUBJECT,
+        (keys, cleared) -> record(ErasureOutcome.PARTIAL, new HookOutcome("h1", false, "pending")));
+    var anchor = memory.anchor();
+
+    for (HookOutcome notSucceeded :
+        List.of(
+            HookOutcome.failed("h1", "java.lang.IllegalStateException"),
+            HookOutcome.failed("h1", "not registered; outstanding since record 1"),
+            new HookOutcome("h1", false, "pending"))) {
+      assertThatThrownBy(() -> memory.append(record(ErasureOutcome.COMPLETE, notSucceeded)))
+          .isInstanceOfSatisfying(
+              ShreddingException.class,
+              e ->
+                  assertThat(e.getMessage())
+                      .isEqualTo(
+                          "shredding: refused to append an erasure record for this subject: it is"
+                              + " COMPLETE and reports hook h1 as not succeeded. A record is"
+                              + " COMPLETE only when every hook it names succeeded."));
+    }
+    // An unrelated hook that failed cannot ride along on a COMPLETE either.
+    assertThatThrownBy(
+            () ->
+                memory.append(
+                    record(
+                        ErasureOutcome.COMPLETE,
+                        HookOutcome.ok("h1"),
+                        HookOutcome.failed("h2", "x"))))
+        .hasMessageContaining("reports hook h2 as not succeeded");
+    assertThat(memory.all()).hasSize(1);
+    assertThat(memory.anchor()).isEqualTo(anchor);
+    assertThat(memory.append(record(ErasureOutcome.PARTIAL, HookOutcome.failed("h1", "x"))))
+        .extracting(ErasureRecord::outcome)
+        .isEqualTo(ErasureOutcome.PARTIAL);
+  }
+
+  @Test
   void in_memory_latest_is_the_last_appended_under_one_instant() {
     memory.erase(TENANT, SUBJECT, (keys, cleared) -> record(ErasureOutcome.PARTIAL));
     memory.append(record(ErasureOutcome.COMPLETE));
