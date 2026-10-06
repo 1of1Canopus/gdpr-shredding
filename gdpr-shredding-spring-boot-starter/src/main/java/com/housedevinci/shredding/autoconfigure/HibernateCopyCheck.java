@@ -38,7 +38,9 @@ import org.hibernate.persister.entity.EntityPersister;
  *   <li>{@code @org.hibernate.annotations.Audited} writing an admitted column that is not {@code
  *       Audited.Excluded};
  *   <li>{@code @org.hibernate.annotations.Temporal} keeping history of an admitted table, in a
- *       history table without {@code Temporal.Excluded} on the column, or in the table itself;
+ *       history table without {@code Temporal.Excluded} on the column, or in the table itself. With
+ *       the exclusion, Hibernate 7.4.5 still creates the column in the history table (measured,
+ *       test N6), and the catalogue leg refuses it by name;
  *   <li>a to-one or collection key whose target is an admitted column and whose key is in another
  *       table: that table holds index values with or without a database foreign key.
  * </ol>
@@ -221,11 +223,11 @@ final class HibernateCopyCheck {
                             + a.column()
                             + " ("
                             + a.label()
-                            + ") where this module's independent read-back cannot count them. Use"
-                            + " the history-table strategy with the field @Temporal.Excluded, or"
-                            + " remove @Temporal from "
+                            + ") where this module's independent read-back cannot count them."
+                            + " Remove @Temporal from "
                             + entity
-                            + ".");
+                            + ": the history-table strategy keeps the column in its history"
+                            + " table even with @Temporal.Excluded (measured on Hibernate 7.4).");
                     return;
                   }
                   named.add(
@@ -246,8 +248,10 @@ final class HibernateCopyCheck {
                           + a.label()
                           + "). An erasure clears "
                           + a.table()
-                          + " only. Mark the field @Temporal.Excluded, then clear the copies"
-                          + " already written: "
+                          + " only, and Hibernate 7.4 keeps a @Temporal.Excluded column in the"
+                          + " history table as well. Remove @Temporal from "
+                          + entity
+                          + ", then clear the copies already written: "
                           + clear(history, selectable.getSelectionExpression()));
                 }));
   }

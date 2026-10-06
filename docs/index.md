@@ -401,10 +401,10 @@ column is cleared and dropped.
 ### Hibernate's own audit and history
 
 Hibernate 7.4's `@org.hibernate.annotations.Audited` follows the same rule: `@Audited.Excluded` on
-every `@Shredded` and `@BlindIndex` field. `@org.hibernate.annotations.Temporal` is supported with
-the history-table strategy and the same fields `@Temporal.Excluded`; in-table history
-(`SINGLE_TABLE`) keeps old versions of the index where this module's independent read-back cannot
-count them and is refused.
+every `@Shredded` and `@BlindIndex` field. `@org.hibernate.annotations.Temporal` on an entity with a
+blind index is refused in 0.2.0: with the history-table strategy Hibernate 7.4.5 still creates a
+`@Temporal.Excluded` column in the history table (measured), and in-table history (`SINGLE_TABLE`)
+keeps old versions of the index where this module's independent read-back cannot count them.
 
 ## Schemas
 

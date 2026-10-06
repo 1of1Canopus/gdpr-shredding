@@ -31,8 +31,8 @@ All notable changes to this project. The format follows
   keyed on it, any enabled trigger or rule on the table or a partition or child, a materialized
   view reading it, a foreign key on it, a publication carrying it, a logical slot with a plugin
   other than `pgoutput`, and a leftover audit or history table found by name or by its revision
-  columns. Each erasure checks once more after its `UPDATE`, before commit. In-table `@Temporal`
-  history is refused. Envers is supported with every `@Shredded` and `@BlindIndex` field
+  columns. Each erasure checks once more after its `UPDATE`, before commit. `@Temporal` history
+  of an entity with a blind index is refused, in a history table or in the table itself. Envers is supported with every `@Shredded` and `@BlindIndex` field
   `@NotAudited` and Envers in its manual mode (docs/index.md, "Using Hibernate Envers"). See
   docs/upgrading-0.2.0.md, "Every installation: what your entity tables must be", and the step 1
   queries.

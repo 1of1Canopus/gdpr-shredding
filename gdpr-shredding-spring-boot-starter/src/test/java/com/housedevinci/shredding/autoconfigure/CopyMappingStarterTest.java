@@ -20,6 +20,7 @@ import java.sql.SQLException;
 import java.util.Base64;
 import java.util.List;
 import java.util.stream.Stream;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.SpringBootConfiguration;
 import org.springframework.boot.WebApplicationType;
@@ -133,6 +134,26 @@ class CopyMappingStarterTest {
       basePackageClasses = com.housedevinci.shredding.autoconfigure.copies.embedded.EmbNote.class)
   static class EmbApp extends Tenant {}
 
+  @SpringBootConfiguration
+  @EnableAutoConfiguration
+  @EntityScan(
+      basePackageClasses =
+          com.housedevinci.shredding.autoconfigure.copies.enversoverride.OverNote.class)
+  static class OverApp extends Tenant {}
+
+  @SpringBootConfiguration
+  @EnableAutoConfiguration
+  @EntityScan(
+      basePackageClasses =
+          com.housedevinci.shredding.autoconfigure.copies.temporalexcl.TempExclNote.class)
+  static class TempExclApp extends Tenant {}
+
+  @SpringBootConfiguration
+  @EnableAutoConfiguration
+  @EntityScan(
+      basePackageClasses = com.housedevinci.shredding.autoconfigure.copies.twoplain.PlainNote.class)
+  static class TwoPlainApp extends Tenant {}
+
   /** The documented composition: Envers' integrator first, this module's listener last. */
   @SpringBootConfiguration
   @EnableAutoConfiguration
@@ -146,6 +167,23 @@ class CopyMappingStarterTest {
               org.hibernate.jpa.boot.spi.JpaSettings.INTEGRATOR_PROVIDER,
               (org.hibernate.jpa.boot.spi.IntegratorProvider)
                   () -> List.of(new EnversFirstIntegrator()));
+    }
+  }
+
+  /**
+   * A context that refuses to start never runs create-drop's drop, and a table it left that holds
+   * an index column and revision columns is, by shape, a copy for every later fixture (row 45).
+   * Each test starts from an empty schema.
+   */
+  @BeforeEach
+  void emptySchema() throws SQLException {
+    try (var c =
+            DriverManager.getConnection(
+                POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+        var st = c.createStatement()) {
+      st.execute("DROP SCHEMA IF EXISTS audit CASCADE");
+      st.execute("DROP SCHEMA public CASCADE");
+      st.execute("CREATE SCHEMA public");
     }
   }
 
@@ -313,6 +351,86 @@ class CopyMappingStarterTest {
         .hasMessageContaining(
             "Hibernate keeps history of TempNote inside public.temp_note itself (@Temporal,"
                 + " single-table strategy).");
+  }
+
+  @Test
+  void e5_envers_audit_override_inherited_index_is_refused() {
+    ShreddingException refusal = refusal(OverApp.class);
+
+    assertThat(refusal.code()).isEqualTo(ErrorCodes.BLIND_INDEX_COPIED);
+    assertThat(refusal)
+        .hasMessageContaining(
+            "Hibernate Envers copies the blind-index column public.over_note.email_idx (@BlindIndex"
+                + " OverNote.emailIndex) into its audit table public.over_note_aud.");
+  }
+
+  @Test
+  void e7_envers_validity_strategy_store_at_delete_index_not_audited_admits_and_erases()
+      throws Exception {
+    try (ConfigurableApplicationContext ctx =
+        builder(
+                EnvOkApp.class,
+                "spring.jpa.properties.hibernate.envers.autoRegisterListeners=false",
+                "spring.jpa.properties.org.hibernate.envers.audit_strategy="
+                    + "org.hibernate.envers.strategy.internal.ValidityAuditStrategy",
+                "spring.jpa.properties.org.hibernate.envers.store_data_at_delete=true")
+            .run()) {
+      persist(ctx, new EnvOkNote(7L, "s7", "org-b", "a@b.test"));
+      var result =
+          ctx.getBean(ErasureService.class)
+              .erase(new ErasureRequest(TenantId.of("org-b"), SubjectId.of("s7"), "dpo", "art 17"));
+
+      assertThat(result.outcome()).isEqualTo(ErasureOutcome.COMPLETE);
+      assertThat(
+              count(
+                  "SELECT count(*) FROM information_schema.columns WHERE table_name ="
+                      + " 'env_ok_note_aud' AND column_name IN ('email', 'email_idx', 'revend')"))
+          .describedAs("the validity strategy adds REVEND and no index column")
+          .isEqualTo(1);
+    }
+  }
+
+  @Test
+  void e16_second_entity_unaudited_is_admitted() {
+    try (ConfigurableApplicationContext ctx = builder(TwoPlainApp.class).run()) {
+      assertThat(ctx.getBean(MappingAdmissionCheck.class).checked()).isEqualTo(1);
+    }
+  }
+
+  @Test
+  void n6_temporal_excluded_index_admitted_only_if_history_table_lacks_the_column()
+      throws Exception {
+    Throwable thrown =
+        catchThrowable(
+            () ->
+                builder(
+                        TempExclApp.class,
+                        "spring.jpa.properties.hibernate.temporal.table_strategy=HISTORY_TABLE",
+                        // create, not create-drop: the history table must outlive the refused
+                        // context to be measured.
+                        "spring.jpa.hibernate.ddl-auto=create")
+                    .run()
+                    .close());
+    long historyColumns =
+        count(
+            "SELECT count(*) FROM information_schema.columns WHERE table_name ="
+                + " 'temp_excl_note_history' AND column_name = 'email_idx'");
+    System.out.println("N6 history table holds email_idx: " + historyColumns + ", " + thrown);
+    if (historyColumns == 0) {
+      assertThat(thrown).describedAs("excluded and absent from history: admitted").isNull();
+    } else {
+      // Hibernate kept the column in the history table despite the exclusion: the catalogue leg
+      // refuses it by name, so exclusion alone is never trusted (design 3a.3).
+      ShreddingException refusal = null;
+      for (Throwable t = thrown; t != null; t = t.getCause()) {
+        if (t instanceof ShreddingException s) {
+          refusal = s;
+        }
+      }
+      assertThat(refusal).isNotNull();
+      assertThat(refusal.code()).isEqualTo(ErrorCodes.BLIND_INDEX_COPIED);
+      assertThat(refusal).hasMessageContaining("temp_excl_note_history has a column email_idx");
+    }
   }
 
   // ---------------------------------------------------------------------- associations
