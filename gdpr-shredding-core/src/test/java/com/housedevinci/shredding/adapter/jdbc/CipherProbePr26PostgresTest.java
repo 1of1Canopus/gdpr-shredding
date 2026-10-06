@@ -185,8 +185,8 @@ class CipherProbePr26PostgresTest {
   /**
    * Pass 2: the remedy statement a {@code SHRED-SCHEMA-010} trigger finding prints must still be
    * the statement that fixes the finding when the name holds a control character. Escaped as log
-   * text ({@code \\u000A} inside a plain quoted identifier) it names a different object; PostgreSQL's
-   * {@code U&"..."} form is one line and exact.
+   * text ({@code \\u000A} inside a plain quoted identifier) it names a different object;
+   * PostgreSQL's {@code U&"..."} form is one line and exact.
    */
   @Test
   void probe_printed_disable_trigger_statement_does_not_disable_the_trigger() {

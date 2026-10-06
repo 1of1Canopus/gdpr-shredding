@@ -332,6 +332,14 @@ All notable changes to this project. The format follows
   a comment saying so, rather than inheriting it by omission: reading that file now tells you which
   controls are off in the demo.
 
+### Fixed (security review pass 2 of acknowledged copies)
+
+- C-26-3: a remedy statement printed inside a refusal (`DISABLE TRIGGER`, `DROP RULE`, `DROP
+  CONSTRAINT`, `DROP INDEX`, `SET STATISTICS`, the re-create transactions) named a different object
+  when an identifier held a control character, because the log escaping had been applied inside the
+  SQL. Identifiers inside a printed statement are now spelled in PostgreSQL's `U&"..."` form: one
+  line, exact, runs as printed. Prose keeps the log escaping.
+
 ### Fixed (security review pass 1 of audit-table coverage)
 - C-25-1 (MEDIUM): an erasure now always runs at `READ COMMITTED`, whatever the pool or the role
   sets (see C-25-4: the level is set for the transaction only); a level that cannot be set refuses

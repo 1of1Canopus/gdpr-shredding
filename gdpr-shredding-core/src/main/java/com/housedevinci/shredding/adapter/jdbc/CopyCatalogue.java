@@ -529,9 +529,9 @@ final class CopyCatalogue {
               + ". This module cannot see where a trigger writes; one that copies the row keeps"
               + " the erased subject's index after every erasure, and the erasure's own UPDATE"
               + " fires it. Drop or disable the trigger: ALTER TABLE "
-              + table
+              + JdbcSupport.sqlIdentifier(table)
               + " DISABLE TRIGGER "
-              + t.name()
+              + JdbcSupport.sqlIdentifier(t.name())
               + "."
               + acknowledge(
                   "it never stores the index or a hook clears what it stores",
@@ -629,9 +629,9 @@ final class CopyCatalogue {
                   + (rs.getBoolean("is_instead") ? " DO INSTEAD" : " DO ALSO")
                   + "). A rule rewrites the statements on the table, the erasure's own UPDATE"
                   + " included, and this module cannot see where it writes. Drop it: DROP RULE "
-                  + name
+                  + JdbcSupport.sqlIdentifier(name)
                   + " ON "
-                  + table
+                  + JdbcSupport.sqlIdentifier(table)
                   + ".");
         }
       }
@@ -736,7 +736,7 @@ final class CopyCatalogue {
         + r.via().map(v -> " through view " + v).orElse("")
         + ". It holds every index value as of its last refresh, and no erasure reaches it. Leave"
         + " the column out of the view, or drop it: DROP MATERIALIZED VIEW "
-        + view
+        + JdbcSupport.sqlIdentifier(view)
         + ".";
   }
 
@@ -775,9 +775,9 @@ final class CopyCatalogue {
                     + referencing
                     + " holds index values and no erasure reaches it. Reference the table by its"
                     + " identifier instead, then drop the constraint and the column: ALTER TABLE "
-                    + referencing
+                    + JdbcSupport.sqlIdentifier(referencing)
                     + " DROP CONSTRAINT "
-                    + name
+                    + JdbcSupport.sqlIdentifier(name)
                     + ".");
           } else if (own.isPresent()) {
             IndexColumn col = own.get();
@@ -795,9 +795,9 @@ final class CopyCatalogue {
                     + referenced
                     + " holds the same index values and no erasure reaches it. Drop the"
                     + " constraint: ALTER TABLE "
-                    + from.name()
+                    + JdbcSupport.sqlIdentifier(from.name())
                     + " DROP CONSTRAINT "
-                    + name
+                    + JdbcSupport.sqlIdentifier(name)
                     + ".");
           }
         }
@@ -1024,13 +1024,13 @@ final class CopyCatalogue {
           String quotedCol = JdbcSupport.printed(rs, "col");
           String clear =
               "UPDATE "
-                  + relation
+                  + JdbcSupport.sqlIdentifier(relation)
                   + " SET "
-                  + quotedCol
+                  + JdbcSupport.sqlIdentifier(quotedCol)
                   + " = NULL; ALTER TABLE "
-                  + relation
+                  + JdbcSupport.sqlIdentifier(relation)
                   + " DROP COLUMN "
-                  + quotedCol
+                  + JdbcSupport.sqlIdentifier(quotedCol)
                   + ".";
           int namedAt = rs.getInt("named");
           boolean isNamed = !rs.wasNull();
