@@ -1,13 +1,19 @@
 package com.housedevinci.shredding.autoconfigure;
 
+import com.housedevinci.shredding.adapter.jdbc.AcknowledgedCopies;
 import com.housedevinci.shredding.adapter.jdbc.MappingAdmission;
+import com.housedevinci.shredding.application.AcknowledgedCopy;
+import com.housedevinci.shredding.application.ErasureService;
+import com.housedevinci.shredding.application.PostErasureHook;
 import com.housedevinci.shredding.domain.ErrorCodes;
 import com.housedevinci.shredding.domain.ShreddingException;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.TreeMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -48,16 +54,38 @@ public final class MappingAdmissionCheck {
   private final int checked;
 
   public MappingAdmissionCheck(ShreddedModel model, ShreddingSchemaGate gate) {
+    this(model, gate, List.of(), List.of());
+  }
+
+  /**
+   * As above, with the acknowledgement list (audit-table coverage design, section 3c) and the
+   * registered hooks. Hook names are checked here as well as in {@link ErasureService}, so a
+   * duplicate name or an entry with no hook refuses startup even when the service bean is created
+   * lazily. Each entry must admit a finding of some target, or startup refuses; each admitted one
+   * WARNs, once per entry, at every startup.
+   */
+  public MappingAdmissionCheck(
+      ShreddedModel model,
+      ShreddingSchemaGate gate,
+      List<AcknowledgedCopy> acknowledged,
+      List<PostErasureHook> hooks) {
     Objects.requireNonNull(model, "model");
     Objects.requireNonNull(gate, "gate");
+    ErasureService.requireValidHooks(hooks);
+    AcknowledgedCopies.requireDistinct(acknowledged);
+    ErasureService.requireBound(hooks, acknowledged);
     List<MappingAdmission.Target> targets = model.admissionTargets();
     var refusals = new ArrayList<String>();
     var copies = new ArrayList<String>();
+    Map<Integer, String> warnings = new TreeMap<>();
+    List<String> unused;
     try (Connection c = gate.dataSource().getConnection()) {
       for (MappingAdmission.Target target : targets) {
-        switch (MappingAdmission.verdict(c, target, model.copySignatures())) {
-          case MappingAdmission.Admitted admitted ->
-              admitted.warnings().forEach(w -> log.warn("shredding: {}", w));
+        switch (MappingAdmission.verdict(c, target, model.copySignatures(), acknowledged)) {
+          case MappingAdmission.Admitted admitted -> {
+            admitted.warnings().forEach(w -> log.warn("shredding: {}", w));
+            admitted.acknowledged().forEach(a -> warnings.putIfAbsent(a.entry(), a.warning()));
+          }
           case MappingAdmission.Absent absent ->
               log.warn(
                   "{} At startup this is a warning, because the table may be created after the"
@@ -66,9 +94,13 @@ public final class MappingAdmissionCheck {
                   absent.message(),
                   ErrorCodes.MAPPING_INADMISSIBLE);
           case MappingAdmission.Refused refused -> refusals.add(refused.message());
-          case MappingAdmission.Copied copied -> copies.add(copied.message());
+          case MappingAdmission.Copied copied -> {
+            copies.add(copied.message());
+            copied.acknowledged().forEach(a -> warnings.putIfAbsent(a.entry(), a.warning()));
+          }
         }
       }
+      unused = AcknowledgedCopies.unused(c, acknowledged, warnings.keySet());
     } catch (SQLException e) {
       throw new ShreddingException(
           ErrorCodes.SCHEMA_UNVERIFIABLE,
@@ -91,12 +123,24 @@ public final class MappingAdmissionCheck {
                   : " Also refused, with "
                       + ErrorCodes.BLIND_INDEX_COPIED
                       + ": "
-                      + String.join(" ", copies)));
+                      + String.join(" ", copies))
+              + also(unused));
     }
     if (!copies.isEmpty()) {
-      throw new ShreddingException(ErrorCodes.BLIND_INDEX_COPIED, String.join(" ", copies));
+      throw new ShreddingException(
+          ErrorCodes.BLIND_INDEX_COPIED, String.join(" ", copies) + also(unused));
     }
+    if (!unused.isEmpty()) {
+      throw new ShreddingException(ErrorCodes.CONFIG, String.join(" ", unused));
+    }
+    warnings.values().forEach(log::warn);
     this.checked = targets.size();
+  }
+
+  private static String also(List<String> unused) {
+    return unused.isEmpty()
+        ? ""
+        : " Also refused, with " + ErrorCodes.CONFIG + ": " + String.join(" ", unused);
   }
 
   /** How many {@code @Shredded} entities were checked at startup. */

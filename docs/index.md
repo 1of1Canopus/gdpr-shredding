@@ -183,6 +183,7 @@ the natural id.
 | `shredding.erasure-log.unkeyed` | `false` | loud opt-out. WARNs at every startup |
 | `shredding.blind-index.hmac-secret` | required with `@BlindIndex` | its own secret, never the data key or chain material |
 | `shredding.blind-index.bits` | `64` | index width. A prefilter: the query path re-verifies |
+| `shredding.jdbc.acknowledged-copies` | empty | triggers, publications with `UPDATE` and non-`pgoutput` slots admitted with the `PostErasureHook` that clears them (`kind`, `schema`, `table`, `name`, `cleared-by`; exact identifiers). WARNs at every startup per entry; each erasure is `PARTIAL` until the hook succeeds. See docs/upgrading-0.2.0.md, "Acknowledging a trigger, a publication or a slot" |
 | `shredding.erasure.backup-retention` | `30d` | the erasure is complete at `erasedAt + this`, and the record says so. Must be between `0` and `36500d` (100 years): startup refuses anything else with `SHRED-CONFIG-001`, because a negative value dates the backup clearance before the erasure and a larger one cannot be dated or stored. `0` means no backups |
 
 There is no fail-open property anywhere in this module.

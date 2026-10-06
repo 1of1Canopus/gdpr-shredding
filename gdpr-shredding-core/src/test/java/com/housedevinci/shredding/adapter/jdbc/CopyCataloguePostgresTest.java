@@ -152,7 +152,10 @@ class CopyCataloguePostgresTest {
                 + " function app.t1_copy). This module cannot see where a trigger writes; one"
                 + " that copies the row keeps the erased subject's index after every erasure, and"
                 + " the erasure's own UPDATE fires it. Drop or disable the trigger: ALTER TABLE"
-                + " app.t1 DISABLE TRIGGER t1_audit.");
+                + " app.t1 DISABLE TRIGGER t1_audit. Or, if it never stores the index or a hook"
+                + " clears what it stores, acknowledge it with the hook that clears it:"
+                + " shredding.jdbc.acknowledged-copies[n] with kind=trigger, schema=app, table=t1,"
+                + " name=t1_audit, cleared-by=<hook name>.");
   }
 
   static Stream<String[]> triggerShapes() {

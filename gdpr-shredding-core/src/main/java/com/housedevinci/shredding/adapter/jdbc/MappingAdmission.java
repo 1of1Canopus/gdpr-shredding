@@ -1,5 +1,6 @@
 package com.housedevinci.shredding.adapter.jdbc;
 
+import com.housedevinci.shredding.application.AcknowledgedCopy;
 import com.housedevinci.shredding.domain.BlindIndexColumn;
 import com.housedevinci.shredding.domain.ColumnRef;
 import com.housedevinci.shredding.domain.ErrorCodes;
@@ -185,9 +186,30 @@ public final class MappingAdmission {
    * hear about: an unlogged table or descendant, and an admission that depends on the runtime role
    * holding {@code BYPASSRLS}.
    */
-  public record Admitted(List<String> warnings) implements Verdict {
+  public record Admitted(List<String> warnings, List<Acknowledged> acknowledged)
+      implements Verdict {
     public Admitted {
       warnings = List.copyOf(warnings);
+      acknowledged = List.copyOf(acknowledged);
+    }
+
+    public Admitted(List<String> warnings) {
+      this(warnings, List.of());
+    }
+  }
+
+  /**
+   * A copy the catalogue leg found and admitted because entry {@code entry} of the acknowledgement
+   * list names it (audit-table coverage design, section 3c).
+   *
+   * @param entry the entry's position in the list, as {@code shredding.jdbc.acknowledged-copies[n]}
+   * @param copy the entry
+   * @param warning the startup WARN for it, identifiers escaped, one line
+   */
+  public record Acknowledged(int entry, AcknowledgedCopy copy, String warning) {
+    public Acknowledged {
+      Objects.requireNonNull(copy, "copy");
+      Objects.requireNonNull(warning, "warning");
     }
   }
 
@@ -209,7 +231,16 @@ public final class MappingAdmission {
    * the mapping itself is admitted, so a table is never told to fix its statistics before it is
    * told it cannot be erased at all.
    */
-  public record Copied(String message) implements Verdict {}
+  public record Copied(String message, List<Acknowledged> acknowledged) implements Verdict {
+    public Copied {
+      Objects.requireNonNull(message, "message");
+      acknowledged = List.copyOf(acknowledged);
+    }
+
+    public Copied(String message) {
+      this(message, List.of());
+    }
+  }
 
   // ------------------------------------------------------------------------------- statements
 
@@ -454,6 +485,20 @@ public final class MappingAdmission {
    * under a configured name or column pair is recognised as well as one under Hibernate's defaults.
    */
   public static Verdict verdict(Connection c, Target target, CopySignatures signatures) {
+    return verdict(c, target, signatures, List.of());
+  }
+
+  /**
+   * As {@link #verdict(Connection, Target, CopySignatures)}, admitting the triggers, publications
+   * and slots {@code acknowledged} names (audit-table coverage design, section 3c). An admitted one
+   * is returned in the verdict's {@code acknowledged}; an entry that admits nothing on this target
+   * is not an error here, because an entry may concern another target: the caller decides it over
+   * every target with {@link AcknowledgedCopies#unused}. Nothing an entry names can lift a refusal
+   * of the mapping itself (R-a to R-i, including an ancestor): that is decided first.
+   */
+  public static Verdict verdict(
+      Connection c, Target target, CopySignatures signatures, List<AcknowledgedCopy> acknowledged) {
+    Objects.requireNonNull(acknowledged, "acknowledged");
     Objects.requireNonNull(c, "c");
     Objects.requireNonNull(target, "target");
     Objects.requireNonNull(signatures, "signatures");
@@ -480,9 +525,13 @@ public final class MappingAdmission {
       // One message lists every finding of the verdict: the catalogue's copies first, then the
       // planner statistics, both under SHRED-SCHEMA-010.
       var copies = new ArrayList<String>();
-      CopyCatalogue.check(c, target, family, signatures).ifPresent(copies::add);
+      CopyCatalogue.Result found = CopyCatalogue.check(c, target, family, signatures, acknowledged);
+      found.refused().ifPresent(copies::add);
       PlannerStatistics.check(c, target, oid, family).ifPresent(copies::add);
-      return copies.isEmpty() ? verdict : new Copied(String.join(" ", copies));
+      if (!copies.isEmpty()) {
+        return new Copied(String.join(" ", copies), found.acknowledged());
+      }
+      return new Admitted(((Admitted) verdict).warnings(), found.acknowledged());
     } catch (SQLException e) {
       throw unverifiable(target, "SQLState " + e.getSQLState(), e);
     }
@@ -527,9 +576,9 @@ public final class MappingAdmission {
                     rs.getBoolean("may_write"),
                     rs.getBoolean("bypassrls"),
                     rs.getLong("children"),
-                    Optional.ofNullable(rs.getString("parents")),
+                    Optional.ofNullable(JdbcSupport.printed(rs, "parents")),
                     rs.getBoolean("relispartition"),
-                    Optional.ofNullable(rs.getString("partition_root")));
+                    Optional.ofNullable(JdbcSupport.printed(rs, "partition_root")));
         if (rs.next()) {
           throw new SQLException("the relation leg returned a second row", "XX000");
         }
@@ -677,11 +726,11 @@ public final class MappingAdmission {
               rs.getString("typtype"),
               rs.getString("typcategory"),
               rs.getLong("typbasetype"),
-              rs.getString("nspname"),
-              rs.getString("spelled"),
-              Optional.ofNullable(rs.getString("own_eq_schema")),
+              JdbcSupport.printed(rs, "nspname"),
+              JdbcSupport.printed(rs, "spelled"),
+              Optional.ofNullable(JdbcSupport.printed(rs, "own_eq_schema")),
               implicit == null || implicit.isEmpty() ? List.of() : List.of(implicit.split(",", -1)),
-              Optional.ofNullable(rs.getString("declared_shadow_eq_schema")));
+              Optional.ofNullable(JdbcSupport.printed(rs, "declared_shadow_eq_schema")));
       seen.put(oid, facts);
       return facts;
     }
@@ -968,7 +1017,11 @@ public final class MappingAdmission {
       ps.setArray(2, oids);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          found.add(rs.getString("child") + " (parents " + rs.getString("parents") + ")");
+          found.add(
+              JdbcSupport.printed(rs, "child")
+                  + " (parents "
+                  + JdbcSupport.printed(rs, "parents")
+                  + ")");
         }
       }
     } finally {

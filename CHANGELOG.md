@@ -22,7 +22,36 @@ All notable changes to this project. The format follows
   affected. Same dependency path as above; only `gdpr-shredding-sample` resolves
   `jackson-databind` at all, now at 3.1.7.
 
+### Added
+- `shredding.jdbc.acknowledged-copies`: a trigger, a publication that publishes `UPDATE`, or a
+  logical replication slot with a plugin other than `pgoutput`, which `SHRED-SCHEMA-010` refuses,
+  can be admitted by naming it exactly (`kind`, `schema` and `table` for a trigger, `name`) together
+  with `cleared-by`, the `PostErasureHook` that clears what it keeps. Empty by default. Each entry
+  WARNs at every startup and is checked again at every erasure; an entry whose object does not
+  exist, that admits nothing (another table, an ancestor, a disabled trigger, a partition clone, a
+  publication without `UPDATE`, a physical or `pgoutput` slot), that names an object twice, or
+  whose hook is not registered refuses startup or that erasure with `SHRED-CONFIG-001`. Every
+  erasure is recorded `PARTIAL`, naming the object, until its hook reports success. Rules,
+  materialized views, foreign keys, statistics, audit and history mappings and leftover tables
+  stay refusals. Core users pass `AcknowledgedCopy` values to the new `JdbcErasureStore`
+  constructor; `ErasureStore.acknowledgedCopies()` is a new default method, and a store that wraps
+  another must forward it, or every erasure is refused.
+
 ### Changed
+- **The erasure's first record lists every registered hook as pending.** Until 0.1.x it carried
+  no hook outcome; it now carries one per hook, `pending`, or `pending; clears <objects>` for a
+  hook bound to an acknowledged copy, so a crash between the commit and the hooks leaves a record
+  that names every step it waits for. Same field, same chain version; older verifiers verify it.
+- **A retry answers the hooks the trail left open, not the hooks configured now.** A repeated
+  erasure of a subject whose latest record is `PARTIAL` runs each hook that record names as
+  pending or failed, by name; a name no registered hook carries is recorded as `not registered;
+  outstanding since record <n>` and keeps the erasure `PARTIAL`. Removing or renaming a hook can no
+  longer turn an outstanding erasure `COMPLETE`. A `PARTIAL` record written by 0.1.x names no hook
+  and keeps 0.1.x semantics.
+- **Both erasure stores refuse a record that drops an outstanding hook or names one hook twice**
+  (`SHRED-CONFIG-001`, nothing written), whatever its outcome.
+- **BREAKING. Hook names must be non-blank and unique** (`SHRED-CONFIG-001` at startup): with
+  name-keyed answering, two hooks of one name could answer for each other.
 - **BREAKING. Every copy of a blind-index column outside the table is refused
   (`SHRED-SCHEMA-010`).** An erasure clears the index in the table only, so a copy kept the erased
   subject matchable with the application's index secret while the record said `COMPLETE`.
@@ -302,6 +331,14 @@ All notable changes to this project. The format follows
 - The sample's `application.yml` sets both new properties to the weaker value **explicitly**, with
   a comment saying so, rather than inheriting it by omission: reading that file now tells you which
   controls are off in the demo.
+
+### Fixed (security review pass 2 of acknowledged copies)
+
+- C-26-3: a remedy statement printed inside a refusal (`DISABLE TRIGGER`, `DROP RULE`, `DROP
+  CONSTRAINT`, `DROP INDEX`, `SET STATISTICS`, the re-create transactions) named a different object
+  when an identifier held a control character, because the log escaping had been applied inside the
+  SQL. Identifiers inside a printed statement are now spelled in PostgreSQL's `U&"..."` form: one
+  line, exact, runs as printed. Prose keeps the log escaping.
 
 ### Fixed (security review pass 1 of audit-table coverage)
 - C-25-1 (MEDIUM): an erasure now always runs at `READ COMMITTED`, whatever the pool or the role

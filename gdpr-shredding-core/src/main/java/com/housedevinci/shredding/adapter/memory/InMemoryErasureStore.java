@@ -2,6 +2,7 @@ package com.housedevinci.shredding.adapter.memory;
 
 import com.housedevinci.shredding.application.ErasureReader;
 import com.housedevinci.shredding.application.ErasureStore;
+import com.housedevinci.shredding.application.OutstandingHooks;
 import com.housedevinci.shredding.domain.ErasureAnchor;
 import com.housedevinci.shredding.domain.ErasureChain;
 import com.housedevinci.shredding.domain.ErasureRecord;
@@ -16,6 +17,11 @@ import java.util.function.BiFunction;
 /**
  * An erasure store in memory, for unit tests. The transactional guarantee the JDBC store provides
  * is simulated by doing both halves inside one synchronized block.
+ *
+ * <p>It holds the append rule of {@link OutstandingHooks} exactly as the JDBC store does, on every
+ * append and on the erasure's own record (audit-table coverage design, section 3c.7, rev 5 item 4).
+ * It admits no catalogue copy, so its {@link #acknowledgedCopies()} is the port's empty default and
+ * its erasure needs no pending outcome for one.
  */
 public final class InMemoryErasureStore implements ErasureStore, ErasureReader, ErasureAnchor {
 
@@ -52,6 +58,8 @@ public final class InMemoryErasureStore implements ErasureStore, ErasureReader, 
   }
 
   private ErasureRecord appendLocked(ErasureRecord record) {
+    OutstandingHooks.requireAnswered(
+        latestLocked(record.tenant(), record.subjectPseudonym()), record);
     ErasureRecord linked = chain.link(record, head).withSequence(records.size() + 1L);
     records.add(linked);
     head = linked.hash();
@@ -70,15 +78,22 @@ public final class InMemoryErasureStore implements ErasureStore, ErasureReader, 
   @Override
   public synchronized Optional<ErasureRecord> latestForSubject(
       TenantId tenant, String subjectPseudonym) {
-    ErasureRecord latest = null;
-    for (ErasureRecord r : records) {
+    return latestLocked(tenant, subjectPseudonym);
+  }
+
+  /**
+   * The last record appended for the subject, by append order as the JDBC store orders by {@code
+   * seq} (CIPHER-15). Not by timestamp: two records written under one fixed or stepped-back clock
+   * share or invert their instants, and the earlier would hide the later.
+   */
+  private Optional<ErasureRecord> latestLocked(TenantId tenant, String subjectPseudonym) {
+    for (int i = records.size() - 1; i >= 0; i--) {
+      ErasureRecord r = records.get(i);
       if (r.tenant().equals(tenant) && r.subjectPseudonym().equals(subjectPseudonym)) {
-        if (latest == null || r.timestamp().isAfter(latest.timestamp())) {
-          latest = r;
-        }
+        return Optional.of(r);
       }
     }
-    return Optional.ofNullable(latest);
+    return Optional.empty();
   }
 
   @Override

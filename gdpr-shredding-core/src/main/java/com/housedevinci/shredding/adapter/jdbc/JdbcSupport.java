@@ -40,6 +40,103 @@ public final class JdbcSupport {
    * letting either escape would report a refusal the work raised on purpose - {@code
    * SHRED-SCHEMA-005} for a catalogue that could not be read, say - as a key-store outage.
    */
+  /**
+   * C-26-2: an identifier read from the catalogue for a message, escaped as {@link
+   * com.housedevinci.shredding.application.LogText#escape} does, so a line break or separator in an
+   * operator-chosen name cannot split a refusal or a WARN into lines this module did not write.
+   * Applied where the identifier is read for display, never to a composed message, and never to a
+   * value that is compared with configuration or bound again (those stay raw).
+   */
+  static String printed(java.sql.ResultSet rs, String column) throws SQLException {
+    String value = rs.getString(column);
+    return value == null ? null : com.housedevinci.shredding.application.LogText.escape(value);
+  }
+
+  /**
+   * C-26-3: an identifier, or a dotted or comma-separated list of them, for the inside of a printed
+   * SQL statement. {@code text} is what {@link #printed} returned for server-quoted names ({@code
+   * quote_ident}), so the escaping of {@link com.housedevinci.shredding.application.LogText} is
+   * undone first; a segment that holds a control character is then spelled as PostgreSQL's {@code
+   * U&"..."} form ({@code "} doubled, backslash doubled, each control character as {@code \XXXX}).
+   * The result is one line and names exactly the object the catalogue holds. Prose keeps {@link
+   * #printed}; a name with nothing to escape comes back unchanged.
+   */
+  static String sqlIdentifier(String text) {
+    if (text.indexOf('\\') < 0) {
+      return text;
+    }
+    var raw = new StringBuilder(text.length());
+    for (int i = 0; i < text.length(); i++) {
+      char ch = text.charAt(i);
+      if (ch != '\\' || i + 1 >= text.length()) {
+        raw.append(ch);
+      } else if (text.charAt(i + 1) == '\\') {
+        raw.append('\\');
+        i++;
+      } else if (text.charAt(i + 1) == 'u' && isHex(text, i + 2)) {
+        raw.append((char) Integer.parseInt(text.substring(i + 2, i + 6), 16));
+        i += 5;
+      } else {
+        raw.append(ch);
+      }
+    }
+    var out = new StringBuilder(raw.length() + 8);
+    int i = 0;
+    while (i < raw.length()) {
+      char ch = raw.charAt(i);
+      if (ch != '"') {
+        out.append(ch);
+        i++;
+        continue;
+      }
+      var segment = new StringBuilder();
+      i++;
+      while (i < raw.length()) {
+        char c = raw.charAt(i);
+        if (c == '"' && i + 1 < raw.length() && raw.charAt(i + 1) == '"') {
+          segment.append('"');
+          i += 2;
+        } else if (c == '"') {
+          i++;
+          break;
+        } else {
+          segment.append(c);
+          i++;
+        }
+      }
+      boolean special = false;
+      var body = new StringBuilder();
+      for (int k = 0; k < segment.length(); k++) {
+        char c = segment.charAt(k);
+        if (c == '"') {
+          body.append("\"\"");
+        } else if (c == '\\') {
+          body.append("\\\\");
+          special = true;
+        } else if (c < 0x20 || (c >= 0x7F && c <= 0x9F) || c == '\u2028' || c == '\u2029') {
+          body.append(String.format("\\%04X", (int) c));
+          special = true;
+        } else {
+          body.append(c);
+        }
+      }
+      out.append(special ? "U&\"" : "\"").append(body).append('"');
+    }
+    return out.toString();
+  }
+
+  private static boolean isHex(String text, int from) {
+    if (from + 4 > text.length()) {
+      return false;
+    }
+    for (int k = from; k < from + 4; k++) {
+      if (Character.digit(text.charAt(k), 16) < 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   static <T> T inTransaction(DataSource ds, SqlWork<T> work) {
     try (Connection c = ds.getConnection()) {
       boolean previous = c.getAutoCommit();

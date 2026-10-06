@@ -3,8 +3,11 @@ package com.housedevinci.shredding.adapter.jdbc;
 import static com.housedevinci.shredding.adapter.jdbc.JdbcSupport.instant;
 import static com.housedevinci.shredding.adapter.jdbc.JdbcSupport.ts;
 
+import com.housedevinci.shredding.application.AcknowledgedCopy;
 import com.housedevinci.shredding.application.ErasureReader;
 import com.housedevinci.shredding.application.ErasureStore;
+import com.housedevinci.shredding.application.LogText;
+import com.housedevinci.shredding.application.OutstandingHooks;
 import com.housedevinci.shredding.domain.BlindIndexColumn;
 import com.housedevinci.shredding.domain.ErasureAnchor;
 import com.housedevinci.shredding.domain.ErasureChain;
@@ -22,9 +25,12 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.TreeMap;
 import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -56,6 +62,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
   private final List<MappingAdmission.Target> admissionTargets;
   private final BlindIndexResidual residual;
   private final CopySignatures copySignatures;
+  private final List<AcknowledgedCopy> acknowledged;
   private final String dataKeyTable;
   private final String erasedSubjectTable;
   private final String erasureTable;
@@ -89,6 +96,29 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
       List<BlindIndexColumn> blindIndexColumns,
       BlindIndexResidual residual,
       CopySignatures copySignatures) {
+    this(dataSource, schema, chain, blindIndexColumns, residual, copySignatures, List.of());
+  }
+
+  /**
+   * @param residual the independent read-back, as above
+   * @param copySignatures the audit and history names, as above
+   * @param acknowledged the triggers, publications and slots this store admits because a hook
+   *     clears what they keep (audit-table coverage design, section 3c), each compared exactly with
+   *     the catalogue at every erasure. Entry {@code n} is named {@code
+   *     shredding.jdbc.acknowledged-copies[n]} in every message. An entry that admits nothing at an
+   *     erasure refuses it, and every erasure refuses unless its record names each admitted copy as
+   *     pending on its clearing hook, which {@code ErasureService} built on this store does
+   */
+  public JdbcErasureStore(
+      DataSource dataSource,
+      VerifiedSchema schema,
+      ErasureChain chain,
+      List<BlindIndexColumn> blindIndexColumns,
+      BlindIndexResidual residual,
+      CopySignatures copySignatures,
+      List<AcknowledgedCopy> acknowledged) {
+    this.acknowledged = List.copyOf(acknowledged);
+    AcknowledgedCopies.requireDistinct(this.acknowledged);
     this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
     Objects.requireNonNull(schema, "schema");
     // Design §16: the four relation names are built once, from the schema that was verified at
@@ -116,6 +146,11 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
   }
 
   @Override
+  public List<AcknowledgedCopy> acknowledgedCopies() {
+    return acknowledged;
+  }
+
+  @Override
   public Outcome erase(TenantId tenant, SubjectId subject, RecordFactory factory) {
     // C-25-1: READ COMMITTED whatever the pool or the role says; see JdbcSupport.
     return JdbcSupport.inReadCommittedTransaction(
@@ -134,20 +169,24 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
             // Idempotent: a repeat erasure writes no second record and claims nothing new.
             return new Outcome(true, 0, 0, null);
           }
-          int cleared = step("the blind-index update", () -> clearBlindIndexes(c, tenant, subject));
+          var admitted = new TreeMap<Integer, AcknowledgedCopy>();
+          int cleared =
+              step("the blind-index update", () -> clearBlindIndexes(c, tenant, subject, admitted));
           int destroyed = step("the key-row delete", () -> deleteKeyRows(c, tenant, subject));
           step("the erasure tombstone", () -> tombstone(c, tenant, subject));
+          ErasureRecord built = factory.create(destroyed, cleared);
+          requireNamed(built, List.copyOf(admitted.values()));
           ErasureRecord record =
-              step(
-                  "the erasure-log append",
-                  () -> appendInTransaction(c, factory.create(destroyed, cleared)));
+              step("the erasure-log append", () -> appendInTransaction(c, built));
           return new Outcome(false, destroyed, cleared, record);
         });
   }
 
   @Override
   public ErasureRecord append(ErasureRecord record) {
-    return JdbcSupport.inTransaction(
+    // The append guard reads the subject's latest record after the advisory lock, so it must read
+    // committed data the lock has ordered: READ COMMITTED, as every erasure (C-25-1).
+    return JdbcSupport.inReadCommittedTransaction(
         dataSource, c -> step("the erasure-log append", () -> appendInTransaction(c, record)));
   }
 
@@ -158,6 +197,9 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
       lock.setLong(1, LOCK_KEY);
       lock.execute();
     }
+    // C11, rev 5 item 1: under the lock that orders every append, the new record answers every
+    // hook the subject's latest record left pending or failed, and names no hook twice.
+    OutstandingHooks.requireAnswered(latest(c, record.tenant(), record.subjectPseudonym()), record);
     String prev = ErasureChain.GENESIS;
     long count = 0;
     boolean anchored = false;
@@ -293,7 +335,66 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
     }
   }
 
-  private int clearBlindIndexes(Connection c, TenantId tenant, SubjectId subject)
+  /**
+   * C12 (audit-table coverage design, section 3c.7): admitting an acknowledged copy and naming it
+   * in the record are one decision, taken here where the admission happens. The record must be
+   * {@code PARTIAL} and hold, for each admitted copy, exactly the pending outcome of its clearing
+   * hook naming every admitted copy bound to that hook ({@link AcknowledgedCopy#describe}, so the
+   * comparison is exact string equality). A store wrapper that hides {@link #acknowledgedCopies()}
+   * from the service, or a service built on another store, fails here and the transaction rolls
+   * back whole.
+   */
+  private static void requireNamed(ErasureRecord record, List<AcknowledgedCopy> admitted) {
+    var byHook = new LinkedHashMap<String, List<AcknowledgedCopy>>();
+    for (AcknowledgedCopy copy : admitted) {
+      byHook.computeIfAbsent(copy.clearedBy(), k -> new ArrayList<>()).add(copy);
+    }
+    for (AcknowledgedCopy copy : admitted) {
+      HookOutcome expected =
+          new HookOutcome(
+              copy.clearedBy(),
+              false,
+              OutstandingHooks.PENDING_CLEARS
+                  + AcknowledgedCopy.describe(byHook.get(copy.clearedBy())));
+      if (record.outcome() != ErasureOutcome.PARTIAL || !record.hookOutcomes().contains(expected)) {
+        throw new ShreddingException(
+            ErrorCodes.CONFIG,
+            "shredding: refused the erasure: acknowledged copy "
+                + copy.printable()
+                + " is cleared by hook "
+                + LogText.escape(copy.clearedBy())
+                + ", and the erasure record does not name that hook as pending. ErasureService must"
+                + " be built on a store whose acknowledgedCopies() returns this store's list; a"
+                + " wrapping ErasureStore must forward acknowledgedCopies(). The transaction is"
+                + " rolled back: no key is destroyed, no blind index is cleared and no record is"
+                + " appended.");
+      }
+    }
+  }
+
+  /**
+   * Every entry of the acknowledgement list admitted something at this position, or the erasure is
+   * refused (section 3c.5): an acknowledged object dropped since startup refuses, one re-created
+   * under the same identifiers is admitted.
+   */
+  private void refuseUnused(Connection c, Map<Integer, AcknowledgedCopy> admitted, String suffix)
+      throws SQLException {
+    List<String> unused = AcknowledgedCopies.unused(c, acknowledged, admitted.keySet());
+    if (!unused.isEmpty()) {
+      throw new ShreddingException(ErrorCodes.CONFIG, String.join(" ", unused) + suffix);
+    }
+  }
+
+  private static final String BEFORE_FIRST_STATEMENT =
+      " This erasure is refused before its first statement: no key is destroyed, no blind"
+          + " index is touched and no record is appended.";
+
+  private static final String AFTER_UPDATE =
+      " Found after this erasure's UPDATE: the erasure is refused and rolled back, no key"
+          + " is destroyed, no blind index is cleared and no record is appended.";
+
+  private int clearBlindIndexes(
+      Connection c, TenantId tenant, SubjectId subject, Map<Integer, AcknowledgedCopy> admitted)
       throws SQLException {
     // Mapping admission, the erasure leg (name-resolution design, addendum section A.5): every
     // table this erasure will clear is locked and then checked against the catalogue, before the
@@ -301,8 +402,11 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
     // order for every erasure, so two erasures cannot take the same pair of locks the other way
     // round.
     for (MappingAdmission.Target target : admissionTargets) {
-      admit(c, target, copySignatures);
+      for (MappingAdmission.Acknowledged a : admit(c, target, copySignatures, acknowledged)) {
+        admitted.put(a.entry(), a.copy());
+      }
     }
+    refuseUnused(c, admitted, BEFORE_FIRST_STATEMENT);
     int cleared = 0;
     for (BlindIndexColumn column : blindIndexColumns) {
       // Addendum 4, S4.4: every identifier here is a TableRef or a ColumnRef, built from the
@@ -335,9 +439,13 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
     // erasure's locks and copy the index values it is about to clear from the last committed
     // snapshot; a copy made while this transaction held its locks is found here and the erasure
     // rolls back. What remains is the time between this run and commit (SECURITY-NOTES.md).
+    var again = new TreeMap<Integer, AcknowledgedCopy>();
     for (MappingAdmission.Target target : admissionTargets) {
-      recheck(c, target, copySignatures);
+      for (MappingAdmission.Acknowledged a : recheck(c, target, copySignatures, acknowledged)) {
+        again.put(a.entry(), a.copy());
+      }
     }
+    refuseUnused(c, again, AFTER_UPDATE);
     return cleared;
   }
 
@@ -364,15 +472,21 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
    * may not be locked by this role is the same refusal the verdict would give, reached one
    * statement earlier (A26).
    */
-  private static void admit(Connection c, MappingAdmission.Target target, CopySignatures signatures)
+  private static List<MappingAdmission.Acknowledged> admit(
+      Connection c,
+      MappingAdmission.Target target,
+      CopySignatures signatures,
+      List<AcknowledgedCopy> acknowledged)
       throws SQLException {
     TableRef table = target.table();
     lock(c, target, "LOCK TABLE " + table.sql() + " IN ROW EXCLUSIVE MODE");
     lock(c, target, "LOCK TABLE " + table.sql() + " IN SHARE UPDATE EXCLUSIVE MODE");
-    MappingAdmission.Verdict verdict = MappingAdmission.verdict(c, target, signatures);
+    MappingAdmission.Verdict verdict =
+        MappingAdmission.verdict(c, target, signatures, acknowledged);
     switch (verdict) {
       case MappingAdmission.Admitted admitted -> {
         // Postures the erasure is sound under; startup has already warned about each of them.
+        return admitted.acknowledged();
       }
       case MappingAdmission.Absent absent -> throw refusedBeforeFirstStatement(absent.message());
       case MappingAdmission.Refused refused -> throw refusedBeforeFirstStatement(refused.message());
@@ -387,13 +501,17 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
    * function, same inputs as at startup and after the locks (S-4). Anything but admission rolls the
    * whole transaction back.
    */
-  private static void recheck(
-      Connection c, MappingAdmission.Target target, CopySignatures signatures) throws SQLException {
+  private static List<MappingAdmission.Acknowledged> recheck(
+      Connection c,
+      MappingAdmission.Target target,
+      CopySignatures signatures,
+      List<AcknowledgedCopy> acknowledged)
+      throws SQLException {
     String code;
     String message;
-    switch (MappingAdmission.verdict(c, target, signatures)) {
+    switch (MappingAdmission.verdict(c, target, signatures, acknowledged)) {
       case MappingAdmission.Admitted admitted -> {
-        return;
+        return admitted.acknowledged();
       }
       case MappingAdmission.Absent absent -> {
         code = ErrorCodes.MAPPING_INADMISSIBLE;
@@ -408,11 +526,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
         message = copied.message();
       }
     }
-    throw new ShreddingException(
-        code,
-        message
-            + " Found after this erasure's UPDATE: the erasure is refused and rolled back, no key"
-            + " is destroyed, no blind index is cleared and no record is appended.");
+    throw new ShreddingException(code, message + AFTER_UPDATE);
   }
 
   private static void lock(Connection c, MappingAdmission.Target target, String sql)
@@ -677,31 +791,32 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
 
   @Override
   public Optional<ErasureRecord> latestForSubject(TenantId tenant, String subjectPseudonym) {
-    return JdbcSupport.withConnection(
-        dataSource,
-        c -> {
-          try (PreparedStatement ps =
-              c.prepareStatement(
-                  "SELECT "
-                      + COLUMNS
-                      + " FROM "
-                      + erasureTable
-                      + " WHERE (tenant OPERATOR(pg_catalog.=) ?)"
-                      + " AND (subject_pseudonym OPERATOR(pg_catalog.=) ?)"
-                      // CIPHER-15: the log is append-only and seq is its own monotonic bigserial;
-                      // ts is clock.instant() from the application and a backwards clock step
-                      // (NTP, a container resume, two nodes disagreeing) between two appends could
-                      // otherwise return an older COMPLETE ahead of a later PARTIAL and hide an
-                      // outstanding erasure from the DPO who asked. Order by the column that
-                      // actually orders the chain.
-                      + " ORDER BY seq DESC LIMIT 1")) {
-            ps.setString(1, tenant.value());
-            ps.setString(2, subjectPseudonym);
-            try (ResultSet rs = ps.executeQuery()) {
-              return rs.next() ? Optional.of(map(rs)) : Optional.<ErasureRecord>empty();
-            }
-          }
-        });
+    return JdbcSupport.withConnection(dataSource, c -> latest(c, tenant, subjectPseudonym));
+  }
+
+  private Optional<ErasureRecord> latest(Connection c, TenantId tenant, String subjectPseudonym)
+      throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT "
+                + COLUMNS
+                + " FROM "
+                + erasureTable
+                + " WHERE (tenant OPERATOR(pg_catalog.=) ?)"
+                + " AND (subject_pseudonym OPERATOR(pg_catalog.=) ?)"
+                // CIPHER-15: the log is append-only and seq is its own monotonic bigserial;
+                // ts is clock.instant() from the application and a backwards clock step
+                // (NTP, a container resume, two nodes disagreeing) between two appends could
+                // otherwise return an older COMPLETE ahead of a later PARTIAL and hide an
+                // outstanding erasure from the DPO who asked. Order by the column that
+                // actually orders the chain.
+                + " ORDER BY seq DESC LIMIT 1")) {
+      ps.setString(1, tenant.value());
+      ps.setString(2, subjectPseudonym);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? Optional.of(map(rs)) : Optional.<ErasureRecord>empty();
+      }
+    }
   }
 
   @Override

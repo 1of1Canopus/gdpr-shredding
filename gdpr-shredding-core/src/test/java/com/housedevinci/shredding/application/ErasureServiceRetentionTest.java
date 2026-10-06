@@ -33,6 +33,11 @@ class ErasureServiceRetentionTest {
             ErasureStore.class.getClassLoader(),
             new Class<?>[] {ErasureStore.class},
             (proxy, method, args) -> {
+              // The constructor reads the acknowledged copies (audit-table coverage, 3c.2); this
+              // store has none, as the port's default says. Every other call is refused.
+              if ("acknowledgedCopies".equals(method.getName())) {
+                return List.of();
+              }
               throw new UnsupportedOperationException();
             });
   }
