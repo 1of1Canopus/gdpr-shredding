@@ -150,14 +150,28 @@ public final class ShreddedModel {
   private final List<ShreddedField> shreddedFields;
   private final List<BlindIndexField> blindIndexFields;
   private final Map<String, ColumnRef> idColumns;
+  private final com.housedevinci.shredding.adapter.jdbc.CopySignatures copySignatures;
 
   private ShreddedModel(
       List<ShreddedField> shreddedFields,
       List<BlindIndexField> blindIndexFields,
-      Map<String, ColumnRef> idColumns) {
+      Map<String, ColumnRef> idColumns,
+      com.housedevinci.shredding.adapter.jdbc.CopySignatures copySignatures) {
     this.shreddedFields = List.copyOf(shreddedFields);
     this.blindIndexFields = List.copyOf(blindIndexFields);
     this.idColumns = Map.copyOf(idColumns);
+    this.copySignatures = copySignatures;
+  }
+
+  /**
+   * The audit and history tables and revision columns the mapping names (audit-table coverage
+   * design, rows 6, 10, 45), read once from the metamodel by {@link HibernateCopyCheck}. Startup
+   * admission and every erasure hand the same value to the catalogue leg, so both positions read
+   * the same inputs. Hibernate's defaults for a model scanned without an {@code
+   * EntityManagerFactory}.
+   */
+  public com.housedevinci.shredding.adapter.jdbc.CopySignatures copySignatures() {
+    return copySignatures;
   }
 
   /**
@@ -461,12 +475,15 @@ public final class ShreddedModel {
                 java.util.Optional.empty()));
       }
 
+      refuseNestedBlindIndex(entityName, "", type, new HashSet<>(), 0);
+
       if (!shreddedHere.isEmpty()) {
         refuseSecondLevelCache(type, entityName, allowSecondLevelCache, globalCacheAll);
         refuseGeneratedRendering(type, entityName);
       }
     }
 
+    var signatures = com.housedevinci.shredding.adapter.jdbc.CopySignatures.defaults();
     if (entityManagerFactory != null) {
       var known = new HashSet<String>();
       var shreddedFieldNamesByEntity = new LinkedHashMap<String, Set<String>>();
@@ -482,9 +499,15 @@ public final class ShreddedModel {
       resolveTables(entityManagerFactory, shredded, indexes);
       resolveIndexColumns(entityManagerFactory, indexes);
       resolveIdColumns(entityManagerFactory, shreddedFieldNamesByEntity.keySet(), idColumns);
+      // Audit-table coverage, the mapping leg: refuses every copy of a blind-index column that
+      // Hibernate or Envers writes, before any listener-order check can point at a composition.
+      signatures =
+          HibernateCopyCheck.check(
+              entityManagerFactory.unwrap(org.hibernate.engine.spi.SessionFactoryImplementor.class),
+              indexes);
     }
 
-    return new ShreddedModel(shredded, indexes, idColumns);
+    return new ShreddedModel(shredded, indexes, idColumns, signatures);
   }
 
   /**
@@ -1187,7 +1210,18 @@ public final class ShreddedModel {
           // @Entity name), the same convention ShreddingEventListener.entityName() uses on the
           // write path - matched here so the two never disagree about which entity a key names.
           String entityName = simpleEntityName(persister.getEntityName());
-          scanAttributeMappings(entityName, entityName, persister.getAttributeMappings(), known);
+          Optional<String> audits =
+              HibernateCopyCheck.enversPresent()
+                  ? EnversCopyCheck.auditedEntity(sessionFactory, persister.getEntityName())
+                      .map(ShreddedModel::simpleEntityName)
+                  : Optional.empty();
+          String table = persister.getMappedTableDetails().getTableName();
+          scanAttributeMappings(
+              entityName,
+              entityName,
+              persister.getAttributeMappings(),
+              known,
+              audits.map(a -> new EnversAudit(a, entityName, table)));
         });
   }
 
@@ -1330,45 +1364,55 @@ public final class ShreddedModel {
    *     path can never match and a {@code ShreddedConverter} found at one always refuses, which is
    *     exactly the "not supported inside a component or an element collection" outcome
    */
+  /** An Envers audit entity, for the RC-2 wording of the converter refusal (design 4a). */
+  private record EnversAudit(String audited, String auditEntity, String table) {}
+
   private static void scanAttributeMappings(
       String entityName,
       String path,
       org.hibernate.metamodel.mapping.AttributeMappingsList mappings,
-      Set<String> known) {
+      Set<String> known,
+      Optional<EnversAudit> envers) {
     mappings.forEach(
         attributeMapping ->
             scanAttribute(
                 entityName,
                 path + "." + attributeMapping.getAttributeName(),
                 attributeMapping,
-                known));
+                known,
+                envers));
   }
 
   private static void scanAttribute(
       String entityName,
       String path,
       org.hibernate.metamodel.mapping.ModelPart part,
-      Set<String> known) {
+      Set<String> known,
+      Optional<EnversAudit> envers) {
     if (part instanceof org.hibernate.metamodel.mapping.BasicValuedModelPart basic) {
-      refuseIfConverterUnmodelled(entityName, path, basic, known);
+      refuseIfConverterUnmodelled(entityName, path, basic, known, envers);
       return;
     }
     if (part instanceof org.hibernate.metamodel.mapping.EmbeddableValuedModelPart embeddable) {
       scanAttributeMappings(
-          entityName, path, embeddable.getEmbeddableTypeDescriptor().getAttributeMappings(), known);
+          entityName,
+          path,
+          embeddable.getEmbeddableTypeDescriptor().getAttributeMappings(),
+          known,
+          envers);
       return;
     }
     if (part instanceof org.hibernate.metamodel.mapping.PluralAttributeMapping plural) {
       // The element descriptor is itself basic-valued (a @Convert on a scalar element type) or
       // embeddable-valued (an @ElementCollection of an @Embeddable) - either way it is one more
       // ModelPart to walk the same way, just one segment deeper.
-      scanAttribute(entityName, path + "[]", plural.getElementDescriptor(), known);
+      scanAttribute(entityName, path + "[]", plural.getElementDescriptor(), known, envers);
       // C-37: the index descriptor - a @Convert on a map key, or an @OrderColumn's list index - is
       // a separate ModelPart from the element descriptor above and was never walked, so a
       // ShreddedConverter reached that way was modelled by neither the forward field scan nor this
       // reverse one.
       if (plural.getIndexDescriptor() != null) {
-        scanAttribute(entityName, path + "[key]", plural.getIndexDescriptor(), known);
+        scanAttribute(entityName, path + "[key]", plural.getIndexDescriptor(), known, envers);
       }
     }
   }
@@ -1377,7 +1421,8 @@ public final class ShreddedModel {
       String entityName,
       String path,
       org.hibernate.metamodel.mapping.BasicValuedModelPart basic,
-      Set<String> known) {
+      Set<String> known,
+      Optional<EnversAudit> envers) {
     var converter = basic.getSingleJdbcMapping().getValueConverter();
     if (!(converter
         instanceof
@@ -1387,6 +1432,27 @@ public final class ShreddedModel {
     Object bean = jpaConverter.getConverterBean().getBeanInstance();
     if (!(bean instanceof ShreddedConverter<?> shreddedConverter)) {
       return;
+    }
+    if (envers.isPresent()) {
+      EnversAudit audit = envers.get();
+      throw config(
+          "shredding: Hibernate Envers audits the @Shredded field "
+              + shreddedConverter.entity()
+              + "."
+              + shreddedConverter.field()
+              + ": its audit entity "
+              + audit.auditEntity()
+              + " (table "
+              + audit.table()
+              + ") maps the column through "
+              + shreddedConverter.getClass().getName()
+              + ". An audited ciphertext column is not supported. Mark the field @NotAudited, and"
+              + " mark every @BlindIndex field of "
+              + audit.audited()
+              + " @NotAudited too: an audited blind index survives every erasure and is refused ("
+              + com.housedevinci.shredding.domain.ErrorCodes.BLIND_INDEX_COPIED
+              + "). Then register Envers as docs/index.md \"Using Hibernate Envers\" shows; its"
+              + " default registration is refused on listener order.");
     }
     if (!known.contains(path)) {
       throw config(
@@ -1693,6 +1759,65 @@ public final class ShreddedModel {
       fields.addAll(List.of(t.getDeclaredFields()));
     }
     return fields;
+  }
+
+  /**
+   * Audit-table coverage, row 12 (E11): {@code @BlindIndex} is read from the entity's own top-level
+   * fields only, so one inside an {@code @Embeddable} - embedded, or the element of a collection -
+   * was ignored: never resolved, never cleared by an erasure, and copied by Envers into the
+   * embeddable's audit columns with nothing here to see it. Refused, naming the field.
+   */
+  private static void refuseNestedBlindIndex(
+      String entityName, String via, Class<?> type, Set<Class<?>> seen, int depth) {
+    if (depth > 8) {
+      return;
+    }
+    for (Field field : allFields(type)) {
+      if (depth > 0 && field.isAnnotationPresent(BlindIndex.class)) {
+        throw config(
+            "@BlindIndex on "
+                + type.getSimpleName()
+                + "."
+                + field.getName()
+                + ", inside an @Embeddable used by "
+                + entityName
+                + "."
+                + via
+                + ", is not supported: this module reads @BlindIndex from the entity's own fields"
+                + " only, so this column would never be cleared by an erasure. Move the field onto"
+                + " "
+                + entityName
+                + " itself.");
+      }
+      for (Class<?> candidate : embeddedTypes(field)) {
+        if (seen.add(candidate)) {
+          refuseNestedBlindIndex(
+              entityName, depth == 0 ? field.getName() : via, candidate, seen, depth + 1);
+        }
+      }
+    }
+  }
+
+  private static List<Class<?>> embeddedTypes(Field field) {
+    var out = new ArrayList<Class<?>>();
+    var types = new ArrayList<java.lang.reflect.Type>();
+    types.add(field.getGenericType());
+    if (field.getGenericType() instanceof java.lang.reflect.ParameterizedType p) {
+      types.addAll(List.of(p.getActualTypeArguments()));
+    }
+    for (java.lang.reflect.Type t : types) {
+      Class<?> c =
+          t instanceof Class<?> k
+              ? k
+              : t instanceof java.lang.reflect.ParameterizedType p
+                      && p.getRawType() instanceof Class<?> raw
+                  ? raw
+                  : null;
+      if (c != null && c.isAnnotationPresent(jakarta.persistence.Embeddable.class)) {
+        out.add(c);
+      }
+    }
+    return out;
   }
 
   private static ShreddingException config(String message) {

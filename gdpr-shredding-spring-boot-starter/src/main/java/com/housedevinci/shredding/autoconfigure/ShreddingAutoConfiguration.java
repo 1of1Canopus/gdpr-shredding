@@ -214,7 +214,8 @@ public class ShreddingAutoConfiguration {
         model.blindIndexColumns(),
         new HibernateBlindIndexResidual(
             entityManagerFactory.unwrap(org.hibernate.engine.spi.SessionFactoryImplementor.class),
-            model));
+            model),
+        model.copySignatures());
   }
 
   @Bean

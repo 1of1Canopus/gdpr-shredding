@@ -1153,10 +1153,11 @@ class SchemaVerificationTest {
    * read-back answer zero over a table that still holds the index, and the erasure is recorded
    * {@code COMPLETE}.
    *
-   * <p>The residue is produced the way the control's own javadoc says it is produced: a {@code
-   * BEFORE UPDATE} trigger on the application's table repopulates the column the erasure just
-   * cleared. The independent read-back is stubbed to zero here on purpose, so the only thing that
-   * can refuse this erasure is the same-text count.
+   * <p>The residue is a row the owner commits from another session after the erasure's {@code
+   * UPDATE} and before its read-backs. (It used to be a {@code BEFORE UPDATE} trigger; since 0.2.0
+   * admission refuses any enabled trigger on a blind-indexed table before the first statement.) The
+   * independent read-back writes that row and answers zero on purpose, so the only thing that can
+   * refuse this erasure is the same-text count.
    */
   @Test
   void t57_a_shadowed_count_cannot_hide_blind_index_residue_from_the_read_back() {
@@ -1164,10 +1165,6 @@ class SchemaVerificationTest {
     owner(
         "CREATE TABLE public.invoice (tenant varchar(255), subject varchar(255), bi bytea)",
         "INSERT INTO public.invoice VALUES ('t1', 's1', '\\x01')",
-        "CREATE FUNCTION public.invoice_keep_bi() RETURNS trigger AS $$"
-            + " BEGIN NEW.bi := '\\x01'::bytea; RETURN NEW; END; $$ LANGUAGE plpgsql",
-        "CREATE TRIGGER invoice_keep_bi BEFORE UPDATE ON public.invoice"
-            + " FOR EACH ROW EXECUTE FUNCTION public.invoice_keep_bi()",
         "GRANT SELECT, UPDATE ON public.invoice TO " + APP);
     su("CREATE SCHEMA shadow AUTHORIZATION " + APP);
     app(
@@ -1193,7 +1190,10 @@ class SchemaVerificationTest {
                     com.housedevinci.shredding.domain.ColumnRef.unquoted("tenant"),
                     java.util.Optional.of("tenant"),
                     java.util.Optional.of("subject"))),
-            (c, column, tenant, subject) -> 0L);
+            (c, column, tenant, subject) -> {
+              owner("INSERT INTO public.invoice VALUES ('t1', 's1', '\\x01')");
+              return 0L;
+            });
 
     var thrown =
         org.assertj.core.api.Assertions.catchThrowableOfType(

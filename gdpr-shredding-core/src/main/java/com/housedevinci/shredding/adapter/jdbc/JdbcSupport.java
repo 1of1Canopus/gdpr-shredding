@@ -68,6 +68,92 @@ public final class JdbcSupport {
     }
   }
 
+  /** Read back as the transaction's second statement, to prove the level actually in force. */
+  static final String ISOLATION_SQL = "SELECT pg_catalog.current_setting('transaction_isolation')";
+
+  /** The transaction's first statement: transaction-scoped, so the session is never touched. */
+  static final String PIN_SQL = "SET TRANSACTION ISOLATION LEVEL READ COMMITTED";
+
+  /**
+   * An erasure's transaction, always at {@code READ COMMITTED} (security review C-25-1, C-25-4).
+   * Every catalogue check inside an erasure - mapping admission, planner statistics, the copy leg,
+   * and the copy leg's second run after the {@code UPDATE} - reads {@code pg_catalog} with plain
+   * SQL. Under {@code REPEATABLE READ} or {@code SERIALIZABLE} that uses the snapshot the
+   * transaction's first statement took, before the table locks, so a trigger committed while the
+   * erasure waited for its lock, or a materialized view created during it, is invisible to every
+   * check while the trigger still fires. At {@code READ COMMITTED} each statement takes a fresh
+   * snapshot after the locks.
+   *
+   * <p>The level is set with {@code SET TRANSACTION}, the first statement of the transaction and
+   * before any lock, so it covers this transaction only: the session's level, and the pool's idea
+   * of it, are never changed and nothing is restored. A connection that arrives inside a caller's
+   * transaction (auto-commit off) is refused untouched: that transaction is neither joined nor
+   * committed. A level that cannot be set, or does not read back as {@code read committed}, is
+   * {@code SHRED-SCHEMA-008}: nothing runs.
+   */
+  static <T> T inReadCommittedTransaction(DataSource ds, SqlWork<T> work) {
+    try (Connection c = ds.getConnection()) {
+      if (!c.getAutoCommit()) {
+        throw notReadCommitted("cannot be set: the connection arrived inside a transaction", null);
+      }
+      return inTransaction(
+          c,
+          conn -> {
+            try (Statement st = conn.createStatement()) {
+              st.execute(PIN_SQL);
+            } catch (SQLException e) {
+              throw notReadCommitted("could not be set (SQLState " + e.getSQLState() + ")", e);
+            }
+            String level;
+            try (PreparedStatement ps = conn.prepareStatement(ISOLATION_SQL);
+                ResultSet rs = ps.executeQuery()) {
+              level = rs.next() ? rs.getString(1) : "";
+            }
+            if (!"read committed".equals(level)) {
+              throw notReadCommitted("reads back as \"" + level + "\"", null);
+            }
+            return work.run(conn);
+          });
+    } catch (SQLException e) {
+      throw unavailable(e);
+    }
+  }
+
+  private static <T> T inTransaction(Connection c, SqlWork<T> work) throws SQLException {
+    boolean previous = c.getAutoCommit();
+    c.setAutoCommit(false);
+    T result;
+    try {
+      result = work.run(c);
+      c.commit();
+    } catch (SQLException | RuntimeException e) {
+      try {
+        c.rollback();
+      } catch (SQLException rollback) {
+        e.addSuppressed(rollback);
+      }
+      try {
+        c.setAutoCommit(previous);
+      } catch (SQLException reset) {
+        e.addSuppressed(reset);
+      }
+      throw e;
+    }
+    c.setAutoCommit(previous);
+    return result;
+  }
+
+  private static ShreddingException notReadCommitted(String why, Throwable cause) {
+    return new ShreddingException(
+        ErrorCodes.SCHEMA_NAME_ISOLATION,
+        "shredding: the erasure's transaction must run at READ COMMITTED, so that every catalogue"
+            + " check inside it reads the catalogue as of that check and not as of the"
+            + " transaction's first statement; the level "
+            + why
+            + ". The erasure was not performed: nothing was destroyed, cleared or recorded.",
+        cause);
+  }
+
   static <T> T withConnection(DataSource ds, SqlWork<T> work) {
     try (Connection c = ds.getConnection()) {
       return work.run(c);

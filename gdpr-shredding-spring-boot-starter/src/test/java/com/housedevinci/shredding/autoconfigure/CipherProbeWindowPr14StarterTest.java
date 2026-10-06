@@ -130,22 +130,31 @@ class CipherProbeWindowPr14StarterTest {
    * is the module's own qualified same-text count, with a different message.
    */
   @Test
-  void probe_a_shadowed_varchar_equality_cannot_make_the_hql_read_back_answer_zero() {
+  void probe_a_shadowed_varchar_equality_cannot_make_the_hql_read_back_answer_zero()
+      throws Exception {
     String owner = "window-" + System.nanoTime();
     ownedNotes.saveAndFlush(new OwnedNote(owner, "org-b", "victim@example.test"));
-    execute(
-        "CREATE OR REPLACE FUNCTION public.shredding_probe_keep_idx() RETURNS trigger AS $$ BEGIN"
-            + " NEW.email_idx := OLD.email_idx; RETURN NEW; END; $$ LANGUAGE plpgsql",
-        "CREATE TRIGGER shredding_probe_keep_idx BEFORE UPDATE ON public.owned_note"
-            + " FOR EACH ROW EXECUTE FUNCTION public.shredding_probe_keep_idx()");
     shadowVarcharEquality();
 
+    // The residue is a row committed after the UPDATE's snapshot (LateRow): a BEFORE UPDATE
+    // trigger that kept the index is refused at admission since audit-table coverage.
     ShreddingException refusal =
-        refusalOf(
+        LateRow.during(
+            POSTGRES.getJdbcUrl(),
+            POSTGRES.getUsername(),
+            POSTGRES.getPassword(),
+            "SELECT 1 FROM public.owned_note WHERE owner_id OPERATOR(pg_catalog.=) '"
+                + owner
+                + "' FOR UPDATE",
+            "INSERT INTO public.owned_note (owner_id, tenant_id, email, email_idx) VALUES ('"
+                + owner
+                + "', 'org-b', null, '\\x0102')",
             () ->
-                erasures.erase(
-                    new ErasureRequest(
-                        TenantId.of("org-b"), SubjectId.of(owner), "dpo", "art 17")));
+                refusalOf(
+                    () ->
+                        erasures.erase(
+                            new ErasureRequest(
+                                TenantId.of("org-b"), SubjectId.of(owner), "dpo", "art 17"))));
 
     assertThat(refusal.code()).isEqualTo(ErrorCodes.ERASURE_INDEX_RESIDUAL);
     assertThat(refusal.getMessage())
@@ -222,6 +231,11 @@ class CipherProbeWindowPr14StarterTest {
    * the framework-rendered {@code SELECT} inside the window fires no trigger.
    */
   @Test
+  @org.junit.jupiter.api.Disabled(
+      "QUESTIONS #C-30: since audit-table coverage (PR 1a) any enabled trigger on a blind-indexed"
+          + " table is refused at admission (CopyCataloguePostgresTest T1-T8), so no trigger can"
+          + " fire on an erasure. PR 1b (acknowledged copies) admits a named trigger again and"
+          + " re-enables this probe with an acknowledgement.")
   void probe_an_application_trigger_with_an_unqualified_body_still_fires_on_the_erasure() {
     String owner = "trigger-window-" + System.nanoTime();
     ownedNotes.saveAndFlush(new OwnedNote(owner, "org-b", "victim@example.test"));

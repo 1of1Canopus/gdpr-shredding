@@ -203,9 +203,11 @@ public final class MappingAdmission {
 
   /**
    * Admissible as a mapping, and a copy of a blind-index column exists where no erasure reaches it
-   * ({@code SHRED-SCHEMA-010}, audit-table coverage design section 3b): planner statistics. Decided
-   * only once the mapping itself is admitted, so a table is never told to fix its statistics before
-   * it is told it cannot be erased at all.
+   * ({@code SHRED-SCHEMA-010}, audit-table coverage design sections 3 and 3b): a trigger, a rule, a
+   * materialized view, a foreign key, a publication, a logical slot, a stale audit or history table
+   * ({@link CopyCatalogue}), or planner statistics ({@link PlannerStatistics}). Decided only once
+   * the mapping itself is admitted, so a table is never told to fix its statistics before it is
+   * told it cannot be erased at all.
    */
   public record Copied(String message) implements Verdict {}
 
@@ -443,8 +445,18 @@ public final class MappingAdmission {
    *     statements did not return. Unverifiable is not clean.
    */
   public static Verdict verdict(Connection c, Target target) {
+    return verdict(c, target, CopySignatures.defaults());
+  }
+
+  /**
+   * As {@link #verdict(Connection, Target)}, with the audit and history tables and revision columns
+   * the application's mapping names (audit-table coverage design, rows 6, 10 and 45), so a copy
+   * under a configured name or column pair is recognised as well as one under Hibernate's defaults.
+   */
+  public static Verdict verdict(Connection c, Target target, CopySignatures signatures) {
     Objects.requireNonNull(c, "c");
     Objects.requireNonNull(target, "target");
+    Objects.requireNonNull(signatures, "signatures");
     try {
       RelationFacts relation = relation(c, target.table());
       if (relation.parts() != 2 || relation.oid().isEmpty()) {
@@ -465,8 +477,12 @@ public final class MappingAdmission {
       var family = new ArrayList<Long>();
       family.add(oid);
       descendants.forEach(d -> family.add(d.oid()));
-      Optional<String> copied = PlannerStatistics.check(c, target, oid, family);
-      return copied.<Verdict>map(Copied::new).orElse(verdict);
+      // One message lists every finding of the verdict: the catalogue's copies first, then the
+      // planner statistics, both under SHRED-SCHEMA-010.
+      var copies = new ArrayList<String>();
+      CopyCatalogue.check(c, target, family, signatures).ifPresent(copies::add);
+      PlannerStatistics.check(c, target, oid, family).ifPresent(copies::add);
+      return copies.isEmpty() ? verdict : new Copied(String.join(" ", copies));
     } catch (SQLException e) {
       throw unverifiable(target, "SQLState " + e.getSQLState(), e);
     }

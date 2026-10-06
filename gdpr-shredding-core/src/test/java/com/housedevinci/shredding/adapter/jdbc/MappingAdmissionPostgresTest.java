@@ -149,8 +149,10 @@ class MappingAdmissionPostgresTest {
     assertThat(outcome.blindIndexColumnsCleared()).isEqualTo(1);
     assertThat(text(su, "SELECT count(*) FROM app.n28 WHERE email_idx IS NOT NULL")).isEqualTo("0");
     assertThat(executions.of(MappingAdmission.RELATION_SQL))
-        .describedAs("the verdict ran inside the erasure, once for its one table")
-        .isEqualTo(1);
+        .describedAs(
+            "the verdict ran inside the erasure for its one table: after the locks, and again"
+                + " after the UPDATE (audit-table coverage, C5)")
+        .isEqualTo(2);
   }
 
   // -------------------------------------------------------------------------- R-a, R-b
@@ -818,7 +820,10 @@ class MappingAdmissionPostgresTest {
     assertThat(text(su, "SELECT count(*) FROM app.n49 WHERE email_idx IS NOT NULL")).isEqualTo("0");
   }
 
-  /** N50: once per erasure per table, never per row. */
+  /**
+   * N50: a fixed number of times per erasure per table, never per row. Twice since audit-table
+   * coverage (C5): after the locks, and again after the UPDATE.
+   */
   @Test
   void n50_the_verdict_statements_run_once_per_erasure_per_table_whatever_the_row_count() {
     plainTable("app.n50");
@@ -828,12 +833,15 @@ class MappingAdmissionPostgresTest {
             + " FROM pg_catalog.generate_series(2, 6) g");
     var executions = new Counter();
     erase(counting(app, executions), "app.n50");
-    assertThat(executions.of(MappingAdmission.RELATION_SQL)).isEqualTo(1);
-    assertThat(executions.of(MappingAdmission.COLUMNS_SQL)).isEqualTo(1);
+    assertThat(executions.of(MappingAdmission.RELATION_SQL)).isEqualTo(2);
+    assertThat(executions.of(MappingAdmission.COLUMNS_SQL)).isEqualTo(2);
     assertThat(executions.of(MappingAdmission.CHILDREN_SQL)).isZero();
     assertThat(executions.of(MappingAdmission.TYPE_SQL))
-        .describedAs("varchar for tenant and subject and the index, once")
-        .isEqualTo(1);
+        .describedAs("varchar for tenant and subject and the index, once per position")
+        .isEqualTo(2);
+    for (String statement : CopyCatalogue.STATEMENTS) {
+      assertThat(executions.of(statement)).describedAs(statement).isEqualTo(2);
+    }
   }
 
   // ---------------------------------------------------------------------------- helpers

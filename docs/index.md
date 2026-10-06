@@ -348,6 +348,66 @@ intended, not a race to retry.
 `blindIndexColumnsCleared` is a diagnostic, never a verdict: the `UPDATE` skips rows whose index is
 already null, so it is normally smaller than the subject's row count.
 
+## Using Hibernate Envers
+
+Envers is supported when it copies nothing this module protects: every `@Shredded` and every
+`@BlindIndex` field of an audited entity is `@NotAudited`, and Envers is registered in its manual
+mode so this module's listener stays last. Startup refuses any other shape with a message that
+names Envers, the field and the remedy (`SHRED-SCHEMA-010` for an audited blind index,
+`SHRED-CONFIG-001` for an audited ciphertext or a listener order Envers' auto-registration broke).
+
+```java
+@Entity
+@Audited
+@Table(name = "customer", schema = "public")
+public class Customer {
+  @Id Long id;
+  @Column(name = "customer_id") String customerId;
+  @Column(name = "tenant_id") String tenantId;
+
+  @NotAudited
+  @Shredded(subject = "#{customerId}", tenant = "#{tenantId}")
+  @Convert(converter = EmailConverter.class)
+  String email;
+
+  @NotAudited
+  @BlindIndex(of = "email", subjectColumn = "customer_id", tenantColumn = "tenant_id")
+  @Column(name = "email_idx")
+  byte[] emailIndex;
+}
+```
+
+```properties
+spring.jpa.properties.hibernate.envers.autoRegisterListeners=false
+```
+
+```java
+@Bean
+@Order(Ordered.HIGHEST_PRECEDENCE)
+HibernatePropertiesCustomizer enversFirst() {
+  // Envers' integrator is composed first; this module's customizer composes itself last.
+  return props -> props.put(JpaSettings.INTEGRATOR_PROVIDER,
+      (IntegratorProvider) () -> List.of(new EnversFirstIntegrator()));
+}
+```
+
+`EnversFirstIntegrator` registers Envers' listeners with `appendListeners` when
+`EnversService.getEntitiesConfigurations().hasAuditedEntities()`, as Envers' manual-mode
+documentation shows; the starter's test `CopyMappingStarterTest` holds a working copy
+(`e8_envers_documented_composition_boots_erases_and_audit_holds_no_index`). An audit table left by
+an earlier configuration that still holds the index column is refused at every erasure until the
+column is cleared and dropped. The names Envers would give its audit tables are folded to lower
+case and cut to 63 bytes as PostgreSQL does, so `default_schema=Audit` and long table names work;
+an unusable configured name is refused with `SHRED-CONFIG-001` naming the property.
+
+### Hibernate's own audit and history
+
+Hibernate 7.4's `@org.hibernate.annotations.Audited` follows the same rule: `@Audited.Excluded` on
+every `@Shredded` and `@BlindIndex` field. `@org.hibernate.annotations.Temporal` on an entity with a
+blind index is refused in 0.2.0: with the history-table strategy Hibernate 7.4.5 still creates a
+`@Temporal.Excluded` column in the history table (measured), and in-table history (`SINGLE_TABLE`)
+keeps old versions of the index where this module's independent read-back cannot count them.
+
 ## Schemas
 
 Every statement this module builds for one of your tables is addressed at the table Hibernate maps,

@@ -289,6 +289,22 @@ public final class ShreddingStartupCheck implements InitializingBean {
     if (expected == shreddingEventListener) {
       return;
     }
+    if (expected.getClass().getName().startsWith("org.hibernate.envers.")) {
+      // RC-2, second shape (audit-table coverage design 4b): Envers' own auto-registration is
+      // the cause, and the remedy is its documented manual mode, not a customizer composition.
+      throw new ShreddingException(
+          ErrorCodes.CONFIG,
+          "shredding: Hibernate Envers registered "
+              + expected.getClass().getName()
+              + (check.mustBeFirst() ? " before" : " after")
+              + " this module's listener on "
+              + check.type().eventName()
+              + ", and this module's listener has to run "
+              + (check.mustBeFirst() ? "first" : "last")
+              + ". Set hibernate.envers.autoRegisterListeners=false and register Envers as"
+              + " docs/index.md \"Using Hibernate Envers\" shows. Every @Shredded and @BlindIndex"
+              + " field of an audited entity must be @NotAudited.");
+    }
     throw new ShreddingException(
         ErrorCodes.CONFIG,
         "shredding: this module's listener is registered on "

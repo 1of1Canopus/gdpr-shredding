@@ -627,9 +627,17 @@ class CipherProbeWindowPr14Test {
 
   /**
    * The module's schema installed by the owner with the SECURITY-NOTES grant block, one customer
-   * row holding a blind-index residue, one live data key for that subject, and a {@code BEFORE
-   * UPDATE} trigger that puts the index straight back - so the truthful answer to both read-backs
+   * row holding a blind-index residue, one live data key for that subject, and the index put
+   * straight back after the erasure's {@code UPDATE} - so the truthful answer to both read-backs
    * after the erasure's {@code UPDATE} is 1 and the refusal is certain whichever leg sees it.
+   *
+   * <p>The residue used to come from a {@code BEFORE UPDATE} trigger on the table. Since
+   * audit-table coverage (0.2.0) admission refuses any enabled trigger on a blind-indexed table
+   * with {@code SHRED-SCHEMA-010} before the first statement, so that fixture would never reach the
+   * read-backs these probes are about. The residue now comes from a row the owner commits from
+   * another session after the {@code UPDATE} and before the read-backs ({@link #erase}): an {@code
+   * INSERT} takes {@code ROW EXCLUSIVE}, which the erasure's locks admit, and no catalogue check
+   * can see it, which is exactly the residue the read-backs exist for.
    */
   private Fixture fixtureWithResidueThatCannotBeCleared() {
     HikariDataSource owner = freshPool(OWNER);
@@ -648,11 +656,7 @@ class CipherProbeWindowPr14Test {
             + " tenant_id varchar(255) NOT NULL, customer_id varchar(255) NOT NULL,"
             + " email_bidx varchar(255))",
         "GRANT SELECT, INSERT, UPDATE ON public.customer TO " + APP,
-        "GRANT USAGE ON SEQUENCE public.customer_id_seq TO " + APP,
-        "CREATE FUNCTION public.keep_idx() RETURNS trigger AS $$ BEGIN"
-            + " NEW.email_bidx := OLD.email_bidx; RETURN NEW; END; $$ LANGUAGE plpgsql",
-        "CREATE TRIGGER keep_idx BEFORE UPDATE ON public.customer"
-            + " FOR EACH ROW EXECUTE FUNCTION public.keep_idx()");
+        "GRANT USAGE ON SEQUENCE public.customer_id_seq TO " + APP);
 
     DataSource clean = freshPool(APP);
     var schema = JdbcSupport.verifySchema(clean, false).schema();
@@ -686,7 +690,16 @@ class CipherProbeWindowPr14Test {
   }
 
   private com.housedevinci.shredding.application.ErasureStore.Outcome erase(
-      DataSource ds, VerifiedSchema schema, BlindIndexResidual residual) {
+      DataSource ds, VerifiedSchema schema, BlindIndexResidual framework) {
+    HikariDataSource late = freshPool(OWNER);
+    BlindIndexResidual residual =
+        (connection, column, tenant, subject) -> {
+          exec(
+              late,
+              "INSERT INTO public.customer (tenant_id, customer_id, email_bidx)"
+                  + " VALUES ('t1', 's1', 'residue')");
+          return framework.count(connection, column, tenant, subject);
+        };
     var store =
         new JdbcErasureStore(
             ds,

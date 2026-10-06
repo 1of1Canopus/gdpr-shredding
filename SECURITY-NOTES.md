@@ -214,6 +214,13 @@ the `UPDATE`'s snapshot. It carries a live index for a subject whose key is abou
 it **refuses** the erasure — under READ COMMITTED, REPEATABLE READ and SERIALIZABLE alike. That is
 the intended answer, not a race to retry away.
 
+**The erasure's isolation level is pinned per transaction, never per session (C-25-1, C-25-4).**
+`SET TRANSACTION ISOLATION LEVEL READ COMMITTED` is the transaction's first statement, ahead of the
+advisory lock, and the level is read back; a failure is `SHRED-SCHEMA-008` and nothing runs. Because
+it is transaction-scoped the pool's idea of the connection's level is never dirtied and nothing is
+restored: an application that sets `SERIALIZABLE` in its init SQL keeps it. A connection handed over
+inside a caller's transaction is refused with the same code, untouched.
+
 **Two entities cannot share one of these checks (S-22, addendum 4 revision correction, E-1).** The
 check above is keyed on `(table, index column)` — deliberately not on the subject/tenant axis, since
 that axis is exactly what a mis-addressed erasure gets wrong. Two entities mapped to the same table
@@ -875,6 +882,47 @@ the subject stored as `a0eebc99-...` or `42`, whose key survives, and under the 
 every erasure fails. A UUID or numeric subject id is stored in a text column. The identifier column
 is compared with Hibernate's own typed binds and is held to the other rules only.
 
+### Copies of the blind index outside the table (SHRED-SCHEMA-010)
+
+Source: the audit-table coverage design (0.2.0 release-candidate findings RC-1, RC-2, RC-3). An
+erasure clears the blind index in the admitted table and its partitions and children. A copy
+anywhere else keeps the erased subject searchable with the application's own index secret, and the
+record would say `COMPLETE`. Startup and every erasure refuse every copy the module can see: in
+the mapping (Hibernate Envers, `@org.hibernate.annotations.Audited`, `@Temporal` history, an
+association or element collection keyed on the column) and in the catalogue (any enabled trigger
+or rule on the table or a descendant, a materialized view reading the column, a foreign key on it,
+a publication carrying it, a logical slot of this database with a plugin other than `pgoutput`, a
+leftover audit or history table found by name or by its revision columns). Nothing is
+acknowledgeable in this release: a trigger the operator knows to be harmless must be disabled.
+
+The catalogue check runs three times for each erasure's table: at startup, after the erasure's
+locks, and after its `UPDATE` and read-backs. What remains:
+
+- **The window between the last check and commit.** `CREATE MATERIALIZED VIEW ... AS SELECT
+  <index>` and `CREATE PUBLICATION ... FOR ALL TABLES` are not blocked by the erasure's locks
+  (measured). One created after the third check and before commit copies values from the last
+  committed snapshot, which still holds the index this erasure is clearing. The next erasure of
+  any subject on that table refuses. Measured on PostgreSQL 16: the third check refused a
+  materialized view committed during the erasure 20 ms after it committed; an erasure with both
+  checks takes about 55 ms on a small table, so the window is a few milliseconds.
+- **Server logs with bound parameters** (`log_statement = all`, `log_min_duration_statement`,
+  `auto_explain` with parameters, `pgaudit` with `log_parameter`) hold every index value written.
+  Not visible in the catalogue; an operator setting.
+- **A trigger on another table that reads this one.** A function body is not recorded in
+  `pg_depend`, so nothing links it to the column.
+- **`CREATE OR REPLACE FUNCTION`** of a function a disabled trigger names is not blocked by the
+  erasure's locks; enabling the trigger is, and refuses the next erasure.
+- **Values written as literals into catalogue definitions** (an index predicate, a `CHECK`, a
+  column default, a view's text) are operator-authored, never touched by an erasure, and not
+  scanned.
+- **Operations, not structures**: `CREATE TABLE AS`, `SELECT INTO`, `INSERT ... SELECT`, `COPY
+  TO`, `pg_dump`, an application's own code writing the value elsewhere, and a custom Envers
+  `AuditStrategy` writing outside its audit table. No catalogue trace links them to the column.
+- **`pg_temp` tables of other sessions**: session-lived and unreadable to this module.
+- **Physical standbys, WAL archives and backups**: as in "Backups, PITR archives, WAL, replicas
+  and logical decoding slots"; a logical slot with a non-`pgoutput` plugin is no longer a residual
+  but a refusal.
+
 ## Threats the module does close, and how
 
 | Threat | Control |
@@ -1161,8 +1209,10 @@ destroyed, no index half-cleared, no record appended.
 
 **The window is one statement wide, and that is a property, not a style.** The erasure's own
 `UPDATE` runs outside it, on the path the transaction arrived with, with every name in it qualified
-by this module — so an application trigger whose body names a relation unqualified still fires and
-still succeeds. A window around the whole transaction would break that application. The test suite's
+by this module — so an application trigger whose body names a relation unqualified would still fire
+and still succeed. Since 0.2.0 no enabled trigger on a blind-indexed table is admitted at all (see
+"Copies of the blind index outside the table"); the property matters again once a trigger can be
+acknowledged with the hook that clears what it copies. A window around the whole transaction would break that application. The test suite's
 name gate checks the invariant: it refuses any statement of this module's own inside a window.
 
 **The window needs the relation to come from the mapping, which is why startup refuses a
