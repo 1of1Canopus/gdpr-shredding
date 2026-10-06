@@ -60,8 +60,11 @@ public final class JdbcSupport {
    * U&"..."} form ({@code "} doubled, backslash doubled, each control character as {@code \XXXX}).
    * The result is one line and names exactly the object the catalogue holds. Prose keeps {@link
    * #printed}; a name with nothing to escape comes back unchanged.
+   *
+   * <p>Public so the starter's mapping leg prints its statements the same way (RC2-2): pass it the
+   * identifier text after {@code LogText.escape}, never a raw name that was not escaped first.
    */
-  static String sqlIdentifier(String text) {
+  public static String sqlIdentifier(String text) {
     if (text.indexOf('\\') < 0) {
       return text;
     }

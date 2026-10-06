@@ -164,18 +164,22 @@ next erasure. Hibernate Envers is supported when every `@Shredded` and `@BlindIn
 history on an entity with a blind index is refused in 0.2.0, in a history table (Hibernate 7.4.5
 keeps an excluded column there too) and in the table itself.
 
-**A 0.1.x installation with Hibernate Envers meets these refusals in this order**, one per
-startup, so plan the changes for one window. 1. `SHRED-CONFIG-001`, Envers audits a `@Shredded`
-field: mark every `@Shredded` field `@NotAudited`. 2. `SHRED-SCHEMA-010` from the mapping, Envers
-audits a `@BlindIndex` field: mark every `@BlindIndex` field `@NotAudited`. 3. `SHRED-CONFIG-001`,
-Envers' listener displaces this module's: set `hibernate.envers.autoRegisterListeners=false` and
-register Envers as docs/index.md "Using Hibernate Envers" shows. 4. `SHRED-SCHEMA-009` from mapping
-admission (a schema-less mapping, a column type, a table that is a partition or inheritance
-child): the rows of the table above. 5. `SHRED-SCHEMA-010` from the catalogue, in one message: the
-blind-index column still in each `<table>_aud` table (clear and drop it: `UPDATE <table>_aud SET
-<column> = NULL; ALTER TABLE <table>_aud DROP COLUMN <column>;`) and the planner statistics (step
-3a). Steps 1 to 3 are code and configuration and can ship in one release; 4 and 5 are database
-changes for the window.
+**A 0.1.1 installation with Hibernate Envers meets these refusals in this order**, one per
+startup, so plan the changes for one window. A running 0.1.1 install already has `@NotAudited`
+ciphertext and Envers registered manually (0.1.1 itself refuses an audited `@Shredded` field and
+Envers' auto-registered listener, both `SHRED-CONFIG-001`), so those two shapes cannot be present.
+Measured on a 0.1.1 install upgraded to 0.2.0, after the schema steps of this guide: 1.
+`SHRED-CONFIG-001`, a mapping that names no schema: set `hibernate.default_schema` or
+`@Table(schema = ...)`. 2. `SHRED-SCHEMA-010` from the mapping, Envers audits a `@BlindIndex` field:
+mark every `@BlindIndex` field `@NotAudited`. 3. `SHRED-SCHEMA-009` from mapping admission (a
+column type, a table that is a partition or inheritance child): the rows of the table above, when
+your tables have them. 4. `SHRED-SCHEMA-010` from the catalogue, in one message: every trigger on
+the table, the blind-index column still in each `<table>_aud` and `<table>_history` table (clear and
+drop it: `UPDATE <table>_aud SET <column> = NULL; ALTER TABLE <table>_aud DROP COLUMN <column>;`),
+and the planner statistics (step 3a). 5. `SHRED-SCHEMA-010` for a trigger alone, once the rest is
+clean: drop it, or acknowledge it with the hook that clears what it writes. Then the application
+boots, with one WARN at every startup naming each acknowledged copy and its hook. Steps 1 and 2
+are code and configuration and can ship in one release; 3 to 5 are database changes for the window.
 
 Admitted with a WARN at startup: an `UNLOGGED` table or partition (the erasure is sound; a crash
 empties it, residue included). Admitted: a domain over `text` or `varchar` as tenant or subject,

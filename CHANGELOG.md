@@ -332,6 +332,18 @@ All notable changes to this project. The format follows
   a comment saying so, rather than inheriting it by omission: reading that file now tells you which
   controls are off in the demo.
 
+### Fixed (security review of the release candidate, pass 2)
+- **RC2-1 (LOW, docs)** - the Envers refusal order in `docs/upgrading-0.2.0.md` is rewritten from the
+  order a running 0.1.1 install measured: a schema-less mapping (`SHRED-CONFIG-001`) first, then the
+  audited blind index (`SHRED-SCHEMA-010`), mapping admission (`SHRED-SCHEMA-009`), the catalogue in
+  one message (triggers, `_aud` and `_history` columns, statistics), then a trigger alone. The two
+  shapes 0.1.1 already refuses (an audited `@Shredded` field, Envers' auto-registered listener) are
+  stated as not present.
+- **RC2-2 (LOW)** - the starter's printed "clear and drop" statement for a copy found through the
+  mapping spells the table and column as SQL (`U&"..."` for a control character), not as log text,
+  so it addresses the audit table the mapping names. `JdbcSupport.sqlIdentifier` is now public and
+  documented for this.
+
 ### Fixed (security review pass 2 of acknowledged copies)
 
 - C-26-3: a remedy statement printed inside a refusal (`DISABLE TRIGGER`, `DROP RULE`, `DROP
