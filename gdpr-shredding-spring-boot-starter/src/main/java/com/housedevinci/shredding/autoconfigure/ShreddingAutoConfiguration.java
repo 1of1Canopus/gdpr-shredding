@@ -172,8 +172,12 @@ public class ShreddingAutoConfiguration {
   @Bean
   @org.springframework.boot.sql.init.dependency.DependsOnDatabaseInitialization
   public MappingAdmissionCheck shreddingMappingAdmission(
-      ShreddedModel model, ShreddingSchemaGate gate) {
-    return new MappingAdmissionCheck(model, gate);
+      ShreddedModel model,
+      ShreddingSchemaGate gate,
+      ShreddingProperties properties,
+      ObjectProvider<PostErasureHook> hooks) {
+    return new MappingAdmissionCheck(
+        model, gate, properties.getJdbc().acknowledgedCopyValues(), hooks.orderedStream().toList());
   }
 
   @Bean
@@ -203,7 +207,8 @@ public class ShreddingAutoConfiguration {
       ShreddingSchemaGate gate,
       ErasureChain chain,
       ShreddedModel model,
-      EntityManagerFactory entityManagerFactory) {
+      EntityManagerFactory entityManagerFactory,
+      ShreddingProperties properties) {
     // Design addendum 4, §4.5: the store's own statements are never the only thing that checks
     // them. The residual is rendered by Hibernate from the mapping, on the erasure's own
     // connection - see HibernateBlindIndexResidual for the contract and its two hazards.
@@ -215,7 +220,8 @@ public class ShreddingAutoConfiguration {
         new HibernateBlindIndexResidual(
             entityManagerFactory.unwrap(org.hibernate.engine.spi.SessionFactoryImplementor.class),
             model),
-        model.copySignatures());
+        model.copySignatures(),
+        properties.getJdbc().acknowledgedCopyValues());
   }
 
   @Bean

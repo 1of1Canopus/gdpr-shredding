@@ -3,6 +3,7 @@ package com.housedevinci.shredding.application;
 import com.housedevinci.shredding.domain.ErasureRecord;
 import com.housedevinci.shredding.domain.SubjectId;
 import com.housedevinci.shredding.domain.TenantId;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -34,11 +35,32 @@ public interface ErasureStore {
       int blindIndexColumnsCleared,
       ErasureRecord record) {}
 
+  /**
+   * @throws com.housedevinci.shredding.domain.ShreddingException when the record {@code factory}
+   *     builds does not name, as pending, the clearing hook of every acknowledged copy this store
+   *     admitted for the erasure ({@code SHRED-CONFIG-001}, nothing committed), or does not keep
+   *     the append rule of {@link OutstandingHooks}
+   */
   Outcome erase(TenantId tenant, SubjectId subject, RecordFactory factory);
+
+  /**
+   * The copies of a blind-index column this store admits because a hook clears them (audit-table
+   * coverage design, section 3c.2). {@link ErasureService} reads them once, at construction, to
+   * bind each to its hook and name it in every erasure's records. A store that admits none returns
+   * the default, an empty list. A store that wraps another must forward this method: the wrapped
+   * store refuses every erasure whose record does not name its acknowledged copies (section 3c.7).
+   */
+  default List<AcknowledgedCopy> acknowledgedCopies() {
+    return List.of();
+  }
 
   /**
    * Appends one more chained record. Used for the follow-up record that carries the hook outcomes,
    * which cannot be known inside the destruction transaction because hooks run after it commits.
+   *
+   * @throws com.housedevinci.shredding.domain.ShreddingException {@code SHRED-CONFIG-001}, nothing
+   *     written, when the record does not answer every hook the subject's latest record left
+   *     pending or failed, or names one hook twice ({@link OutstandingHooks#requireAnswered})
    */
   ErasureRecord append(ErasureRecord record);
 

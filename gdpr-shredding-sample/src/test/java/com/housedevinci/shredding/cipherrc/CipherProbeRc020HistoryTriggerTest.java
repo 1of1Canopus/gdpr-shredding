@@ -3,8 +3,6 @@ package com.housedevinci.shredding.cipherrc;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
 
-import ch.qos.logback.classic.spi.ILoggingEvent;
-import ch.qos.logback.core.read.ListAppender;
 import com.housedevinci.shredding.application.ErasureRequest;
 import com.housedevinci.shredding.application.ErasureResult;
 import com.housedevinci.shredding.application.ErasureService;
@@ -25,12 +23,14 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
-import org.slf4j.LoggerFactory;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.SpringBootConfiguration;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.persistence.autoconfigure.EntityScan;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -51,6 +51,7 @@ import org.testcontainers.utility.DockerImageName;
  * copies data, so it must at least say that it exists).
  */
 @Testcontainers
+@ExtendWith(OutputCaptureExtension.class)
 class CipherProbeRc020HistoryTriggerTest {
 
   @Container
@@ -122,7 +123,8 @@ class CipherProbeRc020HistoryTriggerTest {
    * history table by name, which is not acknowledgeable and not what this case is about.
    */
   @Test
-  void probe_acknowledged_history_trigger_warns_and_is_not_recorded_complete() throws Exception {
+  void probe_acknowledged_history_trigger_warns_and_is_not_recorded_complete(CapturedOutput output)
+      throws Exception {
     sql(
         "DROP TABLE IF EXISTS public.rc_hist_note, public.rc_hist_note_history,"
             + " public.rc_hist_note_trail CASCADE",
@@ -152,9 +154,8 @@ class CipherProbeRc020HistoryTriggerTest {
     String object = "trigger \"public\".\"rc_hist_note\".\"rc_hist_note_audit\"";
 
     // Boot 1: WARN, then one erasure with the clearing hook failing, then a retry once it works.
-    var warnings = captureWarnings();
     try (ConfigurableApplicationContext ctx = boot(AcknowledgedHistApp.class, withHook)) {
-      assertThat(acknowledgementWarnings(warnings))
+      assertThat(acknowledgementWarnings(output.getAll()))
           .describedAs("the acknowledged trigger is named at startup, with its hook")
           .hasSize(1)
           .allSatisfy(w -> assertThat(w).contains(object).contains("historyIndexScrubber"));
@@ -197,16 +198,11 @@ class CipherProbeRc020HistoryTriggerTest {
       assertThat(
               count("SELECT count(*) FROM public.rc_hist_note_trail WHERE email_idx IS NOT NULL"))
           .isZero();
-    } finally {
-      releaseWarnings(warnings);
     }
 
     // Boot 2: the WARN again, at every startup.
-    var again = captureWarnings();
     try (ConfigurableApplicationContext ctx = boot(AcknowledgedHistApp.class, withHook)) {
-      assertThat(acknowledgementWarnings(again)).hasSize(1);
-    } finally {
-      releaseWarnings(again);
+      assertThat(acknowledgementWarnings(output.getAll())).hasSize(2);
     }
 
     // Boot 3: the same entry with no cleared-by refuses startup.
@@ -231,28 +227,12 @@ class CipherProbeRc020HistoryTriggerTest {
                 .toArray(String[]::new));
   }
 
-  private static List<String> acknowledgementWarnings(ListAppender<ILoggingEvent> appender) {
-    return appender.list.stream()
-        .filter(e -> e.getLevel() == ch.qos.logback.classic.Level.WARN)
-        .map(ILoggingEvent::getFormattedMessage)
-        .filter(m -> m.contains("rc_hist_note_audit") && m.contains("acknowledged-copies[0]"))
+  private static List<String> acknowledgementWarnings(String output) {
+    return output
+        .lines()
+        .filter(l -> l.contains("WARN"))
+        .filter(l -> l.contains("rc_hist_note_audit") && l.contains("acknowledged-copies[0]"))
         .toList();
-  }
-
-  private static ListAppender<ILoggingEvent> captureWarnings() {
-    var root =
-        (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
-    var appender = new ListAppender<ILoggingEvent>();
-    appender.start();
-    root.addAppender(appender);
-    return appender;
-  }
-
-  private static void releaseWarnings(ListAppender<ILoggingEvent> appender) {
-    var root =
-        (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
-    root.detachAppender(appender);
-    appender.stop();
   }
 
   private static void persist(EntityManagerFactory emf, Object entity) {
@@ -285,6 +265,9 @@ class CipherProbeRc020HistoryTriggerTest {
   @Test
   void probe_history_trigger_without_acknowledgement_refuses_startup() throws SQLException {
     sql(
+        "DROP TABLE IF EXISTS public.rc_hist_note, public.rc_hist_note_history,"
+            + " public.rc_hist_note_trail CASCADE",
+        "DROP FUNCTION IF EXISTS public.rc_hist_note_copy() CASCADE",
         "CREATE TABLE public.rc_hist_note (id bigint PRIMARY KEY, owner_id text NOT NULL,"
             + " tenant_id text NOT NULL, email bytea, email_idx bytea)",
         "CREATE TABLE public.rc_hist_note_history (LIKE public.rc_hist_note,"

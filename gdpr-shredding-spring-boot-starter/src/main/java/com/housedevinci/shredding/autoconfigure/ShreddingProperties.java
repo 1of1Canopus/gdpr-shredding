@@ -1,11 +1,14 @@
 package com.housedevinci.shredding.autoconfigure;
 
+import com.housedevinci.shredding.application.AcknowledgedCopy;
 import com.housedevinci.shredding.application.DataKeyCache;
 import com.housedevinci.shredding.application.FieldCipher;
 import com.housedevinci.shredding.domain.BlindIndex;
 import com.housedevinci.shredding.domain.ErasedValuePolicy;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
@@ -145,6 +148,40 @@ public class ShreddingProperties {
      */
     private boolean allowPrivilegedRuntimeRole = false;
 
+    /**
+     * Copies of a blind-index column that this application admits because a {@code PostErasureHook}
+     * clears what they keep (audit-table coverage design, section 3c). Empty by default: every
+     * trigger on a blind-indexed table, every publication carrying a blind-index column and every
+     * non-{@code pgoutput} logical slot refuses startup with {@code SHRED-SCHEMA-010}.
+     *
+     * <p>Each entry names one object exactly as {@code pg_catalog} stores it (no case folding, no
+     * wildcard) and the hook that clears it. Every entry WARNs at every startup and is checked
+     * again at every erasure; an entry whose object does not exist, admits nothing, or names no
+     * registered hook refuses. Every erasure is recorded {@code PARTIAL}, naming the object, until
+     * its hook reports success.
+     */
+    private List<AcknowledgedCopyProperties> acknowledgedCopies = new ArrayList<>();
+
+    public List<AcknowledgedCopyProperties> getAcknowledgedCopies() {
+      return acknowledgedCopies;
+    }
+
+    public void setAcknowledgedCopies(List<AcknowledgedCopyProperties> acknowledgedCopies) {
+      this.acknowledgedCopies = acknowledgedCopies;
+    }
+
+    /** The configured entries as the core's values, refusing a malformed one by its index. */
+    public List<AcknowledgedCopy> acknowledgedCopyValues() {
+      var out = new ArrayList<AcknowledgedCopy>(acknowledgedCopies.size());
+      for (int i = 0; i < acknowledgedCopies.size(); i++) {
+        AcknowledgedCopyProperties e = acknowledgedCopies.get(i);
+        out.add(
+            AcknowledgedCopy.of(
+                i, e.getKind(), e.getSchema(), e.getTable(), e.getName(), e.getClearedBy()));
+      }
+      return List.copyOf(out);
+    }
+
     public boolean isInitializeSchema() {
       return initializeSchema;
     }
@@ -159,6 +196,65 @@ public class ShreddingProperties {
 
     public void setAllowPrivilegedRuntimeRole(boolean allowPrivilegedRuntimeRole) {
       this.allowPrivilegedRuntimeRole = allowPrivilegedRuntimeRole;
+    }
+  }
+
+  /** One entry of {@code shredding.jdbc.acknowledged-copies}. Values are compared exactly. */
+  public static class AcknowledgedCopyProperties {
+
+    /** {@code trigger}, {@code publication} or {@code replication-slot}, written exactly so. */
+    private String kind;
+
+    /** The trigger's table's schema; {@code kind=trigger} only. */
+    private String schema;
+
+    /** The trigger's table; {@code kind=trigger} only. */
+    private String table;
+
+    /** The trigger, publication or slot name, as {@code pg_catalog} stores it. */
+    private String name;
+
+    /** The {@code PostErasureHook.name()} of the hook that clears the copy. Required. */
+    private String clearedBy;
+
+    public String getKind() {
+      return kind;
+    }
+
+    public void setKind(String kind) {
+      this.kind = kind;
+    }
+
+    public String getSchema() {
+      return schema;
+    }
+
+    public void setSchema(String schema) {
+      this.schema = schema;
+    }
+
+    public String getTable() {
+      return table;
+    }
+
+    public void setTable(String table) {
+      this.table = table;
+    }
+
+    public String getName() {
+      return name;
+    }
+
+    public void setName(String name) {
+      this.name = name;
+    }
+
+    public String getClearedBy() {
+      return clearedBy;
+    }
+
+    public void setClearedBy(String clearedBy) {
+      this.clearedBy = clearedBy;
     }
   }
 

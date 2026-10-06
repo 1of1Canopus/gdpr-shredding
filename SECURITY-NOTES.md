@@ -885,8 +885,25 @@ the mapping (Hibernate Envers, `@org.hibernate.annotations.Audited`, `@Temporal`
 association or element collection keyed on the column) and in the catalogue (any enabled trigger
 or rule on the table or a descendant, a materialized view reading the column, a foreign key on it,
 a publication carrying it, a logical slot of this database with a plugin other than `pgoutput`, a
-leftover audit or history table found by name or by its revision columns). Nothing is
-acknowledgeable in this release: a trigger the operator knows to be harmless must be disabled.
+leftover audit or history table found by name or by its revision columns).
+
+**Acknowledged copies.** A trigger, a publication that publishes `UPDATE`, or a non-`pgoutput`
+logical slot can be admitted by `shredding.jdbc.acknowledged-copies`, only together with the
+`PostErasureHook` that clears what it keeps. The module keeps assuming the object copies the
+index. It does not read a trigger's body, a subscriber or a CDC consumer, and it does not check
+what the hook does: that the hook clears the copy is the integrator's statement, not the module's.
+What the module guarantees is the record. Every erasure's own record names the object as pending
+on its hook, the store refuses an erasure whose record does not (so a wrapping store that hides
+the list cannot drop it), the erasure is `PARTIAL` until the hook reports success, and a retry
+answers the names the trail left open, never the current configuration: a hook removed or renamed
+leaves the name outstanding for good, until a hook of that name runs. Entries are exact
+identifiers, never patterns; an entry that admits nothing refuses, and an entry whose object was
+dropped since startup refuses that erasure. Rules, materialized views, foreign keys, statistics,
+audit and history mappings and leftover tables are never acknowledgeable. `CREATE OR REPLACE
+FUNCTION` of an acknowledged trigger's function is not blocked by an erasure's locks; that is
+harmless only because acknowledgement already assumes the trigger copies. The WARN and every
+message print identifiers with control characters, line and paragraph separators and backslashes
+escaped; the record keeps them exactly, as hashed material.
 
 The catalogue check runs three times for each erasure's table: at startup, after the erasure's
 locks, and after its `UPDATE` and read-backs. What remains:
@@ -1204,8 +1221,8 @@ destroyed, no index half-cleared, no record appended.
 `UPDATE` runs outside it, on the path the transaction arrived with, with every name in it qualified
 by this module — so an application trigger whose body names a relation unqualified would still fire
 and still succeed. Since 0.2.0 no enabled trigger on a blind-indexed table is admitted at all (see
-"Copies of the blind index outside the table"); the property matters again once a trigger can be
-acknowledged with the hook that clears what it copies. A window around the whole transaction would break that application. The test suite's
+"Copies of the blind index outside the table") unless it is acknowledged with the hook that clears
+what it copies, and for such a trigger the property holds (the C-30 probe asserts it). A window around the whole transaction would break that application. The test suite's
 name gate checks the invariant: it refuses any statement of this module's own inside a window.
 
 **The window needs the relation to come from the mapping, which is why startup refuses a

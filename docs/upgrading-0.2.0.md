@@ -132,7 +132,7 @@ catalogue fact and the remedy.
 | a table with a blind index that is itself a partition, or an inheritance child | `ANALYZE` on the parent stores statistics computed from this table's rows under the parent's columns, the blind index included, readable by any role with `SELECT` on the parent; no erasure of the child reaches them | map the entity to the root of the hierarchy (never detach or `NO INHERIT`: both leave the values in the former parent, see step 1). The statistics check then covers the root, so if the root already holds statistics of the column the **next** start refuses with `SHRED-SCHEMA-010` and its own remedy: two refusals across two starts |
 | a mapped table with a blind index any of whose partitions or inheritance children, at any depth, also inherits from a table outside that hierarchy, or a mapped table with more than one parent (`SHRED-SCHEMA-009`) | that other parent's statistics hold the descendant's rows, blind index included, and mapping one parent leaves the other holding them | restructure so every table holding blind-indexed rows has a single parent chain, and map its root; the message names every parent |
 | planner statistics on a blind-index column: a statistics target that is not 0 (every column's default), rows already in `pg_stats`, an expression index computing over it, extended statistics covering it, or a stored generated column computed from it that has any of these; on the table or any partition or inheritance child (`SHRED-SCHEMA-010`) | `ANALYZE` stores sampled values of the column, most common values and histogram bounds, which any role with `SELECT` on the table reads from `pg_stats`, and an erasure does not remove them: the erased subject's index stays matchable | step 3a, before the deploy window |
-| a copy of a blind-index column outside the table (`SHRED-SCHEMA-010`): Hibernate Envers auditing it, `@org.hibernate.annotations.Audited` or `@Temporal` history writing it, an association or element collection keyed on it, or, in the catalogue, any enabled trigger or rule on the table or a partition or child, a materialized view reading it (directly, through a view, or as a whole row), a foreign key on it (either side), a publication carrying it, a logical replication slot of this database with a plugin other than `pgoutput`, or a leftover audit or history table holding a column of its name (named `<table>_aud`, `<table>_AUD`, `<table>_history` or as the mapping names it, or holding the revision columns `rev`/`revtype` or `effective`/`superseded` next to it) | the erasure clears the index in the table only; every copy keeps the erased subject's index, matchable with the application's index secret, and a trigger or rule fires on the erasure's own `UPDATE`. This module cannot see where a trigger or a subscriber writes, so none is admitted in this release | the message names the object and its remedy: `@NotAudited` / `@Audited.Excluded` and clear the audit column; remove `@Temporal`; drop or disable the trigger, drop the rule; leave the column out of the materialized view; drop the foreign key; a publication column list without the index; drop the slot; reference the entity by its identifier |
+| a copy of a blind-index column outside the table (`SHRED-SCHEMA-010`): Hibernate Envers auditing it, `@org.hibernate.annotations.Audited` or `@Temporal` history writing it, an association or element collection keyed on it, or, in the catalogue, any enabled trigger or rule on the table or a partition or child, a materialized view reading it (directly, through a view, or as a whole row), a foreign key on it (either side), a publication carrying it, a logical replication slot of this database with a plugin other than `pgoutput`, or a leftover audit or history table holding a column of its name (named `<table>_aud`, `<table>_AUD`, `<table>_history` or as the mapping names it, or holding the revision columns `rev`/`revtype` or `effective`/`superseded` next to it) | the erasure clears the index in the table only; every copy keeps the erased subject's index, matchable with the application's index secret, and a trigger or rule fires on the erasure's own `UPDATE`. This module cannot see where a trigger or a subscriber writes | the message names the object and its remedy: `@NotAudited` / `@Audited.Excluded` and clear the audit column; remove `@Temporal`; drop or disable the trigger, or acknowledge it with the hook that clears what it writes (`shredding.jdbc.acknowledged-copies`, below); drop the rule; leave the column out of the materialized view; drop the foreign key; a publication column list without the index; drop the slot; for a trigger, a publication with `UPDATE` or a slot, acknowledge it with its clearing hook; reference the entity by its identifier |
 
 At startup a table that is present and refused fails the context with `SHRED-SCHEMA-009`. A table
 that does not exist yet is a WARN, so `spring.jpa.defer-datasource-initialization=true`, a schema a
@@ -488,6 +488,38 @@ Accept the WARN at every startup, and record in your processing documentation th
 controls are not enforced against the application until steps 2 to 6 are done. Do not present that
 configuration as an append-only erasure log to a supervisory authority.
 
+### Every installation with post-erasure hooks: records name every hook they wait for
+
+From 0.2.0 the erasure's own record lists every registered `PostErasureHook` as pending, and a
+retry of a `PARTIAL` erasure answers the hooks that record (or the latest record after it) left
+pending or failed, by name. A name no registered hook carries stays outstanding, recorded as
+`not registered; outstanding since record <n>`, and the erasure stays `PARTIAL` until a hook of
+that name runs and succeeds. Removing or renaming a hook therefore never closes an erasure it
+had not finished. A `PARTIAL` record written by 0.1.x names no hook; its retry runs every hook
+registered now, as 0.1.x did. 0.1.x had no acknowledged copies, so no such record can be waiting
+for one. Hook names must be non-blank and unique; startup refuses otherwise.
+
+### Acknowledging a trigger, a publication or a slot
+
+When a trigger on a blind-indexed table, a publication that publishes `UPDATE`, or a logical slot
+with a plugin other than `pgoutput` must stay, name it with the hook that clears what it keeps:
+
+```yaml
+shredding:
+  jdbc:
+    acknowledged-copies:
+      - kind: trigger              # trigger | publication | replication-slot
+        schema: public             # trigger only
+        table: customer            # trigger only
+        name: customer_history     # as pg_catalog stores it: unquoted names in lower case
+        cleared-by: historyIndexScrubber   # PostErasureHook.name(), required
+```
+
+Each entry WARNs at every startup. Every erasure is recorded `PARTIAL`, naming the object, until
+the hook succeeds; a retry runs it again. An entry whose object does not exist or admits nothing
+refuses startup (and an erasure, if the object is dropped later). Rules, materialized views,
+foreign keys, statistics and audit or history tables cannot be acknowledged.
+
 ## If you use the core module directly, without Spring
 
 `JdbcSupport.initializeSchema(DataSource)` is unchanged in signature and is how an owner-run
@@ -497,7 +529,14 @@ migration applies the schema. Two things to add:
 VerifiedSchema schema = JdbcSupport.verifySchema(runtimeDataSource).schema();
 var keys = new JdbcKeyProvider(runtimeDataSource, schema, masterKey, random, clock);
 var store = new JdbcErasureStore(runtimeDataSource, schema, chain, blindIndexColumns, residual);
+// or, with acknowledged copies (entry n is named shredding.jdbc.acknowledged-copies[n]):
+var store = new JdbcErasureStore(runtimeDataSource, schema, chain, blindIndexColumns, residual,
+    CopySignatures.defaults(),
+    List.of(AcknowledgedCopy.trigger("public", "customer", "customer_history", "historyIndexScrubber")));
 ```
+
+Build `ErasureService` on that store, or on a wrapper that forwards `acknowledgedCopies()`: the
+store refuses every erasure whose record does not name its acknowledged copies.
 
 `JdbcSupport.runtimeRoleOwnsErasureTable` is removed. It had no `schemaname` predicate, so it
 answered about whichever copy of `shredding_erasure` `pg_tables` listed first, and it tested

@@ -1,7 +1,10 @@
 package com.housedevinci.shredding.adapter.jdbc;
 
+import com.housedevinci.shredding.adapter.jdbc.MappingAdmission.Acknowledged;
 import com.housedevinci.shredding.adapter.jdbc.MappingAdmission.Column;
 import com.housedevinci.shredding.adapter.jdbc.MappingAdmission.Target;
+import com.housedevinci.shredding.application.AcknowledgedCopy;
+import com.housedevinci.shredding.application.LogText;
 import java.sql.Array;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -19,7 +22,11 @@ import java.util.Optional;
  * The catalogue leg of audit-table coverage (design section 3, rows 10, 11, 15-25, 27b, 45): every
  * object the system catalogue shows through which a copy of a blind-index column exists, or comes
  * to exist, outside the admitted table and its descendants. Any one of them refuses with {@code
- * SHRED-SCHEMA-010}; none is acknowledgeable in this release.
+ * SHRED-SCHEMA-010}, unless it is a trigger, a publication that publishes {@code UPDATE} or a
+ * non-{@code pgoutput} logical slot that an entry of the acknowledgement list names exactly
+ * (section 3c): that one is admitted and returned, so the erasure's record names it as pending on
+ * its clearing hook. Rules, materialized views, foreign keys and stale tables are never
+ * acknowledgeable: the module can see they keep the value.
  *
  * <p><b>Paths, each with its own test in {@code CopyCataloguePostgresTest}:</b>
  *
@@ -94,10 +101,15 @@ final class CopyCatalogue {
           + " ORDER BY a.attnum) FROM pg_catalog.pg_attribute a"
           + " WHERE (a.attrelid OPERATOR(pg_catalog.=) t.tgrelid)"
           + " AND (CAST(a.attnum AS pg_catalog.text) OPERATOR(pg_catalog.=) ANY"
-          + " (pg_catalog.string_to_array(CAST(t.tgattr AS pg_catalog.text), ' ')))) AS columns"
+          + " (pg_catalog.string_to_array(CAST(t.tgattr AS pg_catalog.text), ' ')))) AS columns,"
+          + " CAST(t.tgname AS pg_catalog.text) AS raw_name,"
+          + " CAST(rn.nspname AS pg_catalog.text) AS raw_nsp,"
+          + " CAST(rc.relname AS pg_catalog.text) AS raw_rel"
           + " FROM pg_catalog.unnest(?) AS f"
           + " JOIN pg_catalog.pg_trigger t"
           + " ON (t.tgrelid OPERATOR(pg_catalog.=) CAST(f.f AS pg_catalog.oid))"
+          + " JOIN pg_catalog.pg_class rc ON (rc.oid OPERATOR(pg_catalog.=) t.tgrelid)"
+          + " JOIN pg_catalog.pg_namespace rn ON (rn.oid OPERATOR(pg_catalog.=) rc.relnamespace)"
           + " JOIN pg_catalog.pg_proc p ON (p.oid OPERATOR(pg_catalog.=) t.tgfoid)"
           + " JOIN pg_catalog.pg_namespace pn ON (pn.oid OPERATOR(pg_catalog.=) p.pronamespace)"
           + " WHERE (NOT t.tgisinternal) AND (t.tgenabled OPERATOR(pg_catalog.<>) 'D')"
@@ -160,6 +172,7 @@ final class CopyCatalogue {
   /** Every publication that carries a family member, as the server resolves it. */
   static final String PUBLICATIONS_SQL =
       "SELECT pg_catalog.quote_ident(p.pubname) AS name, p.pubupdate, t.relid,"
+          + " CAST(p.pubname AS pg_catalog.text) AS raw_name,"
           + " CAST(t.attrs AS pg_catalog.text) AS attrs"
           + " FROM pg_catalog.pg_publication p,"
           + " pg_catalog.pg_get_publication_tables(CAST(p.pubname AS pg_catalog.text)) AS t,"
@@ -170,6 +183,7 @@ final class CopyCatalogue {
   /** Every logical slot of this database that decodes without a publication. */
   static final String SLOTS_SQL =
       "SELECT pg_catalog.quote_ident(s.slot_name) AS name,"
+          + " CAST(s.slot_name AS pg_catalog.text) AS raw_name,"
           + " pg_catalog.quote_ident(s.plugin) AS plugin"
           + " FROM pg_catalog.pg_replication_slots s"
           + " WHERE (s.slot_type OPERATOR(pg_catalog.=) 'logical')"
@@ -262,8 +276,24 @@ final class CopyCatalogue {
    *
    * @param family the table's oid first, then every descendant the admission walk found
    */
-  static Optional<String> check(
-      Connection c, Target target, List<Long> family, CopySignatures signatures)
+  /**
+   * What one call found.
+   *
+   * @param refused the {@code SHRED-SCHEMA-010} message, when any finding is not acknowledged
+   * @param acknowledged the findings an entry of the acknowledgement list admitted
+   */
+  record Result(Optional<String> refused, List<Acknowledged> acknowledged) {
+    Result {
+      acknowledged = List.copyOf(acknowledged);
+    }
+  }
+
+  static Result check(
+      Connection c,
+      Target target,
+      List<Long> family,
+      CopySignatures signatures,
+      List<AcknowledgedCopy> entries)
       throws SQLException {
     var blind = new ArrayList<Column>();
     for (Column col : target.columns()) {
@@ -272,7 +302,7 @@ final class CopyCatalogue {
       }
     }
     if (blind.isEmpty()) {
-      return Optional.empty();
+      return new Result(Optional.empty(), List.of());
     }
     Map<Long, Member> members = members(c, family, blind);
     Member root = members.get(family.get(0));
@@ -280,14 +310,68 @@ final class CopyCatalogue {
       throw new SQLException("the index-column leg did not find every blind-index column", "XX000");
     }
     var findings = new ArrayList<String>();
-    triggers(c, family, members, root, findings);
+    var admitted = new ArrayList<Acknowledged>();
+    triggers(c, family, members, root, entries, findings, admitted);
     rules(c, family, members, root, findings);
     views(c, family, members, findings);
     foreignKeys(c, family, members, findings);
-    publications(c, family, members, findings);
-    slots(c, root, findings);
+    publications(c, family, members, entries, findings, admitted);
+    slots(c, root, entries, findings, admitted);
     stale(c, target, family, root, signatures, findings);
-    return findings.isEmpty() ? Optional.empty() : Optional.of(String.join(" ", findings));
+    return new Result(
+        findings.isEmpty() ? Optional.empty() : Optional.of(String.join(" ", findings)), admitted);
+  }
+
+  /** The position of the entry that names exactly this object, if one does. */
+  private static Optional<Integer> entryFor(
+      List<AcknowledgedCopy> entries,
+      AcknowledgedCopy.Kind kind,
+      Optional<String> schema,
+      Optional<String> table,
+      String name) {
+    for (int i = 0; i < entries.size(); i++) {
+      AcknowledgedCopy e = entries.get(i);
+      if (e.kind() == kind
+          && e.schema().equals(schema)
+          && e.table().equals(table)
+          && e.name().equals(name)) {
+        return Optional.of(i);
+      }
+    }
+    return Optional.empty();
+  }
+
+  /** The startup WARN of an admitted acknowledgement, one line, identifiers escaped. */
+  private static Acknowledged acknowledged(
+      int entry, AcknowledgedCopy copy, String carrier, String sees, String noun) {
+    return new Acknowledged(
+        entry,
+        copy,
+        "shredding: "
+            + copy.printable()
+            + " "
+            + LogText.escape(carrier)
+            + " is admitted by "
+            + AcknowledgedCopy.entry(entry)
+            + " and cleared by hook "
+            + LogText.escape(copy.clearedBy())
+            + ". This module does not see what "
+            + sees
+            + " or what the hook clears; each erasure is recorded PARTIAL until that hook reports"
+            + " success, and its record names this "
+            + noun
+            + ".");
+  }
+
+  /** The remedy sentence that offers the acknowledgement, with the entry's exact values. */
+  private static String acknowledge(String what, String values) {
+    return " Or, if "
+        + what
+        + ", acknowledge it with the hook that clears it: "
+        + AcknowledgedCopy.PROPERTY
+        + "[n] with "
+        + values
+        + ", cleared-by=<hook name>.";
   }
 
   private static Map<Long, Member> members(Connection c, List<Long> family, List<Column> blind)
@@ -352,10 +436,19 @@ final class CopyCatalogue {
       String enabled,
       boolean constraint,
       String function,
-      Optional<String> columns) {}
+      Optional<String> columns,
+      String rawSchema,
+      String rawTable,
+      String rawName) {}
 
   private static void triggers(
-      Connection c, List<Long> family, Map<Long, Member> members, Member root, List<String> out)
+      Connection c,
+      List<Long> family,
+      Map<Long, Member> members,
+      Member root,
+      List<AcknowledgedCopy> entries,
+      List<String> out,
+      List<Acknowledged> admitted)
       throws SQLException {
     var all = new ArrayList<Trigger>();
     Array oids = c.createArrayOf("int8", family.toArray(new Long[0]));
@@ -373,7 +466,10 @@ final class CopyCatalogue {
                   rs.getString("tgenabled"),
                   rs.getBoolean("is_constraint"),
                   rs.getString("function"),
-                  Optional.ofNullable(rs.getString("columns"))));
+                  Optional.ofNullable(rs.getString("columns")),
+                  rs.getString("raw_nsp"),
+                  rs.getString("raw_rel"),
+                  rs.getString("raw_name")));
         }
       }
     } finally {
@@ -399,6 +495,23 @@ final class CopyCatalogue {
               : (on.partition() ? " on partition " : " on inheritance child ") + on.name();
       int cloned = clones.getOrDefault(t.oid(), 0);
       String table = on == null ? root.name() : on.name();
+      Optional<Integer> entry =
+          entryFor(
+              entries,
+              AcknowledgedCopy.Kind.TRIGGER,
+              Optional.of(t.rawSchema()),
+              Optional.of(t.rawTable()),
+              t.rawName());
+      if (entry.isPresent()) {
+        admitted.add(
+            acknowledged(
+                entry.get(),
+                entries.get(entry.get()),
+                "on a table with " + indexColumns(root),
+                "the trigger writes",
+                "trigger"));
+        continue;
+      }
       out.add(
           "shredding: "
               + root.name()
@@ -419,7 +532,15 @@ final class CopyCatalogue {
               + table
               + " DISABLE TRIGGER "
               + t.name()
-              + ".");
+              + "."
+              + acknowledge(
+                  "it never stores the index or a hook clears what it stores",
+                  "kind=trigger, schema="
+                      + LogText.escape(t.rawSchema())
+                      + ", table="
+                      + LogText.escape(t.rawTable())
+                      + ", name="
+                      + LogText.escape(t.rawName())));
     }
   }
 
@@ -732,7 +853,12 @@ final class CopyCatalogue {
   // ---------------------------------------------------------------------------- publications
 
   private static void publications(
-      Connection c, List<Long> family, Map<Long, Member> members, List<String> out)
+      Connection c,
+      List<Long> family,
+      Map<Long, Member> members,
+      List<AcknowledgedCopy> entries,
+      List<String> out,
+      List<Acknowledged> admitted)
       throws SQLException {
     var reported = new LinkedHashSet<String>();
     Array oids = c.createArrayOf("int8", family.toArray(new Long[0]));
@@ -753,6 +879,26 @@ final class CopyCatalogue {
           }
           reported.add(name);
           String column = m.name() + "." + col.get().quoted() + label(col.get());
+          String raw = rs.getString("raw_name");
+          if (rs.getBoolean("pubupdate")) {
+            Optional<Integer> entry =
+                entryFor(
+                    entries,
+                    AcknowledgedCopy.Kind.PUBLICATION,
+                    Optional.empty(),
+                    Optional.empty(),
+                    raw);
+            if (entry.isPresent()) {
+              admitted.add(
+                  acknowledged(
+                      entry.get(),
+                      entries.get(entry.get()),
+                      "publishing the blind-index column " + column,
+                      "a subscriber keeps",
+                      "publication"));
+              continue;
+            }
+          }
           String remedy =
               " Publish the table with a column list that leaves out "
                   + col.get().quoted()
@@ -766,6 +912,9 @@ final class CopyCatalogue {
                       + ". A subscriber receives the erasure's UPDATE, but what it keeps is out of"
                       + " this module's sight."
                       + remedy
+                      + acknowledge(
+                          "a hook clears what its subscribers keep",
+                          "kind=publication, name=" + LogText.escape(raw))
                   : "shredding: publication "
                       + name
                       + " publishes the blind-index column "
@@ -782,10 +931,37 @@ final class CopyCatalogue {
 
   // ----------------------------------------------------------------------------------- slots
 
-  private static void slots(Connection c, Member root, List<String> out) throws SQLException {
+  private static void slots(
+      Connection c,
+      Member root,
+      List<AcknowledgedCopy> entries,
+      List<String> out,
+      List<Acknowledged> admitted)
+      throws SQLException {
     try (PreparedStatement ps = c.prepareStatement(SLOTS_SQL);
         ResultSet rs = ps.executeQuery()) {
       while (rs.next()) {
+        String raw = rs.getString("raw_name");
+        Optional<Integer> entry =
+            entryFor(
+                entries,
+                AcknowledgedCopy.Kind.REPLICATION_SLOT,
+                Optional.empty(),
+                Optional.empty(),
+                raw);
+        if (entry.isPresent()) {
+          admitted.add(
+              acknowledged(
+                  entry.get(),
+                  entries.get(entry.get()),
+                  "(plugin "
+                      + rs.getString("plugin")
+                      + ") decoding a table with "
+                      + indexColumns(root),
+                  "its consumer keeps",
+                  "slot"));
+          continue;
+        }
         out.add(
             "shredding: logical replication slot "
                 + rs.getString("name")
@@ -798,7 +974,10 @@ final class CopyCatalogue {
                 + ". Every index value written since the slot was created has already been sent"
                 + " to its consumer, and this module cannot see or clear what the consumer keeps."
                 + " Drop the slot, or publish through pgoutput with a column list that excludes the"
-                + " index.");
+                + " index."
+                + acknowledge(
+                    "a hook clears what its consumer keeps",
+                    "kind=replication-slot, name=" + LogText.escape(raw)));
       }
     }
   }
