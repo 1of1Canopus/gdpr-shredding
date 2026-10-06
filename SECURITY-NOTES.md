@@ -750,6 +750,13 @@ map the root, whose descendants the check already walks. A table cannot gain a p
 erasure: `ATTACH PARTITION` and `INHERIT` wait behind its locks (measured), and the next verdict
 refuses.
 
+**More than one parent is not supported** (R-i, security review C-24-9). A table holding
+blind-indexed rows with two parents puts those rows into both parents' statistics, so mapping
+either parent leaves the other holding the values. R-i therefore also refuses a mapped table any
+of whose descendants, at any depth, inherits from a table outside the mapped hierarchy, naming
+every parent. A second parent added after boot (`ALTER TABLE <descendant> INHERIT <other>`) waits
+behind the erasure's locks, which recurse to descendants, and the next erasure refuses.
+
 **A former parent keeps the values.** Detaching a partition, or `ALTER TABLE ... NO INHERIT`,
 leaves the child's blind-index values in the former parent's `inherited` statistics, and `ANALYZE`
 of the former parent does not clear them when it has no child left; autovacuum never analyzes a

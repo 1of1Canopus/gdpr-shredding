@@ -9,7 +9,6 @@ import com.housedevinci.shredding.adapter.jdbc.MappingAdmission.Target;
 import com.housedevinci.shredding.adapter.jdbc.MappingAdmission.Use;
 import com.housedevinci.shredding.adapter.jdbc.MappingAdmission.Verdict;
 import com.housedevinci.shredding.domain.ColumnRef;
-import com.housedevinci.shredding.domain.ShreddingException;
 import com.housedevinci.shredding.domain.TableRef;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
@@ -109,8 +108,7 @@ class CipherProbePr24Pass3Test {
         .describedAs(
             "mapping one top while a descendant's other parent %s holds its blind-index values"
                 + " in pg_stats must not be admitted, got %s",
-            leaked,
-            outcome)
+            leaked, outcome)
         .isNotInstanceOf(MappingAdmission.Admitted.class);
   }
 
