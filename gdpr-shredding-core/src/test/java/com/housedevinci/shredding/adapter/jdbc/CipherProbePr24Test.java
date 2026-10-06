@@ -79,9 +79,6 @@ class CipherProbePr24Test {
   // ------------------------------------------------- F1: ancestors of the erased table
 
   @Test
-  @org.junit.jupiter.api.Disabled(
-      "C-24-1 design stop, QUESTIONS #C-29: enabled by the ancestor-statistics build once the"
-          + " security review rules on the design")
   void probe_inheritance_parent_statistics_keep_the_child_index_values() {
     exec(
         owner,
@@ -107,13 +104,15 @@ class CipherProbePr24Test {
 
     assertThat(verdict)
         .describedAs("verdict on app.p24kid: %s", verdict)
-        .isInstanceOf(Copied.class);
+        // widened at the C-24-1 build, as the ruling allows: rule R-i refuses the shape outright
+        .matches(
+            v ->
+                v instanceof Copied
+                    || (v instanceof MappingAdmission.Refused r && "R-i".equals(r.rule())),
+            "Copied, or refused by rule R-i");
   }
 
   @Test
-  @org.junit.jupiter.api.Disabled(
-      "C-24-1 design stop, QUESTIONS #C-29: enabled by the ancestor-statistics build once the"
-          + " security review rules on the design")
   void probe_partition_erased_directly_parent_statistics_keep_its_index_values() {
     exec(
         owner,
@@ -137,7 +136,12 @@ class CipherProbePr24Test {
 
     assertThat(verdict)
         .describedAs("verdict on app.p24pp_t1: %s", verdict)
-        .isInstanceOf(Copied.class);
+        // widened at the C-24-1 build, as the ruling allows: rule R-i refuses the shape outright
+        .matches(
+            v ->
+                v instanceof Copied
+                    || (v instanceof MappingAdmission.Refused r && "R-i".equals(r.rule())),
+            "Copied, or refused by rule R-i");
   }
 
   // ---------------------------------- F2: printed definitions depend on the role's search_path

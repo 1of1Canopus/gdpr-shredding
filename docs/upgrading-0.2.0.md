@@ -129,6 +129,7 @@ catalogue fact and the remedy.
 | a column whose declared type carries its own two-sided `=` outside `pg_catalog` | the same disagreement, one type definition away from `citext` | the same |
 | a non-deterministic collation on a compared column | an erasure for `s1` also clears `S1`, another tenant's row included | a deterministic collation |
 | a blind-index column that is `NOT NULL` or generated | the erasure sets it to `NULL` | drop the constraint; index a plain column |
+| a table with a blind index that is itself a partition, or an inheritance child | `ANALYZE` on the parent stores statistics computed from this table's rows under the parent's columns, the blind index included, readable by any role with `SELECT` on the parent; no erasure of the child reaches them | map the entity to the root of the hierarchy (never detach or `NO INHERIT`: both leave the values in the former parent, see step 1). The statistics check then covers the root, so if the root already holds statistics of the column the **next** start refuses with `SHRED-SCHEMA-010` and its own remedy: two refusals across two starts |
 | planner statistics on a blind-index column: a statistics target that is not 0 (every column's default), rows already in `pg_stats`, an expression index computing over it, extended statistics covering it, or a stored generated column computed from it that has any of these; on the table or any partition or inheritance child (`SHRED-SCHEMA-010`) | `ANALYZE` stores sampled values of the column, most common values and histogram bounds, which any role with `SELECT` on the table reads from `pg_stats`, and an erasure does not remove them: the erased subject's index stays matchable | step 3a, before the deploy window |
 
 At startup a table that is present and refused fails the context with `SHRED-SCHEMA-009`. A table
@@ -143,9 +144,13 @@ default statistics target unless someone changed it, and autovacuum has sampled 
 passed about fifty rows. A schema Hibernate's `ddl-auto` creates meets it too, because Hibernate
 cannot emit `SET STATISTICS`. A partition or child whose `pg_stats` rows the runtime role cannot
 see (no `SELECT` on the column, or row level security that applies to the role) is
-`SHRED-SCHEMA-005`: unverifiable is not clean. A partial index whose predicate alone names the
-column (`ON customer (id) WHERE email_idx IS NOT NULL`) stores no statistics of it and is admitted;
-a plain index on the column stores none either.
+`SHRED-SCHEMA-005`: unverifiable is not clean. A plain partial index whose predicate names the
+column (`ON customer (id) WHERE email_idx IS NOT NULL`) stores no statistics and is admitted; a
+plain index on the column stores none either. An **expression** index whose predicate names the
+column is refused: `ANALYZE` samples it only from the rows the predicate selects, so its statistics
+record which index values those rows held. An expression index, extended-statistics expression or
+stored generated column that calls a function or operator outside `pg_catalog`, or one that is not
+immutable, is `SHRED-SCHEMA-005`.
 
 Admitted with a WARN at startup: an `UNLOGGED` table or partition (the erasure is sound; a crash
 empties it, residue included). Admitted: a domain over `text` or `varchar` as tenant or subject,
@@ -211,6 +216,22 @@ SELECT pg_catalog.pg_describe_object(d.classid, d.objid, d.objsubid) FROM pg_cat
 `pg_partition_tree` covers partitions; for legacy inheritance children list them from
 `pg_inherits`. An index or statistics object whose definition does not mention the blind-index
 column, and a dependent that is an index or a constraint, are not in the way.
+
+Each mapped table with a blind index must have no parent:
+
+```sql
+SELECT inhparent::regclass FROM pg_catalog.pg_inherits
+ WHERE inhrelid = 'public.customer'::regclass;   -- must return no row
+```
+
+**A table that was ever a partition or an inheritance child** (detached, or `NO INHERIT`) left its
+blind-index values in the former parent's `inherited` statistics, and nothing 0.2.0 reads can see
+them there; `ANALYZE` of the former parent does not clear them once it has no child left. Clear
+them on the former parent, as for step 3a: on PostgreSQL 18, as its owner,
+`SELECT pg_catalog.pg_clear_attribute_stats('<schema>', '<parent>', '<column>', true);` for each
+blind-index column; on 16 and 17, a superuser deletes the parent's `pg_statistic` rows for that
+column with `stainherit` true, and the `pg_statistic_ext_data` rows with `stxdinherit` true of any
+extended statistics on the parent that cover it, counting the rows first as in step 3a.
 
 ### 2. Move ownership to a role that is not the application's
 
