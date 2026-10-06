@@ -154,6 +154,19 @@ class CopyMappingStarterTest {
       basePackageClasses = com.housedevinci.shredding.autoconfigure.copies.twoplain.PlainNote.class)
   static class TwoPlainApp extends Tenant {}
 
+  @SpringBootConfiguration
+  @EnableAutoConfiguration
+  @EntityScan(
+      basePackageClasses = com.housedevinci.shredding.autoconfigure.copies.nativesec.SecNote.class)
+  static class NatSecApp extends Tenant {}
+
+  @SpringBootConfiguration
+  @EnableAutoConfiguration
+  @EntityScan(
+      basePackageClasses =
+          com.housedevinci.shredding.autoconfigure.copies.nativesecexcl.SecNote.class)
+  static class NatSecExclApp extends Tenant {}
+
   /** The documented composition: Envers' integrator first, this module's listener last. */
   @SpringBootConfiguration
   @EnableAutoConfiguration
@@ -431,6 +444,71 @@ class CopyMappingStarterTest {
       assertThat(refusal.code()).isEqualTo(ErrorCodes.BLIND_INDEX_COPIED);
       assertThat(refusal).hasMessageContaining("temp_excl_note_history has a column email_idx");
     }
+  }
+
+  @Test
+  void n5_native_audited_secondary_table_index_is_refused() {
+    ShreddingException refusal = refusal(NatSecApp.class);
+
+    assertThat(refusal.code()).isEqualTo(ErrorCodes.BLIND_INDEX_COPIED);
+    assertThat(refusal)
+        .hasMessageContaining(
+            "Hibernate audits the blind-index column public.nativesec_note.email_idx (@BlindIndex"
+                + " SecNote.emailIndex): @org.hibernate.annotations.Audited on SecView writes it"
+                + " into")
+        .hasMessageContaining("nativesec_trail on every insert and update");
+  }
+
+  @Test
+  void n5b_excluded_secondary_index_with_a_leftover_audit_column_is_refused() throws Exception {
+    try (ConfigurableApplicationContext ctx =
+        builder(NatSecExclApp.class, "spring.jpa.hibernate.ddl-auto=create").run()) {
+      assertThat(ctx.getBean(MappingAdmissionCheck.class).checked()).isEqualTo(1);
+    }
+    // The column an earlier, unexcluded mapping wrote into the secondary audit table.
+    try (var c =
+            DriverManager.getConnection(
+                POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+        var st = c.createStatement()) {
+      st.execute(
+          "CREATE TABLE IF NOT EXISTS public.nativesecexcl_trail (id bigint, rev integer,"
+              + " revtype smallint)");
+      st.execute("ALTER TABLE public.nativesecexcl_trail ADD COLUMN IF NOT EXISTS email_idx bytea");
+    }
+
+    ShreddingException refusal = refusal(NatSecExclApp.class, "spring.jpa.hibernate.ddl-auto=none");
+
+    assertThat(refusal.code()).isEqualTo(ErrorCodes.BLIND_INDEX_COPIED);
+    assertThat(refusal)
+        .hasMessageContaining(
+            "public.nativesecexcl_trail has a column email_idx and is the audit table Hibernate"
+                + " writes for public.nativesecexcl_note.");
+  }
+
+  @Test
+  void e19_envers_off_leftover_audit_table_under_configured_names_is_refused() throws Exception {
+    try (var c =
+            DriverManager.getConnection(
+                POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+        var st = c.createStatement()) {
+      st.execute("CREATE SCHEMA audit");
+      // No revision columns: only the configured name can identify it.
+      st.execute("CREATE TABLE audit.pre_env_idx_note_hist (id bigint, email_idx bytea)");
+    }
+
+    ShreddingException refusal =
+        refusal(
+            EnvIdxApp.class,
+            "spring.jpa.properties.hibernate.integration.envers.enabled=false",
+            "spring.jpa.properties.org.hibernate.envers.audit_table_prefix=pre_",
+            "spring.jpa.properties.org.hibernate.envers.audit_table_suffix=_hist",
+            "spring.jpa.properties.org.hibernate.envers.default_schema=audit");
+
+    assertThat(refusal.code()).isEqualTo(ErrorCodes.BLIND_INDEX_COPIED);
+    assertThat(refusal)
+        .hasMessageContaining(
+            "audit.pre_env_idx_note_hist has a column email_idx and is the audit table Hibernate"
+                + " Envers writes for public.env_idx_note.");
   }
 
   // ---------------------------------------------------------------------- associations

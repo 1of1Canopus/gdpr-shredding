@@ -94,6 +94,7 @@ final class HibernateCopyCheck {
     if (enversPresent()) {
       EnversCopyCheck.check(sessionFactory, admitted, findings, named, signatures);
     }
+    enversSettings(sessionFactory.getProperties(), admitted, named, signatures);
     try {
       sessionFactory
           .getMappingMetamodel()
@@ -140,13 +141,6 @@ final class HibernateCopyCheck {
     }
     String entity = ShreddedModel.simpleEntityName(persister.getEntityName());
     String primary = persister.getMappedTableDetails().getTableName();
-    for (Admitted a : admitted.values()) {
-      if (key(a.table().toString(), "").equals(key(primary, ""))) {
-        named.add(
-            new CopySignatures.NamedCopy(
-                a.table(), table(audit.resolveTableName(primary)), "Hibernate", "audit"));
-      }
-    }
     signature(audit.getChangesetIdMapping(primary), audit.getModificationTypeMapping(primary))
         .ifPresent(signatures::add);
     persister.forEachAttributeMapping(
@@ -154,11 +148,17 @@ final class HibernateCopyCheck {
             attribute.forEachSelectable(
                 (i, selectable) -> {
                   Admitted a = admitted.get(key(selectable));
-                  if (a == null
-                      || persister.isPropertyAuditedExcluded(attribute.getStateArrayPosition())) {
+                  if (a == null) {
                     return;
                   }
+                  // Primary or secondary table alike (N5): the audit table Hibernate writes for
+                  // the table that holds the column, so leg K checks it even when excluded now.
                   String copy = audit.resolveTableName(selectable.getContainingTableExpression());
+                  named.add(
+                      new CopySignatures.NamedCopy(a.table(), table(copy), "Hibernate", "audit"));
+                  if (persister.isPropertyAuditedExcluded(attribute.getStateArrayPosition())) {
+                    return;
+                  }
                   String column = selectable.getSelectionExpression();
                   findings.add(
                       "shredding: Hibernate audits the blind-index column "
@@ -188,6 +188,50 @@ final class HibernateCopyCheck {
             "audit",
             stored(changeset.getSelectionExpression()),
             stored(type.getSelectionExpression())));
+  }
+
+  // ------------------------------------------------------------------- Envers' own settings
+
+  private static final String ENVERS = "org.hibernate.envers.";
+
+  /**
+   * Security review C-25-2: Envers' table and column names come from settings that stay in the
+   * persistence unit when Envers is switched off ({@code
+   * hibernate.integration.envers.enabled=false}) or removed, and a table it wrote under them
+   * earlier is still a copy. Read from the session-factory properties whatever Envers' state, so
+   * leg K looks for {@code <prefix><table> <suffix>} in the configured or the table's schema and
+   * for the configured revision columns. Envers' defaults: no prefix, suffix {@code _AUD}, columns
+   * {@code REV} and {@code REVTYPE}.
+   */
+  private static void enversSettings(
+      Map<String, Object> properties,
+      Map<String, Admitted> admitted,
+      List<CopySignatures.NamedCopy> named,
+      List<CopySignatures.RevisionSignature> signatures) {
+    String prefix = setting(properties, "audit_table_prefix", "");
+    String suffix = setting(properties, "audit_table_suffix", "_AUD");
+    String schema = setting(properties, "default_schema", "");
+    signatures.add(
+        new CopySignatures.RevisionSignature(
+            "Hibernate Envers",
+            "audit",
+            stored(setting(properties, "revision_field_name", "REV")),
+            stored(setting(properties, "revision_type_field_name", "REVTYPE"))));
+    for (Admitted a : admitted.values()) {
+      String inSchema = schema.isEmpty() ? a.table().schema().orElse("") : schema;
+      String name = stored(prefix + a.table().name() + suffix);
+      named.add(
+          new CopySignatures.NamedCopy(
+              a.table(),
+              table(inSchema.isEmpty() ? name : inSchema + "." + name),
+              "Hibernate Envers",
+              "audit"));
+    }
+  }
+
+  private static String setting(Map<String, Object> properties, String key, String fallback) {
+    Object value = properties.get(ENVERS + key);
+    return value == null || String.valueOf(value).isBlank() ? fallback : String.valueOf(value);
   }
 
   // --------------------------------------------------------------------------------- temporal
