@@ -32,6 +32,7 @@ class CatcodeCKeywordsTest {
 
   private static final PostgreSQLContainer<?> POSTGRES =
       new PostgreSQLContainer<>(DockerImageName.parse(IMAGE).asCompatibleSubstituteFor("postgres"))
+          .withInitScript("shredding-test/statistics-off.sql")
           .withStartupTimeout(java.time.Duration.ofMinutes(2));
 
   @BeforeAll

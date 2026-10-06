@@ -23,6 +23,27 @@ All notable changes to this project. The format follows
   `jackson-databind` at all, now at 3.1.7.
 
 ### Changed
+- **BREAKING. Planner statistics on a blind-index column are refused (`SHRED-SCHEMA-010`, new).**
+  `ANALYZE` stores sampled values of every column, which any role with `SELECT` on the table reads
+  from `pg_stats`, and an erasure never removed them, so an erased subject's index stayed
+  matchable with the application's index secret. Startup and every erasure now refuse a
+  blind-index column whose statistics target is not 0 (every column's default: `-1` on PostgreSQL
+  16, `NULL` on 17), that has rows in `pg_stats`, that an expression index computes over, that
+  extended statistics cover, or from which a stored generated column with any of these is
+  computed; on the table and every partition and inheritance child. A descendant whose statistics
+  the runtime role cannot see is `SHRED-SCHEMA-005`. **Every existing installation refuses at the
+  first 0.2.0 start until it runs upgrade step 3a**, and so does every schema Hibernate's
+  `ddl-auto` creates. The message prints the remedy with the column's own type, as one
+  transaction that drops and re-creates dependent views and policies when there are any, or names
+  the dependents it does not re-create and the two ways to clear statistics without retyping. A
+  plain partial index whose predicate names the column is admitted; an expression index whose
+  predicate does is refused. An index, statistics or generated expression calling a function or
+  operator outside `pg_catalog`, or a non-immutable one, is `SHRED-SCHEMA-005`.
+- **BREAKING. A table with a blind index that is a partition or an inheritance child is refused
+  (`SHRED-SCHEMA-009`, rule R-i).** `ANALYZE` on the parent kept the child's index values in the
+  parent's statistics, beyond any erasure. Map the entity to the root; the statistics check then
+  covers it, so an upgraded installation may see a second, `SHRED-SCHEMA-010`, refusal on the
+  next start.
 - **BREAKING. Mapping admission: a `@Shredded` entity's table, and the columns of it this module
   compares, are checked against the PostgreSQL catalogue before the first erasure, and refused when
   the erasure could not be trusted on them.** A hiding view, a row-level-security policy the runtime
@@ -332,6 +353,10 @@ All notable changes to this project. The format follows
   in a role that could not start the application.
 
 ### Added
+- `SHRED-SCHEMA-010` (`ErrorCodes.BLIND_INDEX_COPIED`): a copy of a blind-index column exists
+  where no erasure reaches it; in this release, planner statistics. `MappingAdmission.Verdict`
+  gains `Copied`, and `MappingAdmission.Column` an optional attribute name for messages (the
+  three-argument constructor is kept).
 - `JdbcSupport.verifySchema(DataSource)` and `verifySchema(DataSource, boolean)`, public core API,
   so a caller that does not use Spring makes the same assertion at its own startup.
 - `SHRED-SCHEMA-009` (`ErrorCodes.MAPPING_INADMISSIBLE`): a `@Shredded` entity's table or a

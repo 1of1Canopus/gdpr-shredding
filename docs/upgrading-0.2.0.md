@@ -129,12 +129,29 @@ catalogue fact and the remedy.
 | a column whose declared type carries its own two-sided `=` outside `pg_catalog` | the same disagreement, one type definition away from `citext` | the same |
 | a non-deterministic collation on a compared column | an erasure for `s1` also clears `S1`, another tenant's row included | a deterministic collation |
 | a blind-index column that is `NOT NULL` or generated | the erasure sets it to `NULL` | drop the constraint; index a plain column |
+| a table with a blind index that is itself a partition, or an inheritance child | `ANALYZE` on the parent stores statistics computed from this table's rows under the parent's columns, the blind index included, readable by any role with `SELECT` on the parent; no erasure of the child reaches them | map the entity to the root of the hierarchy (never detach or `NO INHERIT`: both leave the values in the former parent, see step 1). The statistics check then covers the root, so if the root already holds statistics of the column the **next** start refuses with `SHRED-SCHEMA-010` and its own remedy: two refusals across two starts |
+| a mapped table with a blind index any of whose partitions or inheritance children, at any depth, also inherits from a table outside that hierarchy, or a mapped table with more than one parent (`SHRED-SCHEMA-009`) | that other parent's statistics hold the descendant's rows, blind index included, and mapping one parent leaves the other holding them | restructure so every table holding blind-indexed rows has a single parent chain, and map its root; the message names every parent |
+| planner statistics on a blind-index column: a statistics target that is not 0 (every column's default), rows already in `pg_stats`, an expression index computing over it, extended statistics covering it, or a stored generated column computed from it that has any of these; on the table or any partition or inheritance child (`SHRED-SCHEMA-010`) | `ANALYZE` stores sampled values of the column, most common values and histogram bounds, which any role with `SELECT` on the table reads from `pg_stats`, and an erasure does not remove them: the erased subject's index stays matchable | step 3a, before the deploy window |
 
 At startup a table that is present and refused fails the context with `SHRED-SCHEMA-009`. A table
 that does not exist yet is a WARN, so `spring.jpa.defer-datasource-initialization=true`, a schema a
 test creates after the context starts, and a migration applied while the application runs all
 keep working; every erasure on that entity is refused with `SHRED-SCHEMA-009` until the table exists
 and is admissible. A catalogue that cannot be read is `SHRED-SCHEMA-005`.
+
+The statistics row is refused with its own code, `SHRED-SCHEMA-010`, at startup and before every
+erasure's first statement, and **every 0.1.x installation meets it**: a blind-index column has the
+default statistics target unless someone changed it, and autovacuum has sampled it once the table
+passed about fifty rows. A schema Hibernate's `ddl-auto` creates meets it too, because Hibernate
+cannot emit `SET STATISTICS`. A partition or child whose `pg_stats` rows the runtime role cannot
+see (no `SELECT` on the column, or row level security that applies to the role) is
+`SHRED-SCHEMA-005`: unverifiable is not clean. A plain partial index whose predicate names the
+column (`ON customer (id) WHERE email_idx IS NOT NULL`) stores no statistics and is admitted; a
+plain index on the column stores none either. An **expression** index whose predicate names the
+column is refused: `ANALYZE` samples it only from the rows the predicate selects, so its statistics
+record which index values those rows held. An expression index, extended-statistics expression or
+stored generated column that calls a function or operator outside `pg_catalog`, or one that is not
+immutable, is `SHRED-SCHEMA-005`.
 
 Admitted with a WARN at startup: an `UNLOGGED` table or partition (the erasure is sound; a crash
 empties it, residue included). Admitted: a domain over `text` or `varchar` as tenant or subject,
@@ -172,6 +189,51 @@ the 0.1.1 release notes, means a guard has already been off or replaced. On a 0.
 was applied last. **That is an incident to
 record now**, before a clean boot on 0.2.0 makes it invisible.
 
+Then list what step 3a will have to change, for each blind-index column (here
+`public.customer.email_idx`; repeat per column):
+
+```sql
+-- the statistics target (16: -1 is the default; 17: NULL is the default), on the table and
+-- every partition or inheritance child; anything but 0 is refused
+SELECT a.attrelid::regclass, a.attname, a.attstattarget
+  FROM pg_catalog.pg_attribute a
+ WHERE a.attrelid IN (SELECT relid FROM pg_catalog.pg_partition_tree('public.customer'))
+   AND a.attname = 'email_idx';
+-- statistics already stored: any row is refused
+SELECT schemaname, tablename, attname, inherited FROM pg_catalog.pg_stats
+ WHERE schemaname = 'public' AND tablename = 'customer' AND attname = 'email_idx';
+-- expression indexes and extended statistics on the table: refused when they read the column
+SELECT indexrelid::regclass, pg_catalog.pg_get_indexdef(indexrelid) FROM pg_catalog.pg_index
+ WHERE indrelid = 'public.customer'::regclass AND indexprs IS NOT NULL;
+SELECT stxname FROM pg_catalog.pg_statistic_ext WHERE stxrelid = 'public.customer'::regclass;
+-- what depends on the column (views, policies, generated columns): decides step 3a's shape
+SELECT pg_catalog.pg_describe_object(d.classid, d.objid, d.objsubid) FROM pg_catalog.pg_depend d
+ WHERE d.refclassid = 'pg_catalog.pg_class'::regclass
+   AND d.refobjid = 'public.customer'::regclass AND d.deptype <> 'i'
+   AND d.refobjsubid = (SELECT attnum FROM pg_catalog.pg_attribute
+                         WHERE attrelid = 'public.customer'::regclass AND attname = 'email_idx');
+```
+
+`pg_partition_tree` covers partitions; for legacy inheritance children list them from
+`pg_inherits`. An index or statistics object whose definition does not mention the blind-index
+column, and a dependent that is an index or a constraint, are not in the way.
+
+Each mapped table with a blind index must have no parent:
+
+```sql
+SELECT inhparent::regclass FROM pg_catalog.pg_inherits
+ WHERE inhrelid = 'public.customer'::regclass;   -- must return no row
+```
+
+**A table that was ever a partition or an inheritance child** (detached, or `NO INHERIT`) left its
+blind-index values in the former parent's `inherited` statistics, and nothing 0.2.0 reads can see
+them there; `ANALYZE` of the former parent does not clear them once it has no child left. Clear
+them on the former parent, as for step 3a: on PostgreSQL 18, as its owner,
+`SELECT pg_catalog.pg_clear_attribute_stats('<schema>', '<parent>', '<column>', true);` for each
+blind-index column; on 16 and 17, a superuser deletes the parent's `pg_statistic` rows for that
+column with `stainherit` true, and the `pg_statistic_ext_data` rows with `stxdinherit` true of any
+extended statistics on the parent that cover it, counting the rows first as in step 3a.
+
 ### 2. Move ownership to a role that is not the application's
 
 As a role that is a member of both, or a superuser (which is what most managed estates will use):
@@ -208,6 +270,102 @@ stayed disabled through every re-apply.
 The script ships inside the `gdpr-shredding-core` jar at
 `com/housedevinci/shredding/schema-postgresql.sql`, or call
 `JdbcSupport.initializeSchema(ownerDataSource)` from a one-off job or a migration step.
+
+### 3a. Turn off and clear planner statistics on every blind-index column
+
+As the owner role from step 2. The statements are compatible with 0.1.1, which never reads
+statistics, so this step can run days before the 0.2.0 deploy with 0.1.1 live. The startup refusal
+(`SHRED-SCHEMA-010`) prints the exact statements for your schema, with each column's actual type;
+for a column with no dependents they are:
+
+```sql
+SET search_path = pg_catalog, pg_temp;
+SET lock_timeout = '5s';
+ALTER TABLE public.customer ALTER COLUMN email_idx SET STATISTICS 0;
+ALTER TABLE public.customer ALTER COLUMN email_idx TYPE bytea USING email_idx;
+```
+
+The pinned `search_path` makes every name in the statements mean what the message meant: the
+message reads every definition with the same path, so each name outside `pg_catalog` is printed
+schema-qualified and cannot re-bind to a same-named table or function on your session's path. The
+`SET STATISTICS 0` statement stops every future `ANALYZE` from sampling the column; the `TYPE`
+statement deletes the statistics already stored. Measured on PostgreSQL 16 and 17: the second does not rewrite the table or its plain
+indexes, and with the target at 0 no rows come back across a restart, `ANALYZE`, `ANALYZE <table>
+(<column>)` and `VACUUM ANALYZE`. Each `ALTER TABLE` takes an `ACCESS EXCLUSIVE` lock: it waits for
+running queries on the table and blocks new ones behind it, hence the `lock_timeout`; on a timeout,
+retry. On a partitioned or inherited table run both on the parent: they reach every partition and
+child. Then:
+
+- **an expression index that computes over the column** (`ON customer (substring(email_idx ...))`)
+  keeps its own statistics of the expression: `DROP INDEX` it. A plain index on the column is the
+  supported lookup shape;
+- **extended statistics covering the column**: `DROP STATISTICS`;
+- **a stored generated column computed from the column** (`... GENERATED ALWAYS AS
+  (lower(email_idx)) STORED`) holds the derived values and has its own statistics: it needs the same
+  `SET STATISTICS 0`, and it blocks the `TYPE` statement (below).
+
+**When views or row level security policies depend on the column**, the `TYPE` statement fails
+(`cannot alter type of a column used by a view or rule`, `... used in a policy definition`). The
+startup refusal then prints one transaction that drops them, runs the two statements and re-creates
+them from their catalogue definitions (`pg_get_viewdef`, the view's options, owner, grants and
+comment; the policy's command, roles, `USING` and `WITH CHECK`). One transaction, so the table is
+never readable without its policies, and any failure rolls everything back; it opens with
+`SET LOCAL search_path = pg_catalog, pg_temp` for the reason above. A view is not re-created, but
+named (below), when default privileges for relations exist in its schema or globally: `CREATE VIEW`
+would apply them, and the view would carry grants it never had.
+
+**When the column has a dependent the message does not re-create** - a stored generated column, a
+view other views depend on, a view with triggers, rules, column privileges or column comments, a
+view under default privileges, a materialized view, a rule, a trigger with a column list or `WHEN`
+clause, a SQL-standard function body - the message prints the `SET STATISTICS 0` statements for the column and for each stored
+generated column computed from it (they need no retyping), names the dependents, and leaves the
+rows already stored to one of these:
+
+- **PostgreSQL 18 and later**, as the table owner, after `SET STATISTICS 0` on the column and on
+  each stored generated column computed from it:
+
+  ```sql
+  SELECT pg_catalog.pg_clear_attribute_stats('public', 'customer', 'email_idx', false);
+  SELECT pg_catalog.pg_clear_attribute_stats('public', 'customer', 'email_idx', true);  -- a parent
+  ```
+
+  once per column (the blind-index column and each generated column computed from it) and per
+  partition or child.
+
+- **PostgreSQL 16 and 17**, a superuser deletes exactly those rows, after the owner's
+  `SET STATISTICS 0` on the same columns. First the attnums, every descendant listed (a partition
+  or child may number the column differently):
+
+  ```sql
+  SELECT a.attrelid::regclass, a.attname, a.attnum FROM pg_catalog.pg_attribute a
+   WHERE a.attrelid IN (SELECT relid FROM pg_catalog.pg_partition_tree('public.customer'))
+     AND a.attname IN ('email_idx', 'email_low');
+  SELECT pg_catalog.count(*) FROM pg_catalog.pg_statistic
+   WHERE (starelid = 'public.customer'::regclass AND staattnum = 4)
+      OR (starelid = 'public.customer'::regclass AND staattnum = 6);
+  ```
+
+  then, with the count just read (here 2) written into the check, both `stainherit` values
+  included:
+
+  ```sql
+  BEGIN;
+  DO $$
+  DECLARE n bigint;
+  BEGIN
+    DELETE FROM pg_catalog.pg_statistic
+     WHERE (starelid = 'public.customer'::regclass AND staattnum = 4)
+        OR (starelid = 'public.customer'::regclass AND staattnum = 6);
+    GET DIAGNOSTICS n = ROW_COUNT;
+    IF n <> 2 THEN RAISE EXCEPTION 'expected 2 pg_statistic rows, deleted %', n; END IF;
+  END $$;
+  COMMIT;
+  ```
+
+Either way the control is not the step: 0.2.0 re-reads the catalogue at every startup and before
+every erasure, and admits the column only when the target is 0 and no rows are left. New
+installations add the `SET STATISTICS 0` line to the migration that creates each blind-index
+column.
 
 ### 4. Take DDL and shadowing privileges away from the application role
 
@@ -258,6 +416,7 @@ no WARN. If instead you get:
 | `SHRED-SCHEMA-005` | verification could not complete. A catalogue read was refused, or a migration is in flight |
 | `SHRED-SCHEMA-006` | `initialize-schema=true` and the DDL failed. Use the owner-applied path instead |
 | `SHRED-SCHEMA-007` | a privilege the application needs is missing. Step 5 is incomplete |
+| `SHRED-SCHEMA-010` | a blind-index column keeps planner statistics (its target, stored rows, an expression index, extended statistics, or a generated column computed from it). Step 3a did not run, or not on every column; the message names each fact and prints the remedy |
 | `SHRED-CONFIG-001` naming an entity and a schema | a `@Shredded` entity's mapping names no schema. See "Every installation: name the schema your entities live in" above |
 | `SHRED-SCHEMA-009` | mapping admission refused a `@Shredded` entity's table or one of its columns. The message names the entity, the column and the catalogue fact. The change most installations meet is the column-type rule, a tenant or subject column that is not `text`, `varchar` or `char(n)` (a `uuid` subject, for one); see "Every installation: what your entity tables must be" above. The refusal reads, with your entity and column in place of the angle brackets: `@Shredded entity <entity>: the subject column <schema>.<table>.<column> is of type uuid. This module compares tenant and subject columns against the request's string, and only text, varchar and char(n) compare that string as written: another type parses it (a uuid or a number, so one spelling of a subject clears another subject's index), truncates it (name, "char"), lets a cast the application's role owns decide the comparison (an enum), or has no comparison with a string at all. Map the tenant and subject columns as text, varchar or char(n). A UUID or numeric subject id is stored in a text column.` The remedy for a `uuid` column is `ALTER TABLE <schema>.<table> ALTER COLUMN <column> TYPE text USING <column>::text;`, and the mapping then stores the id as a string |
 

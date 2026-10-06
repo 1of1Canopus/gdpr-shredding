@@ -45,6 +45,7 @@ class CipherProbeNinthPassTenantMoveTest {
               DockerImageName.parse(
                       "postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777")
                   .asCompatibleSubstituteFor("postgres"))
+          .withInitScript("shredding-test/statistics-off.sql")
           .withStartupTimeout(java.time.Duration.ofMinutes(2));
 
   @DynamicPropertySource

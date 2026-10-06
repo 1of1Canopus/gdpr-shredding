@@ -347,6 +347,8 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
       }
       case MappingAdmission.Absent absent -> throw refusedBeforeFirstStatement(absent.message());
       case MappingAdmission.Refused refused -> throw refusedBeforeFirstStatement(refused.message());
+      case MappingAdmission.Copied copied ->
+          throw refusedBeforeFirstStatement(ErrorCodes.BLIND_INDEX_COPIED, copied.message());
     }
   }
 
@@ -448,8 +450,12 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
   }
 
   private static ShreddingException refusedBeforeFirstStatement(String message) {
+    return refusedBeforeFirstStatement(ErrorCodes.MAPPING_INADMISSIBLE, message);
+  }
+
+  private static ShreddingException refusedBeforeFirstStatement(String code, String message) {
     return new ShreddingException(
-        ErrorCodes.MAPPING_INADMISSIBLE,
+        code,
         message
             + " This erasure is refused before its first statement: no key is destroyed, no blind"
             + " index is touched and no record is appended.");
