@@ -1553,6 +1553,30 @@ probe probe_unreadable_report_counts_as_clean                "S7 an unreadable s
 probe probe_weekly_deep_scan_red_or_silent_without_key        "S9 the weekly deep scan is red or silent without a key" probe_the_weekly_deep_scan_is_red_or_silent_without_a_key
 probe probe_scanner_download_unverified                      "S10 a tampered scanner download installs"            probe_scanner_downloads_are_installed_without_verification
 
+# ---------------------------------------------------------------------------
+# W1 - the Maven wrapper moved to 3.10.x (Dependabot, PR 17) while central-publishing-maven-plugin
+#      0.11.0 cannot build a valid bundle on Maven 3.10: the Portal refused the v0.2.0 bundle
+#      ("content that does NOT have a .pom file", maven-metadata-local.xml and
+#      _remote.repositories inside it). Upstream: jboss/jboss-parent-pom#584,
+#      cuioss/cuioss-parent-pom#1501. No plugin release supports 3.10 yet, so every 0.x plugin
+#      is treated as unsupported; revisit this condition when a plugin version documents support.
+#      Weak while the wrapper is >= 3.10 and the plugin is a 0.x release (or unreadable).
+# ---------------------------------------------------------------------------
+probe_maven_wrapper_is_compatible_with_central_publishing() {
+  local url wv plugin wmaj wmin
+  url="$(sed -n 's/^distributionUrl=//p' .mvn/wrapper/maven-wrapper.properties)"
+  wv="$(sed -n 's#.*/apache-maven-\([0-9][0-9.]*\)-bin\.zip.*#\1#p' <<<"$url")"
+  plugin="$(sed -n 's#.*<central-publishing.version>\([^<]*\)</central-publishing.version>.*#\1#p' pom.xml | head -1)"
+  [ -n "$wv" ] && [ -n "$plugin" ] || return 0            # unreadable: unverifiable is weak
+  wmaj="${wv%%.*}"; wmin="${wv#*.}"; wmin="${wmin%%.*}"
+  if [ "$wmaj" -gt 3 ] || { [ "$wmaj" -eq 3 ] && [ "$wmin" -ge 10 ]; }; then
+    case "$plugin" in 0.*) return 0 ;; esac              # every 0.x plugin: unsupported on 3.10+
+  fi
+  return 1
+}
+
+probe probe_maven_wrapper_incompatible_with_central_publishing "W1 the Maven wrapper is 3.10+ while central-publishing is a 0.x release" probe_maven_wrapper_is_compatible_with_central_publishing
+
 echo
 echo "still weak: $pass    fixed: $flipped    error: $errors"
 [ "$pass" -eq 0 ] && [ "$errors" -eq 0 ]
