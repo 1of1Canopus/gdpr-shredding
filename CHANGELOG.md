@@ -6,6 +6,8 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-07
+
 ### Security
 - Pinned `tools.jackson.core:jackson-databind` to 3.1.6 by overriding the `jackson-bom.version`
   property Spring Boot 4.1.1 manages (3.1.5). GHSA-q4xh-88c3-wmh7 (HIGH, CVSS 7.5, denial of
