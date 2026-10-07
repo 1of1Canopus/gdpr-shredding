@@ -1562,15 +1562,25 @@ probe probe_scanner_download_unverified                      "S10 a tampered sca
 #      is treated as unsupported; revisit this condition when a plugin version documents support.
 #      Weak while the wrapper is >= 3.10 and the plugin is a 0.x release (or unreadable).
 # ---------------------------------------------------------------------------
+# First central-publishing-maven-plugin version whose release notes state Maven 3.10 support.
+# Empty = none known: while empty, a wrapper >= 3.10 is WEAK for every plugin version.
+CENTRAL_PUBLISHING_FIRST_MAVEN_310_SUPPORT=""
+
 probe_maven_wrapper_is_compatible_with_central_publishing() {
-  local url wv plugin wmaj wmin
-  url="$(sed -n 's/^distributionUrl=//p' .mvn/wrapper/maven-wrapper.properties)"
-  wv="$(sed -n 's#.*/apache-maven-\([0-9][0-9.]*\)-bin\.zip.*#\1#p' <<<"$url")"
+  local props=".mvn/wrapper/maven-wrapper.properties"
+  local lines url wv plugin wmaj wmin
+  [ -f "$props" ] || return 0                              # missing: unverifiable is weak
+  lines="$(tr -d '\r' < "$props" | grep -c '^distributionUrl=' || true)"
+  [ "$lines" -eq 1 ] || return 0                           # zero or duplicate: weak
+  url="$(tr -d '\r' < "$props" | sed -n 's/^distributionUrl=//p')"
+  wv="$(sed -n 's#.*/apache-maven-\([^/]*\)-bin\.zip.*#\1#p' <<<"$url")"
+  [[ "$wv" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]] || return 0   # strict semver, else weak
   plugin="$(sed -n 's#.*<central-publishing.version>\([^<]*\)</central-publishing.version>.*#\1#p' pom.xml | head -1)"
-  [ -n "$wv" ] && [ -n "$plugin" ] || return 0            # unreadable: unverifiable is weak
+  [ -n "$plugin" ] || return 0
   wmaj="${wv%%.*}"; wmin="${wv#*.}"; wmin="${wmin%%.*}"
   if [ "$wmaj" -gt 3 ] || { [ "$wmaj" -eq 3 ] && [ "$wmin" -ge 10 ]; }; then
-    case "$plugin" in 0.*) return 0 ;; esac              # every 0.x plugin: unsupported on 3.10+
+    [ -n "$CENTRAL_PUBLISHING_FIRST_MAVEN_310_SUPPORT" ] || return 0
+    [ "$(printf '%s\n%s\n' "$CENTRAL_PUBLISHING_FIRST_MAVEN_310_SUPPORT" "$plugin" | sort -V | head -1)" = "$CENTRAL_PUBLISHING_FIRST_MAVEN_310_SUPPORT" ] || return 0
   fi
   return 1
 }
