@@ -28,7 +28,7 @@ HMAC-SHA-256 and a hand-written HKDF checked against the RFC 5869 vectors, all f
 <dependency>
   <groupId>com.housedevinci</groupId>
   <artifactId>gdpr-shredding-spring-boot-starter</artifactId>
-  <version>0.1.0</version>
+  <version>0.2.0</version>
 </dependency>
 ```
 
