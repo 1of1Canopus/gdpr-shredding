@@ -78,3 +78,84 @@ run must show: deployment state **VALIDATED** for `gdpr-shredding <version> (<sh
 bundle listing in the log with no `maven-metadata*` or `_remote.repositories` entry, and the
 checksum comparison step green. Pattern recorded: a dry run that stops before the external
 validator proves nothing, unless it reproduces the validator's rule locally (B-1).
+
+## Pass 2 (2026-10-07)
+
+Head reviewed: e349e0a. CI on e349e0a: 6/6 required checks green (Build & test, Cipher
+probes, DCO sign-off, Reference guard, Release dry run, Vulnerability scan) plus the
+Dependabot config check. Full `verify` and `CIPHER_PROBE_MAVEN=1` not re-run locally (CI is
+cited instead, per brief).
+
+Method: the W1 function `probe_maven_wrapper_is_compatible_with_central_publishing` was
+extracted verbatim from `tools/cipher-probe-release-pipeline.sh` and executed against scratch
+fixtures (one `.mvn/wrapper/maven-wrapper.properties` + one `pom.xml` per row). WEAK = return 0.
+
+| Wrapper input | Constant | Plugin | Result | Expected |
+|---|---|---|---|---|
+| 3.9.16 LF (shipped) | empty | 0.11.0 | FIXED | FIXED |
+| 3.10.0 | empty | 0.11.0 | WEAK | WEAK |
+| 3.10.0 | empty | 1.0.0 | WEAK | WEAK |
+| 4.0.0 | empty | 0.11.0 | WEAK | WEAK |
+| 3.9.16 CRLF | empty | 0.11.0 | FIXED | FIXED |
+| 3.10.0 CRLF | empty | 0.11.0 | WEAK | WEAK |
+| duplicate url (3.9.16 then 3.10.0) | empty | 0.11.0 | WEAK | WEAK |
+| no distributionUrl | empty | 0.11.0 | WEAK | WEAK |
+| missing properties file | empty | 0.11.0 | WEAK | WEAK |
+| `distributionUrl = ...` (spaces) | empty | 0.11.0 | WEAK | WEAK (unparsed) |
+| version `3.x` | empty | 0.11.0 | WEAK | WEAK |
+| plugin property absent | empty | none | WEAK | WEAK |
+| 3.9.16-SNAPSHOT | empty | 0.11.0 | FIXED | FIXED (3.9 line) |
+| 3.10.0-SNAPSHOT | empty | 0.11.0 | WEAK | WEAK |
+| 3.10.0-rc-1 | empty | 0.11.0 | WEAK | WEAK |
+| 3.10.0 | 1.2.0 | 1.1.0 | WEAK | WEAK |
+| 3.10.0 | 1.2.0 | 1.2.0 | FIXED | FIXED |
+| 3.10.0 | 1.2.0 | 1.10.0 | FIXED | FIXED (numeric, not lexical) |
+| 3.10.0 | 1.2.0 | 0.11.0 | WEAK | WEAK |
+| 3.9.16 | 1.2.0 | 0.11.0 | FIXED | FIXED |
+| 3.10.0 | 1.2.0 | **1.2.0-SNAPSHOT** | **FIXED** | WEAK (C-30-1) |
+| 3.10.0 | 1.2.0 | **`${x}`** | **FIXED** | WEAK (C-30-1) |
+| url `.../3.10.0/apache-maven-3.10.0-bin.zip#/apache-maven-3.9.16-bin.zip` | empty | 0.11.0 | **FIXED** | WEAK (C-30-2) |
+
+CR strip, decided: a CRLF properties file naming 3.9.16 is a valid wrapper file (mvnw's
+`trim` drops the CR), so the rule requires **FIXED**. Mutation (both `tr -d '\r'` removed):
+3.9.16 CRLF still FIXED, 3.10.0 CRLF still WEAK. The strip is therefore not observable through
+this probe, because the version `sed` ends in `.*` and swallows the CR and `grep -c
+'^distributionUrl='` is unaffected. The probe gives the right verdict with or without it;
+the strip is defence in depth. Not a finding.
+
+dependabot.yml (parsed with a YAML parser, not grep): `maven` has `cooldown: {default-days: 7}`
+and keeps the ignore `org.apache.maven:apache-maven` `>= 3.10`; `github-actions` has
+`cooldown: {default-days: 7}`. D-1 closed.
+
+Prior findings: W1-a closed (empty constant reads WEAK for every plugin on 3.10+, constant set
+compares numerically). W1-b closed (duplicate, missing, CRLF, malformed rows above). D-1
+closed. C-1 and B-1 stay open as coordinator/maintainer decisions, recorded in pass 1, not
+blocking this verdict per brief.
+
+### New findings
+
+**C-30-1 (LOW). The plugin version is not validated, so a non-release plugin counts as
+"supports 3.10" once the constant is set.** Latent today (constant empty), live the day it is
+filled in. Repro: rows `1.2.0-SNAPSHOT` and `${x}` above (`sort -V` orders `1.2.0` before both).
+The function's own rule is "unreadable is weak", and it already applies that to the wrapper
+version but not to the plugin version. Fix (Isis), `tools/cipher-probe-release-pipeline.sh`,
+`probe_maven_wrapper_is_compatible_with_central_publishing`: after `plugin=` read, require
+`[[ "$plugin" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 0` (release versions only; a property
+reference or qualifier is weak). Probe: `probe_w1_accepts_unparsed_plugin_version`.
+
+**C-30-2 (INFO). The wrapper version comes from the last `apache-maven-X-bin.zip` text in the
+URL, not from the path mvnw downloads.** Repro: the fragment row above reads FIXED while the
+download is 3.10.0. A Dependabot bump never produces this shape, but the fix is one line and
+it completes W1-b's "strict parse". Fix (Isis), same function: replace the `sed` extraction
+with a full-match on `^https://repo\.maven\.apache\.org/maven2/org/apache/maven/apache-maven/([^/]+)/apache-maven-([^/]+)-bin\.zip$`
+via `[[ =~ ]]`, require `BASH_REMATCH[1] == BASH_REMATCH[2]`, then apply the existing semver
+check; anything else returns 0. Probe: `probe_w1_reads_version_from_url_suffix_not_path`.
+
+Both probes are in the internal probe folder (`cipher-probe-pr30-pass2.sh`) and read WEAK on
+e349e0a; add them to the W1 block of the suite before the fix. Either fix is tooling only,
+not a new mechanism; no design page needed.
+
+### Verdict
+
+**MERGE WITH FIXES**: C-30-1 (LOW), C-30-2 (INFO). No HIGH, no MEDIUM. C-1 and B-1 are still open
+as recorded.
