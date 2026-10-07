@@ -6,6 +6,11 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- Pinned the Maven wrapper back to 3.9.16 (Dependabot had moved it to 3.10.0). The Central
+  Portal refused the 0.2.0 bundle because central-publishing-maven-plugin 0.11.0 packs local
+  repository metadata on Maven 3.10; Dependabot now ignores wrapper versions >= 3.10.
+
 ## [0.2.0] - 2026-10-07
 
 ### Security

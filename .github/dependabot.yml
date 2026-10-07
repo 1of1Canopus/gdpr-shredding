@@ -11,6 +11,13 @@ updates:
       minor-and-patch:
         update-types: ["minor", "patch"]
     labels: ["dependencies"]
+    ignore:
+      # central-publishing-maven-plugin 0.11.0 builds a bundle the Central Portal refuses on Maven
+      # 3.10 (maven-metadata-local.xml and _remote.repositories inside it; the v0.2.0 run failed
+      # this way). Upstream: jboss/jboss-parent-pom#584, cuioss/cuioss-parent-pom#1501. Drop this
+      # once a plugin release supports Maven 3.10.
+      - dependency-name: "org.apache.maven:apache-maven"
+        versions: [">= 3.10"]
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
