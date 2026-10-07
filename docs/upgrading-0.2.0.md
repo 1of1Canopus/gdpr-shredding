@@ -1,5 +1,34 @@
 # Upgrading to 0.2.0
 
+## Will 0.2.0 start on my schema? Ten questions
+
+Answer each with the query or the look-up named in it. **Yes is the good answer.** A "no" is a
+startup refusal with the code shown; the remedy is one line and the linked step has the detail.
+Run the queries per blind-index column and per `@Shredded` table, as the owner role, before the
+deploy window. Questions 1 to 4 concern the database setup, 5 to 10 your tables and mapping.
+
+0.2.0 never creates or changes your schema at runtime: the application runs no DDL unless you set
+`shredding.jdbc.initialize-schema=true`, which WARNs at every startup. You apply the script once, as
+an owner role (question 3).
+
+| # | Question (yes is good) | How to answer | Refusal if no | Remedy |
+|---|---|---|---|---|
+| 1 | Does every `@Shredded` entity map to a table in a named schema? | No query: look for `hibernate.default_schema` or `@Table(schema = ...)` ([the schema section](#every-installation-name-the-schema-your-entities-live-in)) | `SHRED-CONFIG-001` | Set the schema in configuration or on the entity |
+| 2 | Is the application's runtime role the owner of none of the four `shredding_` tables, the three guard functions or the database? | The first query of [step 1](#1-record-the-current-state-before-the-upgrade-hides-it), and the database owner query in [step 4](#4-take-ddl-and-shadowing-privileges-away-from-the-application-role) | `SHRED-SCHEMA-004` | [Steps 2, 4 and 6](#2-move-ownership-to-a-role-that-is-not-the-applications): move ownership, revoke DDL, switch the runtime role |
+| 3 | Were the four tables and three guards created by the 0.2.0 script, as the owner, with all seven triggers enabled? | The `tgenabled` and `proconfig` queries of [step 1](#1-record-the-current-state-before-the-upgrade-hides-it): every trigger `O` or `A`, and after the script every `proconfig` reads `{"search_path=pg_catalog, pg_temp"}` | `SHRED-SCHEMA-001`, `-002` or `-003` | [Step 3](#3-apply-the-020-schema-postgresqlsql-once-as-the-owner-role): apply the script that ships with the jar |
+| 4 | Is each `@Shredded` table an ordinary, permanent table with no parent, and are its partitions and children ordinary and permanent too? | The `pg_inherits` query at the end of [step 1](#1-record-the-current-state-before-the-upgrade-hides-it) must return no row; `pg_partition_tree` lists partitions | `SHRED-SCHEMA-009` | Map the root of the hierarchy, or a plain table; no views, foreign or temporary tables ([the table rules](#every-installation-what-your-entity-tables-must-be)) |
+| 5 | Are the tenant and subject columns `text`, `varchar` or `char(n)` with a deterministic collation, and the blind-index column nullable and not generated? | No query in this guide: read the column definitions against [the table rules](#every-installation-what-your-entity-tables-must-be) | `SHRED-SCHEMA-009` | Store `uuid` and numeric ids as `text`; drop `NOT NULL` on the blind index |
+| 6 | Is the statistics target of every blind-index column 0, with no stored statistics, expression index or extended statistics on it? | The statistics target, `pg_stats`, expression-index and `pg_statistic_ext` queries of [step 1](#1-record-the-current-state-before-the-upgrade-hides-it): target 0 and no other row | `SHRED-SCHEMA-010` | [Step 3a](#3a-turn-off-and-clear-planner-statistics-on-every-blind-index-column); every 0.1.x installation needs it |
+| 7 | Does the table, or any partition or child, have no enabled trigger and no rule? | The triggers and rules queries of [step 1](#1-record-the-current-state-before-the-upgrade-hides-it) | `SHRED-SCHEMA-010` | Drop or disable it, or [acknowledge it](#acknowledging-a-trigger-a-publication-or-a-slot) with the hook that clears what it writes |
+| 8 | Does no publication carry the blind-index column, and is there no logical slot with a plugin other than `pgoutput`? | The publication and slot queries of [step 1](#1-record-the-current-state-before-the-upgrade-hides-it) | `SHRED-SCHEMA-010` | A publication column list without the index; drop the slot; or [acknowledge](#acknowledging-a-trigger-a-publication-or-a-slot) |
+| 9 | Is the blind-index column absent from every materialized view, foreign key and leftover audit or history table? | The foreign-key and leftover-table queries of [step 1](#1-record-the-current-state-before-the-upgrade-hides-it); a materialized view shows in the dependents query | `SHRED-SCHEMA-010` | Leave it out of the view, drop the foreign key, clear and drop the audit column |
+| 10 | Is every `@BlindIndex` field `@NotAudited` under Envers, with no `@Audited` or `@Temporal` history on it? | No query: read the entity; the leftover-table query of question 9 finds old history tables | `SHRED-SCHEMA-010` | `@NotAudited` and Envers registered as `docs/index.md` "Using Hibernate Envers" shows; remove `@Temporal` |
+
+If you answer no to any of 6 to 10 on a 0.1.1 installation, expect the refusals one per start, in
+the order set out under "A 0.1.1 installation with Hibernate Envers meets these refusals" below, so
+plan the database changes for one window. Every refusal message lists every problem it found and
+prints its remedy. This section is a map; the sections after it are the rules.
+
 0.2.0 stops the application from creating its own database schema, and refuses to start against a
 schema whose append-only guards it could remove itself. **An installation that upgrades the jar and
 changes nothing will not boot.** That is the intended outcome: the previous behaviour is the
