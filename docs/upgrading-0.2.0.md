@@ -1,5 +1,34 @@
 # Upgrading to 0.2.0
 
+## Will 0.2.0 start on my schema? Ten questions
+
+Answer each with the query or the look-up named in it. **Yes is the good answer.** A "no" is a
+startup refusal with the code shown; the remedy is one line and the linked step has the detail.
+Run the queries per blind-index column and per `@Shredded` table, as the owner role, before the
+deploy window. Questions 1 to 4 concern the database setup, 5 to 10 your tables and mapping.
+
+0.2.0 never creates or changes your schema at runtime: the application runs no DDL unless you set
+`shredding.jdbc.initialize-schema=true`, which WARNs at every startup. You apply the script once, as
+an owner role (question 3).
+
+| # | Question (yes is good) | How to answer | Refusal if no | Remedy |
+|---|---|---|---|---|
+| 1 | Does every `@Shredded` entity map to a table in a named schema? | No query: look for `hibernate.default_schema` or `@Table(schema = ...)` ([the schema section](#every-installation-name-the-schema-your-entities-live-in)) | `SHRED-CONFIG-001` | Set the schema in configuration or on the entity |
+| 2 | Does the application's runtime role hold exactly the [step 5](#5-apply-the-grant-block) grant block and nothing more: not a superuser, no CREATE on the schema, no CREATE or TEMPORARY on the database, no ownership of the four `shredding_` tables, the sequence, their indexes, the three guard functions or the database, no SELECT on the sequence, no table privilege beyond the block? | The first query of [step 1](#1-record-the-current-state-before-the-upgrade-hides-it), the database owner query in [step 4](#4-take-ddl-and-shadowing-privileges-away-from-the-application-role), and a comparison of the role's privileges with the step 5 block | `SHRED-SCHEMA-004` (too much), `SHRED-SCHEMA-007` (a grant missing) | [Steps 2, 4, 5 and 6](#2-move-ownership-to-a-role-that-is-not-the-applications): move ownership, revoke DDL, apply the grant block, switch the runtime role |
+| 3 | Were the four tables and three guards created by the 0.2.0 script, as the owner, with all seven triggers enabled? | The `tgenabled` and `proconfig` queries of [step 1](#1-record-the-current-state-before-the-upgrade-hides-it): after the script every guard trigger reads `A` (`O`, a plain `ENABLE TRIGGER`, is refused too; before the script `O` or `A` only tells you whether a guard was off), and every `proconfig` reads `{"search_path=pg_catalog, pg_temp"}` | `SHRED-SCHEMA-001`, `-002` or `-003` | [Step 3](#3-apply-the-020-schema-postgresqlsql-once-as-the-owner-role): apply the script that ships with the jar |
+| 4 | Is each `@Shredded` table with a blind index an ordinary, permanent table with no parent, and are its partitions and children ordinary and permanent too? | The `pg_inherits` query at the end of [step 1](#1-record-the-current-state-before-the-upgrade-hides-it) must return no row; `pg_partition_tree` lists partitions | `SHRED-SCHEMA-009` | Map the root of the hierarchy, or a plain table; no views, foreign or temporary tables ([the table rules](#every-installation-what-your-entity-tables-must-be)) |
+| 5 | Are the tenant and subject columns `text`, `varchar` or `char(n)` with a deterministic collation, and the blind-index column nullable and not generated? Does no row-level-security policy apply to the runtime role, does it hold SELECT and UPDATE on the table, and is the equality operator of each column's type in `pg_catalog`? | Column definitions: no query, read them against [the table rules](#every-installation-what-your-entity-tables-must-be). Row security and privileges: the mapping-checks query of [step 1](#1-record-the-current-state-before-the-upgrade-hides-it). Equality operator: a type outside `pg_catalog` (a domain, an extension type) is the cause; use a built-in type | `SHRED-SCHEMA-009` | Store `uuid` and numeric ids as `text`; drop `NOT NULL` on the blind index; exempt the role from the policy (`BYPASSRLS`) or drop row security on the table; grant SELECT and UPDATE ([step 5](#5-apply-the-grant-block)) |
+| 6 | Is the statistics target of every blind-index column 0, with no stored statistics, expression index or extended statistics on it? | The statistics target, `pg_stats`, expression-index and `pg_statistic_ext` queries of [step 1](#1-record-the-current-state-before-the-upgrade-hides-it): target 0 and no other row | `SHRED-SCHEMA-010` | [Step 3a](#3a-turn-off-and-clear-planner-statistics-on-every-blind-index-column); every 0.1.x installation needs it |
+| 7 | Does the table, or any partition or child, have no enabled trigger and no rule? | The triggers and rules queries of [step 1](#1-record-the-current-state-before-the-upgrade-hides-it) | `SHRED-SCHEMA-010` | Drop or disable it, or [acknowledge it](#acknowledging-a-trigger-a-publication-or-a-slot) with the hook that clears what it writes |
+| 8 | Does no publication carry the blind-index column, and is there no logical slot with a plugin other than `pgoutput`? | The publication and slot queries of [step 1](#1-record-the-current-state-before-the-upgrade-hides-it) | `SHRED-SCHEMA-010` | A publication column list without the index; drop the slot; or [acknowledge](#acknowledging-a-trigger-a-publication-or-a-slot) |
+| 9 | Is the blind-index column absent from every materialized view, foreign key and leftover audit or history table? | The foreign-key and leftover-table queries of [step 1](#1-record-the-current-state-before-the-upgrade-hides-it); a materialized view shows in the dependents query | `SHRED-SCHEMA-010` | Leave it out of the view, drop the foreign key, clear and drop the audit column |
+| 10 | Is every `@BlindIndex` field `@NotAudited` under Envers (or `@Audited.Excluded`), with no `@Temporal` history on it, and no association (a to-one foreign key or a collection key) joined on it? | No query: read the entity and its associations; the leftover-table query of question 9 finds old history tables | `SHRED-SCHEMA-010` | `@NotAudited` and Envers registered as `docs/index.md` "Using Hibernate Envers" shows; remove `@Temporal` (`@Temporal.Excluded` does not help); join the association on another column |
+
+If you answer no to any of 6 to 10 on a 0.1.1 installation, expect the refusals one per start, in
+the order set out under "A 0.1.1 installation with Hibernate Envers meets these refusals" below, so
+plan the database changes for one window. Every refusal message lists every problem it found and
+prints its remedy. This section is a map; the sections after it are the rules.
+
 0.2.0 stops the application from creating its own database schema, and refuses to start against a
 schema whose append-only guards it could remove itself. **An installation that upgrades the jar and
 changes nothing will not boot.** That is the intended outcome: the previous behaviour is the
@@ -221,59 +250,85 @@ Then list what step 3a will have to change, for each blind-index column (here
 `public.customer.email_idx`; repeat per column):
 
 ```sql
+-- the table and every partition or inheritance child, at any depth (partitions are in
+-- pg_inherits too); every query below that names "fam" reads it, so run them in this session
+CREATE TEMPORARY TABLE fam AS
+  WITH RECURSIVE t(relid) AS (
+    SELECT 'public.customer'::regclass::oid
+    UNION
+    SELECT i.inhrelid FROM pg_catalog.pg_inherits i JOIN t ON i.inhparent = t.relid
+  ) SELECT relid FROM t;
 -- the statistics target (16: -1 is the default; 17: NULL is the default), on the table and
 -- every partition or inheritance child; anything but 0 is refused
 SELECT a.attrelid::regclass, a.attname, a.attstattarget
   FROM pg_catalog.pg_attribute a
- WHERE a.attrelid IN (SELECT relid FROM pg_catalog.pg_partition_tree('public.customer'))
-   AND a.attname = 'email_idx';
--- statistics already stored: any row is refused
+ WHERE a.attrelid IN (SELECT relid FROM fam) AND a.attname = 'email_idx';
+-- statistics already stored, on the table or on any member of the family: any row is refused
 SELECT schemaname, tablename, attname, inherited FROM pg_catalog.pg_stats
- WHERE schemaname = 'public' AND tablename = 'customer' AND attname = 'email_idx';
--- expression indexes and extended statistics on the table: refused when they read the column
+ WHERE (quote_ident(schemaname) || '.' || quote_ident(tablename))::regclass
+       IN (SELECT relid FROM fam)
+   AND attname = 'email_idx';
+-- expression indexes and extended statistics on the family: refused when they read the column
 SELECT indexrelid::regclass, pg_catalog.pg_get_indexdef(indexrelid) FROM pg_catalog.pg_index
- WHERE indrelid = 'public.customer'::regclass AND indexprs IS NOT NULL;
-SELECT stxname FROM pg_catalog.pg_statistic_ext WHERE stxrelid = 'public.customer'::regclass;
+ WHERE indrelid IN (SELECT relid FROM fam) AND indexprs IS NOT NULL;
+SELECT stxrelid::regclass, stxname FROM pg_catalog.pg_statistic_ext
+ WHERE stxrelid IN (SELECT relid FROM fam);
 -- what depends on the column (views, policies, generated columns): decides step 3a's shape
 SELECT pg_catalog.pg_describe_object(d.classid, d.objid, d.objsubid) FROM pg_catalog.pg_depend d
+  JOIN pg_catalog.pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
  WHERE d.refclassid = 'pg_catalog.pg_class'::regclass
-   AND d.refobjid = 'public.customer'::regclass AND d.deptype <> 'i'
-   AND d.refobjsubid = (SELECT attnum FROM pg_catalog.pg_attribute
-                         WHERE attrelid = 'public.customer'::regclass AND attname = 'email_idx');
+   AND d.refobjid IN (SELECT relid FROM fam) AND d.deptype <> 'i'
+   AND a.attname = 'email_idx';
 ```
 
-Then list the copies 0.2.0 refuses (`SHRED-SCHEMA-010`), each non-empty result a finding:
+Then list the copies 0.2.0 refuses (`SHRED-SCHEMA-010`), each non-empty result a finding (the
+leftover-table query lists ordinary tables only, so a partition of the table or a materialized view
+is not a false finding):
 
 ```sql
--- triggers and rules on the table and every partition (legacy children: from pg_inherits)
+-- triggers and rules on the table and every partition or child
 SELECT tgrelid::regclass, tgname, tgenabled FROM pg_catalog.pg_trigger
- WHERE NOT tgisinternal AND tgenabled <> 'D'
-   AND tgrelid IN (SELECT relid FROM pg_catalog.pg_partition_tree('public.customer'));
+ WHERE NOT tgisinternal AND tgenabled <> 'D' AND tgrelid IN (SELECT relid FROM fam);
 SELECT ev_class::regclass, rulename FROM pg_catalog.pg_rewrite
- WHERE rulename <> '_RETURN'
-   AND ev_class IN (SELECT relid FROM pg_catalog.pg_partition_tree('public.customer'));
--- publications carrying the table, with their column lists (NULL: every column)
-SELECT p.pubname, p.pubupdate, t.attrs
+ WHERE rulename <> '_RETURN' AND ev_class IN (SELECT relid FROM fam);
+-- publications carrying the table or any member of its family (a partitioned table published
+-- without publish_via_partition_root is reported as its partitions), with their column lists
+-- (NULL: every column)
+SELECT p.pubname, p.pubupdate, t.relid::regclass, t.attrs
   FROM pg_catalog.pg_publication p, pg_catalog.pg_get_publication_tables(p.pubname::text) t
- WHERE t.relid = 'public.customer'::regclass;
+ WHERE t.relid IN (SELECT relid FROM fam);
 -- logical slots of this database that decode without a publication
 SELECT slot_name, plugin, active FROM pg_catalog.pg_replication_slots
  WHERE slot_type = 'logical' AND database = current_database() AND plugin <> 'pgoutput';
--- foreign keys on the column, either side
+-- foreign keys on the table or any member of its family, either side
 SELECT conname, conrelid::regclass, confrelid::regclass FROM pg_catalog.pg_constraint
  WHERE contype = 'f'
-   AND (conrelid = 'public.customer'::regclass OR confrelid = 'public.customer'::regclass);
--- leftover audit or history tables holding a column of the index's name
-SELECT attrelid::regclass FROM pg_catalog.pg_attribute
- WHERE attname = 'email_idx' AND attrelid <> 'public.customer'::regclass AND NOT attisdropped;
+   AND (conrelid IN (SELECT relid FROM fam) OR confrelid IN (SELECT relid FROM fam));
+-- leftover audit or history tables holding a column of the index's name (ordinary tables
+-- outside the family; a materialized view is found by the dependents query above)
+SELECT a.attrelid::regclass FROM pg_catalog.pg_attribute a
+  JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+ WHERE a.attname = 'email_idx' AND NOT a.attisdropped AND c.relkind = 'r'
+   AND a.attrelid NOT IN (SELECT relid FROM fam);
 ```
 
 A materialized view over the column is found with the dependents query above (a `_RETURN` rule of
 a relation whose `relkind` is `m`).
 
-`pg_partition_tree` covers partitions; for legacy inheritance children list them from
-`pg_inherits`. An index or statistics object whose definition does not mention the blind-index
+The `fam` table lists partitions and legacy inheritance children at any depth, so the queries above
+cover both; it vanishes with the session. An index or statistics object whose definition does not mention the blind-index
 column, and a dependent that is an index or a constraint, are not in the way.
+
+Mapping checks for question 5, run as the runtime role (substitute its name; both of the last two
+columns must be true, and `rowsecurity` false unless `bypassrls` is true):
+
+```sql
+SELECT c.relrowsecurity AS rowsecurity, c.relforcerowsecurity AS forced, r.rolbypassrls AS bypassrls,
+       pg_catalog.has_table_privilege(r.oid, c.oid, 'SELECT') AS can_select,
+       pg_catalog.has_table_privilege(r.oid, c.oid, 'UPDATE') AS can_update
+  FROM pg_catalog.pg_class c, pg_catalog.pg_roles r
+ WHERE c.oid = 'public.customer'::regclass AND r.rolname = '<runtime role>';
+```
 
 Each mapped table with a blind index must have no parent:
 
