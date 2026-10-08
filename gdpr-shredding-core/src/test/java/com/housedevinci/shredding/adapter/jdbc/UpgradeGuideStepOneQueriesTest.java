@@ -52,12 +52,17 @@ class UpgradeGuideStepOneQueriesTest {
     "ANALYZE customer_p1"
   };
 
-  /** Legacy inheritance: parent "legacy", child "legacy_c" (a different attnum for email_idx). */
+  /**
+   * Legacy inheritance: parent "legacy" (email_idx is attnum 2), child "legacy_c" created standalone
+   * with three extra columns first and attached with INHERIT, so its email_idx is attnum 5. The view
+   * "mvlk" reads the child's attnum 2 column (a2), the parent's email_idx position: a lookup that
+   * resolves the attnum on the parent would list it wrongly and miss "mvlc".
+   */
   private static final String[] LEGACY_FIXTURE = {
     "CREATE TABLE legacy (id int, email_idx text, k int)",
-    "CREATE TABLE legacy_c (extra int) INHERITS (legacy)",
-    "ALTER TABLE legacy_c DROP COLUMN extra",
-    "INSERT INTO legacy_c SELECT g, 'v' || g, 1 FROM generate_series(1, 200) g",
+    "CREATE TABLE legacy_c (a1 int, a2 int, a3 int, id int, email_idx text, k int)",
+    "ALTER TABLE legacy_c INHERIT legacy",
+    "INSERT INTO legacy_c (id, email_idx, k) SELECT g, 'v' || g, 1 FROM generate_series(1, 200) g",
     "CREATE INDEX ON legacy_c (lower(email_idx))",
     "CREATE STATISTICS st2 ON id, email_idx FROM legacy_c",
     "CREATE PUBLICATION pub2 FOR TABLE legacy_c",
@@ -67,6 +72,7 @@ class UpgradeGuideStepOneQueriesTest {
     "CREATE TABLE legacy_aud (email_idx text)",
     "CREATE MATERIALIZED VIEW mvl AS SELECT email_idx FROM legacy",
     "CREATE MATERIALIZED VIEW mvlc AS SELECT email_idx FROM legacy_c",
+    "CREATE MATERIALIZED VIEW mvlk AS SELECT a2 FROM legacy_c",
     "ANALYZE legacy",
     "ANALYZE legacy_c"
   };
@@ -102,6 +108,7 @@ class UpgradeGuideStepOneQueriesTest {
         .contains("legacy_aud|")
         .contains("materialized view mvl|")
         .contains("materialized view mvlc|"); // C-32-8, C-32-9
+    assertThat(all).doesNotContain("materialized view mvlk|"); // decoy at the parent's attnum
   }
 
   private static List<String> run(String[] fixture, String table) throws Exception {
