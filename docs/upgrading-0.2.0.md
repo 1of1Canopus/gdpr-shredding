@@ -275,10 +275,10 @@ SELECT stxrelid::regclass, stxname FROM pg_catalog.pg_statistic_ext
  WHERE stxrelid IN (SELECT relid FROM fam);
 -- what depends on the column (views, policies, generated columns): decides step 3a's shape
 SELECT pg_catalog.pg_describe_object(d.classid, d.objid, d.objsubid) FROM pg_catalog.pg_depend d
+  JOIN pg_catalog.pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
  WHERE d.refclassid = 'pg_catalog.pg_class'::regclass
-   AND d.refobjid = 'public.customer'::regclass AND d.deptype <> 'i'
-   AND d.refobjsubid = (SELECT attnum FROM pg_catalog.pg_attribute
-                         WHERE attrelid = 'public.customer'::regclass AND attname = 'email_idx');
+   AND d.refobjid IN (SELECT relid FROM fam) AND d.deptype <> 'i'
+   AND a.attname = 'email_idx';
 ```
 
 Then list the copies 0.2.0 refuses (`SHRED-SCHEMA-010`), each non-empty result a finding (the

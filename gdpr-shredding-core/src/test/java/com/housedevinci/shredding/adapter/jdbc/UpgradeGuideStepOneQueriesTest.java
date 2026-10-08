@@ -47,12 +47,64 @@ class UpgradeGuideStepOneQueriesTest {
     "CREATE RULE rl AS ON INSERT TO customer_p1 DO ALSO NOTHING",
     "CREATE TABLE customer_aud (email_idx text)",
     "CREATE MATERIALIZED VIEW mv AS SELECT email_idx FROM customer",
+    "CREATE MATERIALIZED VIEW mvc AS SELECT email_idx FROM customer_p1",
     "ANALYZE customer",
     "ANALYZE customer_p1"
   };
 
+  /** Legacy inheritance: parent "legacy", child "legacy_c" (a different attnum for email_idx). */
+  private static final String[] LEGACY_FIXTURE = {
+    "CREATE TABLE legacy (id int, email_idx text, k int)",
+    "CREATE TABLE legacy_c (extra int) INHERITS (legacy)",
+    "ALTER TABLE legacy_c DROP COLUMN extra",
+    "INSERT INTO legacy_c SELECT g, 'v' || g, 1 FROM generate_series(1, 200) g",
+    "CREATE INDEX ON legacy_c (lower(email_idx))",
+    "CREATE STATISTICS st2 ON id, email_idx FROM legacy_c",
+    "CREATE PUBLICATION pub2 FOR TABLE legacy_c",
+    "CREATE FUNCTION tf() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$",
+    "CREATE TRIGGER tr2 AFTER INSERT ON legacy_c FOR EACH ROW EXECUTE FUNCTION tf()",
+    "CREATE RULE rl2 AS ON INSERT TO legacy_c DO ALSO NOTHING",
+    "CREATE TABLE legacy_aud (email_idx text)",
+    "CREATE MATERIALIZED VIEW mvl AS SELECT email_idx FROM legacy",
+    "CREATE MATERIALIZED VIEW mvlc AS SELECT email_idx FROM legacy_c",
+    "ANALYZE legacy",
+    "ANALYZE legacy_c"
+  };
+
   @Test
   void the_step_one_queries_find_the_copies_on_the_partition() throws Exception {
+    String all = String.join("\n", run(FIXTURE, "customer"));
+    assertThat(all)
+        .contains("customer_p1|email_idx|-1") // statistics target on the partition
+        .contains("public|customer_p1|email_idx|f") // pg_stats on the partition
+        .contains("customer_p1_lower_idx") // expression index on the partition
+        .contains("customer_p1|st1") // extended statistics on the partition
+        .contains("customer_p1|tr|O") // trigger
+        .contains("customer_p1|rl") // rule
+        .contains("pub|t|customer_p1|") // publication reports the partition
+        .contains("customer_aud|") // leftover table
+        .contains("materialized view mv|") // dependents: view over the root
+        .contains("materialized view mvc|"); // dependents: view over the partition (C-32-8)
+  }
+
+  @Test
+  void the_step_one_queries_find_the_copies_on_the_inheritance_child() throws Exception {
+    List<String> found = run(LEGACY_FIXTURE, "legacy");
+    String all = String.join("\n", found);
+    assertThat(all)
+        .contains("legacy_c|email_idx|-1")
+        .contains("public|legacy_c|email_idx|f")
+        .contains("legacy_c_lower_idx")
+        .contains("legacy_c|st2")
+        .contains("legacy_c|tr2|O")
+        .contains("legacy_c|rl2")
+        .contains("pub2|t|legacy_c|")
+        .contains("legacy_aud|")
+        .contains("materialized view mvl|")
+        .contains("materialized view mvlc|"); // C-32-8, C-32-9
+  }
+
+  private static List<String> run(String[] fixture, String table) throws Exception {
     String guide = Files.readString(Path.of("..", "docs", "upgrading-0.2.0.md"));
     String step = guide.substring(guide.indexOf("### 1. Record"), guide.indexOf("### 2. Move"));
     List<String> statements = new ArrayList<>();
@@ -60,7 +112,10 @@ class UpgradeGuideStepOneQueriesTest {
     while (m.find()) {
       for (String s : m.group(1).replaceAll("(?m)^--.*$", "").split(";")) {
         if (!s.isBlank()) {
-          statements.add(s.trim().replace("<runtime role>", POSTGRES.getUsername()));
+          statements.add(
+              s.trim()
+                  .replace("<runtime role>", POSTGRES.getUsername())
+                  .replace("public.customer", "public." + table));
         }
       }
     }
@@ -71,7 +126,7 @@ class UpgradeGuideStepOneQueriesTest {
       st.execute("DROP SCHEMA IF EXISTS public CASCADE");
       st.execute("CREATE SCHEMA public");
       st.execute("SET search_path = public");
-      for (String f : FIXTURE) {
+      for (String f : fixture) {
         st.execute(f);
       }
       List<String> found = new ArrayList<>();
@@ -91,18 +146,9 @@ class UpgradeGuideStepOneQueriesTest {
           }
         }
       }
-      String all = String.join("\n", found);
-      assertThat(all)
-          .contains("customer_p1|email_idx|-1") // statistics target on the partition
-          .contains("public|customer_p1|email_idx|f") // pg_stats on the partition
-          .contains("customer_p1_lower_idx") // expression index on the partition
-          .contains("customer_p1|st1") // extended statistics on the partition
-          .contains("customer_p1|tr|O") // trigger
-          .contains("customer_p1|rl") // rule
-          .contains("pub|t|customer_p1|") // publication reports the partition
-          .contains("customer_aud|"); // leftover table
       // the leftover-table query names neither the partition nor the view
-      assertThat(found).contains("customer_aud|\n");
+      assertThat(found).contains(table + "_aud|\n");
+      return found;
     }
   }
 }
