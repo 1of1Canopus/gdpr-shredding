@@ -53,10 +53,10 @@ class UpgradeGuideStepOneQueriesTest {
   };
 
   /**
-   * Legacy inheritance: parent "legacy" (email_idx is attnum 2), child "legacy_c" created standalone
-   * with three extra columns first and attached with INHERIT, so its email_idx is attnum 5. The view
-   * "mvlk" reads the child's attnum 2 column (a2), the parent's email_idx position: a lookup that
-   * resolves the attnum on the parent would list it wrongly and miss "mvlc".
+   * Legacy inheritance: parent "legacy" (email_idx is attnum 2), child "legacy_c" created
+   * standalone with three extra columns first and attached with INHERIT, so its email_idx is attnum
+   * 5. The view "mvlk" reads the child's attnum 2 column (a2), the parent's email_idx position: a
+   * lookup that resolves the attnum on the parent would list it wrongly and miss "mvlc".
    */
   private static final String[] LEGACY_FIXTURE = {
     "CREATE TABLE legacy (id int, email_idx text, k int)",
