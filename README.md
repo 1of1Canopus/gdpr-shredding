@@ -1,5 +1,7 @@
 # GDPR Shredding
 
+**Upgrading to 0.2.0?** Start with [Will 0.2.0 start on my schema? Ten questions](docs/upgrading-0.2.0.md): ten yes/no checks, each with its refusal code and a one-line remedy.
+
 **GDPR erasure without deleting a row? Crypto-shredding for Spring Boot and JPA.**
 
 When a person asks to be forgotten, GDPR says delete. Audit, accounting and AML rules say keep.
