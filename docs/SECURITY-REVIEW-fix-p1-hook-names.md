@@ -34,7 +34,7 @@ on 8134d70: `probe_length_prefix_ending_inside_a_code_point_is_accepted`,
 `probe_length_prefix_longer_than_the_material_is_accepted`,
 `probe_non_canonical_length_digits_are_accepted`; two regression tests green.
 
-Fix (Isis, correction only): in `JdbcErasureStore.decodeHooks`, refuse the length text unless it
+Fix (the fix pass, correction only): in `JdbcErasureStore.decodeHooks`, refuse the length text unless it
 matches `0|[1-9][0-9]*` before parsing, and after the byte loop throw
 `ShreddingException(ErrorCodes.INVALID, "hook_outcomes is not in canonical form")` when
 `seen != byteLength`. Add the probe file to `gdpr-shredding-core/src/test/.../adapter/jdbc/` first.
