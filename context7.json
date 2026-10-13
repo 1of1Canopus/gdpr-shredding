@@ -1,0 +1,24 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "projectTitle": "GDPR Shredding",
+  "description": "Crypto-shredding for Spring Boot and JPA. Each data subject's personal fields are encrypted under that subject's own key, and destroying the key makes the data unreadable. The row, its foreign keys and the audit trail survive.",
+  "folders": [
+    "docs"
+  ],
+  "excludeFolders": [
+    "target",
+    ".github",
+    "tools",
+    "scripts",
+    ".mvn"
+  ],
+  "excludeFiles": [
+    "CONTRIBUTING.md"
+  ],
+  "rules": [
+    "Maven coordinate: com.housedevinci:gdpr-shredding-spring-boot-starter, current version 0.2.0.",
+    "This is pseudonymisation with key destruction, never unqualified erasure; whether it satisfies a given erasure request is the DPO's call.",
+    "Data keys are random, never derived from the master key.",
+    "A key-store outage is not an erasure."
+  ]
+}
