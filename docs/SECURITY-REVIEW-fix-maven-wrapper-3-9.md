@@ -31,7 +31,7 @@ its own PR and blocks the next release tag, not this merge.
 **W1-a (MEDIUM) - the probe un-weakens on any 1.x plugin, against its own rule.**
 Repro (function sourced against fixture files): wrapper 3.10.0 + plugin 1.0.0 -> FIXED;
 3.10.0 + 2.0.0 -> FIXED. The comment says "revisit when a plugin version documents support",
-but the code clears the weakness on a major bump nobody verified. Fix (Isis,
+but the code clears the weakness on a major bump nobody verified. Fix (the fix pass,
 tools/cipher-probe-release-pipeline.sh): add `FIRST_CENTRAL_PUBLISHING_SUPPORTING_MAVEN_3_10=""`
 next to the probe; WEAK when wrapper >= 3.10 and (the constant is empty, or plugin version
 sorts below it with `sort -V`). Comment states: set only with a link to the plugin release
@@ -66,7 +66,7 @@ listing. Property that must hold: no bundle reaches the Portal unless every entr
 and every published coordinate has its pom, jar(s) and signatures. Paths it must cover: CI on
 every pull request (bundle assembled without upload), and the release job before the upload.
 Note: `-Dcentral.skipPublishing=true` did not stop the upload attempt in this run; the
-no-upload switch is part of the design. Thor writes the design page; Cipher reviews it; own
+no-upload switch is part of the design. The builder writes the design page; the security reviewer reviews it; own
 PR. Required before the next release tag.
 
 ### What this PR cannot prove
@@ -138,7 +138,7 @@ blocking this verdict per brief.
 "supports 3.10" once the constant is set.** Latent today (constant empty), live the day it is
 filled in. Repro: rows `1.2.0-SNAPSHOT` and `${x}` above (`sort -V` orders `1.2.0` before both).
 The function's own rule is "unreadable is weak", and it already applies that to the wrapper
-version but not to the plugin version. Fix (Isis), `tools/cipher-probe-release-pipeline.sh`,
+version but not to the plugin version. Fix (the fix pass), `tools/cipher-probe-release-pipeline.sh`,
 `probe_maven_wrapper_is_compatible_with_central_publishing`: after `plugin=` read, require
 `[[ "$plugin" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 0` (release versions only; a property
 reference or qualifier is weak). Probe: `probe_w1_accepts_unparsed_plugin_version`.
@@ -146,7 +146,7 @@ reference or qualifier is weak). Probe: `probe_w1_accepts_unparsed_plugin_versio
 **C-30-2 (INFO). The wrapper version comes from the last `apache-maven-X-bin.zip` text in the
 URL, not from the path mvnw downloads.** Repro: the fragment row above reads FIXED while the
 download is 3.10.0. A Dependabot bump never produces this shape, but the fix is one line and
-it completes W1-b's "strict parse". Fix (Isis), same function: replace the `sed` extraction
+it completes W1-b's "strict parse". Fix (the fix pass), same function: replace the `sed` extraction
 with a full-match on `^https://repo\.maven\.apache\.org/maven2/org/apache/maven/apache-maven/([^/]+)/apache-maven-([^/]+)-bin\.zip$`
 via `[[ =~ ]]`, require `BASH_REMATCH[1] == BASH_REMATCH[2]`, then apply the existing semver
 check; anything else returns 0. Probe: `probe_w1_reads_version_from_url_suffix_not_path`.

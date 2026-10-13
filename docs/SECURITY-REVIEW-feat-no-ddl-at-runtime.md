@@ -183,7 +183,7 @@ the script's advisory lock and must not be made read-only; state that difference
 ## C-13-5 (INFO) - an agent name in public text
 
 `gdpr-shredding-core/src/main/resources/com/housedevinci/shredding/schema-postgresql.sql:13` reads
-"Module B, Cipher findings J1 and K1". Public text carries roles, never agent names; finding ids and
+"Module B, <agent name> findings J1 and K1". Public text carries roles, never agent names; finding ids and
 technical detail stay. Pre-existing on `main`, in a file this PR modifies, so it is fixed here rather
 than rediscovered at the release pass.
 
@@ -1006,7 +1006,7 @@ char(3)` then `'abcdefgh'::text` -> `abc`, silently, with `pg_typeof` still prin
 Fix: remove the six from `GRAMMAR_TYPES` and keep only the spellings that are productions in
 `gram.y` (`varchar`, `char`, `character`, `numeric`, `decimal`, `bit`, `time`, `timestamp`,
 `interval`, `boolean`, `bigint`, `smallint`, `integer`, `int`, `real`, `double`). Test
-`probe_the_gate_allows_unqualified_casts_to_shadowable_type_names`. Routing: Thor, the run that
+`probe_the_gate_allows_unqualified_casts_to_shadowable_type_names`. Routing: the builder, the run that
 built the gate.
 
 **C-A-2 (MEDIUM) - the same six names are allowed in function-call position.**
@@ -1017,7 +1017,7 @@ function calls resolved along `search_path`, which is the function-syntax cast t
 The gate returns zero refusals for `SELECT text(relname) FROM pg_catalog.pg_class` and for
 `SELECT int8(relpages) FROM pg_catalog.pg_class`. Fix: the same removal as C-A-1 closes both; the
 length-modifier allowance must be keyed on the token being a `gram.y` production, never on a type
-name. Test `probe_the_gate_allows_function_syntax_casts_to_shadowable_type_names`. Routing: Thor.
+name. Test `probe_the_gate_allows_function_syntax_casts_to_shadowable_type_names`. Routing: the builder.
 
 **C-A-3 (LOW) - `isDdlObjectName` is a fixed six-token lookback, so an index expression is read as
 the object being created.** `CREATE INDEX i ON t (lower(c))` returns zero refusals: scanning back
@@ -1026,7 +1026,7 @@ the index expression is treated as a name being created rather than a name being
 bundled script survives only because `CREATE INDEX IF NOT EXISTS` pushes `index` out of the
 window - an accident of token count, not a rule. Fix: decide the DDL-object position by the token
 immediately after the object-type keyword, not by proximity. Test
-`probe_the_gate_allows_an_unqualified_function_inside_a_create_index_expression`. Routing: Thor.
+`probe_the_gate_allows_an_unqualified_function_inside_a_create_index_expression`. Routing: the builder.
 
 **C-A-4 (LOW) - `isAssignment` accepts any `=` with an identifier to its left while the lexer
 believes it is inside a SET clause.** `UPDATE "s"."t" SET a = (b = c)` returns zero refusals: the
@@ -1034,7 +1034,7 @@ inner `=` is a resolvable operator and is read as a second assignment target. Th
 `SET encryption_count = (encryption_count OPERATOR(pg_catalog.+) ?)` is qualified, so nothing is
 live; the gate exists to catch the edit that is not. Fix: an assignment is the first `=` after a
 SET-clause target at depth 0 of the clause, and a `=` inside parentheses is never one. Test
-`probe_the_gate_allows_an_unqualified_equals_inside_a_set_clause_expression`. Routing: Thor.
+`probe_the_gate_allows_an_unqualified_equals_inside_a_set_clause_expression`. Routing: the builder.
 
 **C-A-5 (MEDIUM) - the gate's relation leg cannot fire on anything this module actually emits, and
 it reports the three section-3.4 statements clean.** `checkRelationPosition` returns early unless
@@ -1055,7 +1055,7 @@ qualified. It is MEDIUM because the gate does claim it - `SqlSites`'s own doc sa
 not catch the next relation that drifts either. Fix: lex `QUOTED_IDENT` and `HOLE` in relation
 position too, and until section 3.2 lands, record the three starter sites as named open refusals
 beside `IS DISTINCT FROM` rather than reporting them clean. Test
-`probe_the_gate_never_refuses_a_quoted_unqualified_relation`. Routing: Thor.
+`probe_the_gate_never_refuses_a_quoted_unqualified_relation`. Routing: the builder.
 
 **C-A-6 (LOW) - the one allowlisted open refusal is a deferral, and this house does not defer.**
 `NameQualificationGateTest` carries an exact-match allowance for
@@ -1065,7 +1065,7 @@ severity is LOW; the rule is not. A control with an allowlisted hole is "will fi
 test around it. Fix, in this PR: the tenant column is nullable, so a bare
 `OPERATOR(pg_catalog.<>)` is not equivalent - write
 `(<tenant> IS NULL OR NOT (<tenant> OPERATOR(pg_catalog.=) ?))` and delete the allowance, leaving
-`NameQualificationGateTest` asserting an empty refusal set. Routing: Isis, a correction.
+`NameQualificationGateTest` asserting an empty refusal set. Routing: the fix pass, a correction.
 
 **C-A-7 (INFO) - scope drift, stated for the coordinator.** The design's section 12 assigns
 section 2, 5 and 6 to PR A and sections 3, 3.4 and 3.5 to PR B. This PR carries sections 3, 3.4
@@ -1077,7 +1077,7 @@ mechanism.
 **C-A-8 (INFO) - the test tree uses the spelling C-A-1 shows is resolvable.**
 `SchemaVerificationTest:1552` and `CipherProbeNamePr13eTest:633` read
 `p.proconfig::text`. Tests are outside the gate's scan and nothing is exposed, but the house
-spelling should be uniform: `::pg_catalog.text`. Routing: Isis.
+spelling should be uniform: `::pg_catalog.text`. Routing: the fix pass.
 
 ### Attacked, clean
 
@@ -1173,7 +1173,7 @@ asserts `containsExactlyElementsOf`, so a tenth relation or any other rule class
 
 ### The carry decision: ACCEPTED, with one condition and one missing assertion
 
-Dollar's decision to carry the nine relation refusals rather than land section 3.2 here is accepted,
+The maintainer's decision to carry the nine relation refusals rather than land section 3.2 here is accepted,
 and the grounds are not "115 fixture files".
 
 What makes it acceptable: the nine are **exact refusals**, not a file, line or extension allowance -
@@ -1199,7 +1199,7 @@ the day section 3.2 lands the gate fails until the nine are deleted. Severity LO
 **No probe, stated with the attempt:** the defect is the absence of an assertion, and an assertion
 that does not exist cannot be made red before it is written. A test that greps the gate's own source
 for the missing assertion is not a probe, by the same rule that refuses a workflow probe which only
-greps the YAML. Routing: Isis, one assertion.
+greps the YAML. Routing: the fix pass, one assertion.
 
 ### Findings
 
@@ -1230,7 +1230,7 @@ consequence is drift, the same ground C-A-3 and C-A-4 were ruled on. Fix: delete
 close the class rather than the five names - one container test asserting that every name in
 `GRAMMAR_TYPES` and every name `checkFunctionCall` allows has catcode `C` in `pg_get_keywords()`, so
 a hand-maintained list can no longer be wrong. Test
-`probe_the_allowlists_still_carry_names_the_server_resolves`. Routing: Thor, the run that built the
+`probe_the_allowlists_still_carry_names_the_server_resolves`. Routing: the builder, the run that built the
 gate (the allowance's membership rule is the mechanism, not a correction).
 
 **C-A-10 (LOW) - the relation leg reads only the first entry of a `FROM` list, on a shape the module
@@ -1254,7 +1254,7 @@ has all three entries qualified, no statement uses `ONLY`, `USING`, `TRUNCATE` o
 position from the clause rather than from one token - every entry of a `FROM` or `USING` list at the
 clause's own depth, and skip the grammar's own modifiers (`ONLY`, `LATERAL`) rather than returning
 early on them - and add `TRUNCATE` and the `LOCK … TABLE` spellings. Test
-`probe_the_relation_leg_reads_only_the_first_entry_of_a_from_list`. Routing: Thor.
+`probe_the_relation_leg_reads_only_the_first_entry_of_a_from_list`. Routing: the builder.
 
 **C-A-11 (LOW) - two name positions the gate reads no evidence about.** `checkTypeName` returns on
 `Kind.HOLE` with no comment and without the `QUALIFIED_HOLE` distinction the relation leg now makes,
@@ -1269,7 +1269,7 @@ name no operator class - so LOW on the same ground as C-A-9 and C-A-10. Fix: acc
 `QUALIFIED_HOLE` in a type position, with the same one-line reason the relation leg carries, and
 refuse an unqualified operator-class name after an index column. Test
 `probe_a_hole_in_a_type_position_and_an_operator_class_are_accepted_without_evidence`. Routing:
-Thor.
+The builder.
 
 **C-A-12 (INFO) - SECURITY-NOTES documents a residual the code no longer has, and names the wrong
 failure direction.** `SECURITY-NOTES.md` lines 941-946, under "What is still resolved by a session",
@@ -1282,7 +1282,7 @@ and one NULL tenant among three rows, the keyword form answered 0 where the hone
 line would draw the wrong conclusion about what to monitor. Fix: delete the bullet, or restate it as
 closed by the rewrite with the measured direction. Test
 `probe_security_notes_names_a_residual_the_code_no_longer_has`, which also asserts by code that no
-main source spells the keyword form any more. Routing: Isis.
+main source spells the keyword form any more. Routing: the fix pass.
 
 **C-A-13 (INFO) - the gate's starter file list is two hard-coded names and nothing asserts it is
 closed.** `sources()` walks the core `adapter/jdbc` package - so "a new adapter file is covered the
@@ -1297,10 +1297,10 @@ made red without adding a production file, which I do not do. Fix: walk the `aut
 the same way the core package is walked, and assert that every `.java` file under either `src/main`
 containing one of those tokens is in the scanned list; add `prepareCall` to
 `SqlSites.STATEMENT_CALLS` while there (it is unused today and is the one JDBC entry point the set
-omits). Routing: Isis.
+omits). Routing: the fix pass.
 
 **C-A-14 (LOW) - the carry has no expiry.** Stated in full under the carry decision above. Routing:
-Isis.
+The fix pass.
 
 ### Attacked on this head, clean
 
@@ -1346,7 +1346,7 @@ The conditions for the merge, each mechanical rather than a judgement:
 2. The five tests of `CipherProbeNamePr13fGateTest` and `NameQualificationGateTest`'s 23 still
    green, and `OPEN_REFUSALS` still exactly the nine.
 3. The 465 unchanged with nothing skipped, plus the new probes.
-4. Verified by Ra's numbers, not by a third Cipher pass.
+4. Verified by the verifier's numbers, not by a third security review pass.
 
 And the condition on the next PR, which is the carry's price: **PR 18 is NOT MERGEABLE unless
 `OPEN_REFUSALS` is empty and `SqlSites.QUALIFYING_CALLS` contains `sql`.**
