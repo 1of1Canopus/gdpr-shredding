@@ -13,7 +13,17 @@
     ".mvn"
   ],
   "excludeFiles": [
-    "CONTRIBUTING.md"
+    "CONTRIBUTING.md",
+    "SECURITY-REVIEW-feat-acknowledged-copies.md",
+    "SECURITY-REVIEW-feat-audit-table-coverage.md",
+    "SECURITY-REVIEW-feat-mapping-admission.md",
+    "SECURITY-REVIEW-feat-no-ddl-at-runtime.md",
+    "SECURITY-REVIEW-feat-read-back-bracket.md",
+    "SECURITY-REVIEW-feat-statistics-admission.md",
+    "SECURITY-REVIEW-fix-maven-wrapper-3-9.md",
+    "SECURITY-REVIEW-fix-p1-hook-names.md",
+    "SECURITY-REVIEW-rc-0.2.0.md",
+    "SECURITY-REVIEW-rc2-0.2.0.md"
   ],
   "rules": [
     "Maven coordinate: com.housedevinci:gdpr-shredding-spring-boot-starter, current version 0.2.0.",
