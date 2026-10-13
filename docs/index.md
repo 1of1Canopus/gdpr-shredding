@@ -496,7 +496,7 @@ application that is merely returning erased values.
 | Master-key rotation and re-wrap job, key escrow policy | - | yes |
 | Per-tenant master keys | - | yes |
 | Erasure workflow: intake, identity verification, grace period | - | yes |
-| Proof-of-erasure PDF/HTML for the DPO | - | yes |
+| Erasure record PDF/HTML for the DPO | - | yes |
 | Admin UI: subjects, keys, erasure log, verification endpoint | - | yes |
 | Retention rules (auto-erase after N days) | - | yes |
 | Batch migrator for existing plaintext columns | - | yes |

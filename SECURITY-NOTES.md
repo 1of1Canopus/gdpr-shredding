@@ -31,7 +31,7 @@ put the master key somewhere the same person cannot reach (a KMS, which is a Pro
 A base backup taken before the erasure holds the wrapped key. So does every WAL segment covering
 the period, every streaming replica that has not caught up, and every logical-decoding slot.
 The erasure is complete **only at `erasedAt + shredding.erasure.backup-retention`**, and the
-erasure record states that date so the proof of erasure can print it. Set that property to your
+erasure record states that date so the erasure record can print it. Set that property to your
 real retention, not to a number that reads well.
 
 ### MVCC dead tuples
@@ -48,7 +48,7 @@ before the wipe. Disable heap dumps on production, or treat a heap dump as perso
 ### Cache window across a cluster
 Erasure evicts the local unwrapped-key cache immediately and publishes an invalidation, but another
 node can hold the key for up to `shredding.data-key-cache.ttl` (default 60s). That window is real.
-The proof of erasure states it. Shorten the TTL if 60 seconds is too long for you; there is no
+The erasure record states it. Shorten the TTL if 60 seconds is too long for you; there is no
 setting that makes it zero on every node at once.
 
 ### The blind index
@@ -703,7 +703,7 @@ never supplied by configuration or by a request. This is recorded so that nobody
 subject or tenant expression from an external source - configuration, a request parameter, a
 plugin - without revisiting this control (I1).
 
-### What a proof of erasure attests
+### What an erasure record attests
 That a key was destroyed and when, chained and anchored so a later rewrite is detectable. It does
 **not** attest that no plaintext copy exists in an application log, a CSV export, a search index, a
 support ticket or a PDF the application itself produced. Those are the application's problem, and
