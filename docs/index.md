@@ -437,7 +437,7 @@ An erasure evicts the local unwrapped-key cache immediately. It does **not** pub
 invalidation in the free core, so another node may still read the erased subject's data for up to
 `shredding.data-key-cache.ttl` (default 60s). That window is documented here, appears in
 `SECURITY-NOTES.md`, and is implied by the `completeInBackupsAt` date the erasure record carries.
-Cluster-wide invalidation ships in Pro alongside the KMS adapters.
+Cluster-wide invalidation would come in a paid edition, alongside the KMS adapters.
 
 ## What fails at startup
 
@@ -486,9 +486,9 @@ The health contributor reports `DOWN` when the key store is unreachable, and inc
 log's verifier status. Wire it into readiness: a key store that is down must not look like an
 application that is merely returning erased values.
 
-## Free vs Pro
+## What the free core does, and what a paid edition would add
 
-| | Free core | Pro |
+| | Free core | Paid edition (planned) |
 |---|---|---|
 | Envelope encryption, per-subject keys, erasure, erasure log | yes | yes |
 | `JdbcKeyProvider` (keys table, master key from the environment) | yes | yes |
@@ -542,7 +542,7 @@ residual risks are listed in `SECURITY-NOTES.md`; read them before you answer th
 pointing at it survive; only the key does not.
 
 **What if I lose the master key?** Every subject is erased. Back the key store up separately from
-the data, or use a KMS (Pro).
+the data, or use a KMS (planned for a paid edition).
 
 **Can I search an encrypted column?** By equality, through `@BlindIndex`, with the caveats above.
 Range and prefix queries are not possible and will not be added: they leak order.

@@ -22,7 +22,7 @@ in `docs/index.md`.
 Fair source (FSL-1.1-ALv2): free to use for any purpose except a Competing Use - offering a
 commercial product or service that substitutes for this one, substitutes for anything we offer
 using it, or has the same or substantially similar functionality - becomes
-Apache-2.0 two years after each release. Pro edition under a separate commercial licence.
+Apache-2.0 two years after each release. A paid edition, if released, would be under a separate commercial licence.
 Java 21, Spring Boot 4.1, PostgreSQL. **Zero crypto dependencies**: AES-256-GCM,
 HMAC-SHA-256 and a hand-written HKDF checked against the RFC 5869 vectors, all from the JDK.
 
@@ -168,12 +168,12 @@ step 3a).
 | `gdpr-shredding-spring-boot-starter` | Auto-configuration, Hibernate converters and write-path listeners, startup refusals, actuator |
 | `gdpr-shredding-sample` | A customer with an encrypted email and phone, an audit table that keeps `customer_id`, an erasure endpoint |
 
-## Free vs Pro
+## What the free core does, and what a paid edition would add
 
-Free core is everything above. The Pro edition adds Vault / AWS KMS / Azure Key Vault / GCP KMS key
+The free core is everything above and is complete for a single application. A paid edition for teams is planned; it would add Vault / AWS KMS / Azure Key Vault / GCP KMS key
 providers with master-key rotation and re-wrap, per-tenant master keys, the erasure workflow
 (intake, identity verification, grace period, erasure record PDF for the DPO), the admin UI, and
-the resumable batch migrator that encrypts existing plaintext columns.
+the resumable batch migrator that encrypts existing plaintext columns. If you need one of those, write to oss@housedevinci.com and say which.
 
 ## Documentation
 
