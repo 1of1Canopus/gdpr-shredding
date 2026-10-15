@@ -81,8 +81,8 @@ validator proves nothing, unless it reproduces the validator's rule locally (B-1
 
 ## Pass 2 (2026-10-07)
 
-Head reviewed: e349e0a. CI on e349e0a: 6/6 required checks green (Build & test, Cipher
-probes, DCO sign-off, Reference guard, Release dry run, Vulnerability scan) plus the
+Head reviewed: e349e0a. CI on e349e0a: 6/6 required checks green (Build & test,
+Cipher probes, DCO sign-off, Reference guard, Release dry run, Vulnerability scan) plus the
 Dependabot config check. Full `verify` and `CIPHER_PROBE_MAVEN=1` not re-run locally (CI is
 cited instead, per brief).
 

@@ -8,8 +8,8 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
- * P-1 (Cipher delta review of the audit-table design, rev 2, 2026-10-05). An honest hook outcome
- * whose hook name holds a character outside the BMP is written in canonical form by
+ * P-1 (security review, delta pass on the audit-table design, rev 2, 2026-10-05). An honest hook
+ * outcome whose hook name holds a character outside the BMP is written in canonical form by
  * ErasureChain.hookMaterial (UTF-8 byte length) and read back by decodeHooks counting one UTF-16
  * char at a time, so the field boundary is lost and the row decodes as INVALID: the verifier then
  * reports an untampered chain BROKEN. Reachable today: PostErasureHook.name() is caller chosen.

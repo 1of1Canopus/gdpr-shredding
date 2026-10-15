@@ -1611,6 +1611,196 @@ probe_w1_reads_version_from_url_suffix_not_path() {
 probe probe_w1_accepts_unparsed_plugin_version "C-30-1 an unparsed or pre-release plugin version passes the W1 check" probe_w1_accepts_unparsed_plugin_version
 probe probe_w1_reads_version_from_url_suffix "C-30-2 the W1 version is read from the URL suffix, not the downloaded path" probe_w1_reads_version_from_url_suffix_not_path
 
+# ---------------------------------------------------------------------------
+# The reference guard, agent-name group: copied from the reference copy in agent-guard
+# (tools/cipher-probe-release-pipeline.sh there), adapted to this repository's CI layout.
+# ---------------------------------------------------------------------------
+RG=tools/check-private-references.sh
+
+# B-NG-4: same standard as the probe-suite job (N13/N14). Full-line comments are stripped;
+# the job must exist; the job carries no job-level `if:` or `continue-on-error:`; and some
+# step of it has a `run:` value string-EQUAL to the exact command, in a step with no
+# `continue-on-error:` and no `if:` other than exactly `if: success()` (the default).
+# A substring match is fooled by `run: "true" # <command>` and by `<command> || true`.
+_guard_step_wired_unconditionally() { # <workflow> <job id> <exact command>
+  local wf="$1" job="$2" want="$3"
+  [ -f "$wf" ] || return 1
+  grep -vE '^[[:space:]]*#' "$wf" | awk -v job="  $job:" -v want="$want" '
+    function flush() { if (instep && matched && !sguard) found = 1; instep = 0; matched = 0; sguard = 0 }
+    { sub(/[[:space:]]+$/, "") }
+    $0 == job { injob = 1; seen = 1; next }
+    injob && /^  [^ #]/ { flush(); injob = 0 }
+    !injob { next }
+    /^    (if|continue-on-error):/ { jguard = 1 }
+    /^      - / { flush(); instep = 1 }
+    instep {
+      line = $0
+      if (match(line, /^[[:space:]]*(-[[:space:]]+)?run:[[:space:]]*/)) {
+        val = substr(line, RLENGTH + 1)
+        gsub(/^[[:space:]]+/, "", val); gsub(/[[:space:]]+$/, "", val)
+        if (val == want) matched = 1
+      }
+      if (line ~ /^[[:space:]]*(-[[:space:]]+)?continue-on-error:/) sguard = 1
+      if (line ~ /^[[:space:]]*(-[[:space:]]+)?if:/) {
+        cond = line; sub(/^[[:space:]]*(-[[:space:]]+)?if:[[:space:]]*/, "", cond)
+        if (cond != "success()") sguard = 1
+      }
+    }
+    END { flush(); exit((seen && found && !jguard) ? 0 : 1) }'
+}
+
+# ---------------------------------------------------------------------------
+# Security review of the agent-name group, pass 1 (B-NG-1 to B-NG-8). Each probe runs the
+# REAL guard (--tree or --jars, real exit code) against a planted scratch input, never a copy
+# of the regex. Planted names are assembled from fragments so this file stays clean.
+# B-NG-7 (names in file paths are never scanned) is a design stop with its own PR; its probe
+# stays in the internal review folder until then, because a WEAK probe here fails CI.
+# ---------------------------------------------------------------------------
+_ng_tree_red() { # _ng_tree_red <case> <printf %b content>; 0 when the guard refuses the line
+  local base d rc=0
+  base="$(mktemp -d)"; d="$base/$1"; mkdir -p "$d"
+  ( cd "$d" && git init -q . && printf '%b\n' "$2" > doc.md && git add -A )
+  CHECK_PRIVATE_REFERENCES_ROOT="$d" bash "$PWD/$RG" --tree >/dev/null 2>&1 || rc=1
+  rm -rf "$base"
+  [ "$rc" -eq 1 ]
+}
+
+# B-NG-1: a tab, form feed, vertical tab or carriage return before a name hid it.
+probe_reference_guard_name_after_whitespace_control_byte_passes() {
+  [ -f "$RG" ] || return 0
+  local t="Th""or"
+  _ng_tree_red tab "\t$t wrote this" && _ng_tree_red ff "\f$t wrote this" \
+    && _ng_tree_red vt "\v$t wrote this" && _ng_tree_red cr "x\r$t wrote this" && return 1
+  return 0
+}
+
+# B-NG-2: a name after . or / passed, for every name; only the qualified JDK class may.
+probe_reference_guard_name_after_dot_or_slash_passes() {
+  [ -f "$RG" ] || return 0
+  local t="Th""or" c="Ci""pher"
+  _ng_tree_red slash "see docs/$t for the design" && _ng_tree_red root "see /$t" \
+    && _ng_tree_red dot "v1.$t wrote it" && _ng_tree_red url "https://example.org/reviews/$t" \
+    && _ng_tree_red cslash "see docs/$c" && _ng_tree_red ra "e.g.R""a" || return 0
+  _ng_tree_red jdk1 "javax.crypto.$c c;" && return 0
+  _ng_tree_red jdk2 "(Ljava/lang/String;)Ljavax/crypto/$c;" && return 0
+  return 1
+}
+
+# B-NG-3: the check-name carve-out admitted anything that starts with "<name> probe".
+probe_reference_guard_carve_out_admits_other_phrases() {
+  [ -f "$RG" ] || return 0
+  local c="Ci""pher"
+  _ng_tree_red singular "the $c probe found it" && _ng_tree_red probed "$c probed the branch" \
+    && _ng_tree_red verified "$c probe-verified, no findings" || return 0
+  _ng_tree_red check "the $c probes job is required" && return 0
+  return 1
+}
+
+# B-NG-3: widening the carve-out to any " p..." left the self-test green (mutation survivor).
+probe_reference_guard_self_test_misses_a_widened_carve_out() {
+  [ -f "$RG" ] || return 0
+  local m rc
+  m="$(mktemp -d)"; mkdir -p "$m/tools"; cp tools/*.sh "$m/tools/"
+  python3 -I - "$m/tools/check-private-references.sh" <<'PYM'
+import re, sys
+p = sys.argv[1]; s = open(p).read()
+# the carve-out tail runs from "| p$| p[^r]" to the first ")" (it holds no parenthesis)
+s2 = re.sub(r"\| p\$\| p\[\^r\][^)]*\)", ")", s, count=1)
+open(p, "w").write(s2); sys.exit(0 if s2 != s else 3)
+PYM
+  rc=$?
+  [ "$rc" -eq 0 ] || { rm -rf "$m"; return 0; }
+  ( cd "$m" && bash tools/check-private-references.sh --self-test >/dev/null 2>&1 ) && { rm -rf "$m"; return 0; }
+  rm -rf "$m"; return 1
+}
+
+# B-NG-4: the Reference guard job and the jar step could be switched off (job-level if:,
+# a decorated run: line, || true, continue-on-error:) with the suite still green. In this
+# repository the jar half runs in the release-dryrun job of ci.yml.
+probe_reference_guard_is_not_wired_unconditionally() {
+  _guard_step_wired_unconditionally "$CI" reference-guard 'tools/check-private-references.sh --self-test' || return 0
+  _guard_step_wired_unconditionally "$CI" reference-guard 'tools/check-private-references.sh --tree' || return 0
+  return 1
+}
+
+probe_jar_guard_is_not_wired_unconditionally() {
+  _guard_step_wired_unconditionally "$CI" release-dryrun 'tools/check-private-references.sh --jars gdpr-shredding-core gdpr-shredding-spring-boot-starter' || return 0
+  return 1
+}
+
+# Applies each edit to a scratch copy of ci.yml and asserts the wiring probes go WEAK.
+probe_reference_guard_wiring_accepts_a_disabled_job() {
+  local base d rc overall=0 i
+  base="$(mktemp -d)"
+  local -a muts=(
+    's/^  reference-guard:$/  reference-guard:\n    if: false/'
+    's/^        run: tools\/check-private-references.sh --tree$/        run: "true" # tools\/check-private-references.sh --tree/'
+    's/^        run: tools\/check-private-references.sh --tree$/        run: tools\/check-private-references.sh --tree || true/'
+    's/^        run: tools\/check-private-references.sh --self-test$/        continue-on-error: true\n&/'
+    's/^  release-dryrun:$/  release-dryrun:\n    continue-on-error: true/'
+    's/^        run: tools\/check-private-references.sh --jars \(.*\)$/        if: always()\n&/'
+    's/^        run: tools\/check-private-references.sh --jars \(.*\)$/        run: tools\/check-private-references.sh --jars \1 || true/'
+  )
+  for i in "${!muts[@]}"; do
+    d="$base/$i"; mkdir -p "$d"
+    sed "${muts[$i]}" "$CI" > "$d/ci.yml"
+    if cmp -s "$CI" "$d/ci.yml"; then overall=1; continue; fi
+    ( CI="$d/ci.yml"
+      probe_reference_guard_is_not_wired_unconditionally || probe_jar_guard_is_not_wired_unconditionally )
+    rc=$?
+    # rc 1 means both wiring probes still say FIXED on a disabled guard: weakness present.
+    [ "$rc" -eq 0 ] || overall=1
+  done
+  rm -rf "$base"
+  [ "$overall" -ne 0 ]
+}
+
+# B-NG-5: a lower-case agent address (a pasted sign-off trailer) passed.
+probe_reference_guard_lower_case_agent_address_passes() {
+  [ -f "$RG" ] || return 0
+  _ng_tree_red mail "Signed-off-by: th""or <th""or@housedevinci.com>" \
+    && _ng_tree_red mail2 "ask is""is@housedevinci.com" || return 0
+  _ng_tree_red security "security@housedevinci.com" && return 0
+  return 1
+}
+
+# B-NG-6: a name inside a nested archive in a jar was read as compressed bytes and passed.
+probe_reference_guard_nested_archive_in_jar_passes() {
+  [ -f "$RG" ] || return 0
+  local m rc=0
+  m="$(mktemp -d)"; mkdir -p "$m/target"
+  python3 -I - "$m/target/x.jar" "Th""or" <<'PYN'
+import sys, zipfile, io
+out, t = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w", zipfile.ZIP_DEFLATED) as n:
+        n.writestr("notes.txt", ("reviewed by " + t + "\n") * 50)
+    z.writestr("lib/inner.jar", b.getvalue())
+PYN
+  bash "$RG" --jars "$m" >/dev/null 2>&1 || rc=1
+  rm -rf "$m"
+  [ "$rc" -eq 1 ] && return 1
+  return 0
+}
+
+# B-NG-8: the CI step names described the old scope.
+probe_reference_guard_step_names_omit_agent_names() {
+  grep -hE 'name: Refuse .*moved-private' "$CI" | grep -qv 'agent first name' && return 0
+  return 1
+}
+
+probe probe_reference_guard_job_not_wired              "B-NG-4 the Reference guard job is not wired unconditionally"  probe_reference_guard_is_not_wired_unconditionally
+probe probe_jar_guard_step_not_wired                  "B-NG-4 the jar scan step is not wired unconditionally"  probe_jar_guard_is_not_wired_unconditionally
+probe probe_reference_guard_name_after_whitespace       "B-NG-1 a tab, FF, VT or CR before a name hides it"   probe_reference_guard_name_after_whitespace_control_byte_passes
+probe probe_reference_guard_name_after_dot_or_slash       "B-NG-2 a name after . or / passes"                   probe_reference_guard_name_after_dot_or_slash_passes
+probe probe_reference_guard_carve_out_admits_phrases      "B-NG-3 the check-name carve-out admits other phrases"  probe_reference_guard_carve_out_admits_other_phrases
+probe probe_reference_guard_self_test_misses_carve_out    "B-NG-3 a widened carve-out leaves the self-test green"  probe_reference_guard_self_test_misses_a_widened_carve_out
+probe probe_guard_wiring_accepts_a_disabled_job           "B-NG-4 the guard job or the jar step can be switched off"  probe_reference_guard_wiring_accepts_a_disabled_job
+probe probe_reference_guard_lower_case_agent_address      "B-NG-5 a lower-case agent address passes"            probe_reference_guard_lower_case_agent_address_passes
+probe probe_reference_guard_nested_archive_in_jar         "B-NG-6 a name inside a nested archive in a jar passes"  probe_reference_guard_nested_archive_in_jar_passes
+probe probe_reference_guard_step_names_old_scope          "B-NG-8 the CI step names describe the old scope"     probe_reference_guard_step_names_omit_agent_names
+
 echo
 echo "still weak: $pass    fixed: $flipped    error: $errors"
 [ "$pass" -eq 0 ] && [ "$errors" -eq 0 ]
