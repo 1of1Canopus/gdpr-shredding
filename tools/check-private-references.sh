@@ -30,6 +30,8 @@
 #     only the sources and javadoc jars: the main jar is published too.
 #   * Fail closed on an unverifiable scan: `git grep`, `grep` and `unzip` each have their own
 #     exit code that does not mean "no hits", and an error there must refuse, not pass.
+#   * A jar member that is itself an archive (first bytes `PK\x03\x04`) is refused, not
+#     read: its compressed bytes would hide any text in it (B-NG-6). Fail closed.
 #   * The jar side reads every extracted file as text (`grep -a`), like the tree side. GNU
 #     grep, without it, splits a binary file at NUL bytes, so a class-file constant becomes
 #     the start of a "line" and `^` matches inside it.
@@ -38,20 +40,27 @@
 # all three public repositories named the agents who wrote them; public text uses roles only).
 # The second half of the pattern refuses the first names of the studio's agents. It is
 # case-sensitive, so the lower-case words `cipher`, `thor`, `ra` never match. A name counts
-# only as a whole word: the character before it must not be a letter, digit, `_`, `.`, `/`
-# or a control byte, and the character after it must not be a letter, digit or `_`.
-#   - `.` and `/` before a name: a qualified Java name (`javax.crypto.C...` in source,
-#     `javax/crypto/C...` in a class file) is the JDK class, not a person. Code that needs
-#     the JDK cipher class writes it fully qualified.
-#   - A control byte before a name: in a class file every string constant follows a two-byte
-#     length, and a length of 82 is the byte `R`. Measured on stripe-einvoice-core 0.1.0:
-#     an 82-character constant starting with "a " read as the short name. Text never has a
-#     control byte there.
+# only as a whole word: the character before it must be whitespace, or not a letter, digit,
+# `_` or control byte; the character after it must not be a letter, digit or `_`.
+#   - A non-whitespace control byte before a name: in a class file every string constant
+#     follows a two-byte length, and a length of 82 is the byte `R`. Measured on
+#     stripe-einvoice-core 0.1.0: an 82-character constant starting with "a " read as the
+#     short name, behind a high length byte of 0x00. Text never has such a byte there; tab,
+#     form feed, vertical tab and carriage return are text and stay boundaries (B-NG-1).
+#     The self-test case `jar-length-byte-before-a-string` holds this rule.
+#   - The JDK cipher class: the twelfth name may follow `.` or `/` only when the segment
+#     before it is `crypto` (`javax.crypto.C...` in source, `javax/crypto/C...` in a class
+#     file). ERE has no look-behind, so it is written out by hand, one alternative per
+#     letter of `crypto`. The other eleven names have no JDK or library class and get no
+#     dot or slash exemption (B-NG-2).
 #   - The security-probe suite: the required status check on `main` is named after the
 #     reviewing agent ("C... probes"), and test classes are `C...Probe...Test`. The
-#     identifier form fails the word rule by itself. The two-word check name is not refused
-#     (the name followed by " probe"), because renaming a required check is a ruleset
-#     change on GitHub, not a change in this tree. Every other use of that name is refused.
+#     identifier form fails the word rule by itself. The name followed by the exact word
+#     " probes" is not refused, because renaming a required check is a ruleset change on
+#     GitHub, not a change in this tree. "probe", "probed", "probe-verified" and every
+#     other use of that name are refused (B-NG-3).
+#   - The one lower-case form refused is an agent's address, `<name>@housedevinci...`,
+#     as in a pasted sign-off trailer (B-NG-5). The project and security addresses pass.
 # Names deliberately NOT in the pattern, measured with `git grep -n -w` on the three trees
 # and on the published main and sources jars (2026-10-15):
 #   - Max: `@Max` is a Bean Validation annotation in stripe-einvoice (9 hits), and "Max" is
@@ -77,7 +86,7 @@ cd "${CHECK_PRIVATE_REFERENCES_ROOT:-$(dirname "$0")/..}"
 # (the former `internal/**` carve-out protected nothing: this repository has no `internal/`
 # directory and by design never will, and the exemption had no self-test case covering it -
 # see R-3 in the security review).
-pattern='QUESTIONS\.md|STATUS\.md|SPEC\.md|LICENSING\.md|SHARED-CONVENTIONS\.md|AGENTS\.md|docs[/]plans|SECURITY[-]REVIEW|RELEASIN[G]|[/]Users[/]|[/]home[/][a-z]|[/]root[/]|[A-Z]:\\Users|(^|[^[:alnum:][:cntrl:]_./])([T]hor|[I]sis|[R]a|[A]thena|[O]din|[H]ermes|[H]arvey|[D]ollar|[B]rain|[B]rainus|[L]oki)([^[:alnum:]_]|$)|(^|[^[:alnum:][:cntrl:]_./])[C]ipher($|[^[:alnum:]_ ]| $| [^p]| p$| p[^r]| pr$| pr[^o]| pro$| pro[^b]| prob$| prob[^e])'
+pattern='QUESTIONS\.md|STATUS\.md|SPEC\.md|LICENSING\.md|SHARED-CONVENTIONS\.md|AGENTS\.md|docs[/]plans|SECURITY[-]REVIEW|RELEASIN[G]|[/]Users[/]|[/]home[/][a-z]|[/]root[/]|[A-Z]:\\Users|(^|[^[:alnum:][:cntrl:]_]|[[:space:]])([T]hor|[I]sis|[R]a|[A]thena|[O]din|[H]ermes|[H]arvey|[D]ollar|[B]rain|[B]rainus|[L]oki)([^[:alnum:]_]|$)|(^|[^[:alnum:][:cntrl:]_./]|[[:space:]]|(^|[^o]|(^|[^t])o|(^|[^p])to|(^|[^y])pto|(^|[^r])ypto|(^|[^c])rypto)[./])[C]ipher($|[^[:alnum:]_ ]| $| [^p]| p$| p[^r]| pr$| pr[^o]| pro$| pro[^b]| prob$| prob[^e]| probe$| probe[^s]| probes[[:alnum:]_])|(^|[^[:alnum:]._+-])([t]hor|[i]sis|[r]a|[a]thena|[o]din|[h]ermes|[h]arvey|[d]ollar|[b]rain|[b]rainus|[l]oki|[c]ipher)@housedevinci'
 
 scan_tree() {
   local hits rc
@@ -129,6 +138,16 @@ scan_jars() {
         status=1
         continue
       fi
+      # B-NG-6: a member that is itself a zip archive is compressed bytes to grep, so any
+      # text inside it is unverifiable. Refuse it rather than call it clean.
+      local member magic
+      while IFS= read -r member; do
+        magic="$(od -An -N4 -tx1 "$member" 2>/dev/null | tr -d ' \n')"
+        if [ "$magic" = "504b0304" ]; then
+          echo "::error::check-private-references: $jar holds a nested archive ${member#"$dest"/}, which this guard does not scan (refusing to call it clean)"
+          status=1
+        fi
+      done < <(find "$dest" -type f)
       if ! scan_dir "$dest" > "$extract_dir/hits.txt"; then
         echo "::error::$jar contains a reference to a moved-private document, a machine-local path or an agent first name:"
         cat "$extract_dir/hits.txt"
@@ -221,7 +240,29 @@ run_self_test() {
   _case "lower-case-crypto-word"           green doc.md   "a TLS cipher suite and a cipher mode"
   _case "word-that-starts-with-a-name"     green doc.md   "Maximum length, ${th}ough review, Rate limit, Brainstorm"
   _case "excluded-annotation"              green doc.md   "@Max(32) and Red on the current text"
-  _case "required-check-name"              green doc.md   "the $cr probes job and the $cr probe for PR 1"
+  _case "required-check-name"              green doc.md   "the $cr probes job and the $cr probes check"
+  # B-NG-1: whitespace control bytes are text, so they are boundaries.
+  _case "agent-name-after-tab"             red   doc.md   "$(printf '\t')$th wrote this"
+  _case "agent-name-after-form-feed"       red   doc.md   "$(printf '\f')$th wrote this"
+  _case "agent-name-after-vertical-tab"    red   doc.md   "$(printf '\v')$th wrote this"
+  _case "agent-name-after-carriage-return" red   doc.md   "x$(printf '\r')$th wrote this"
+  # B-NG-2: only the JDK class (after crypto. or crypto/) may follow a dot or a slash.
+  _case "agent-name-after-slash"           red   doc.md   "see docs/$th for the design"
+  _case "agent-name-after-root-slash"      red   doc.md   "see /$th"
+  _case "agent-name-after-dot"             red   doc.md   "v1.$th wrote it"
+  _case "agent-name-in-a-url"              red   doc.md   "https://example.org/reviews/$th"
+  _case "short-agent-name-after-e-g"       red   doc.md   "e.g.R""a"
+  _case "check-name-after-slash"           red   doc.md   "see docs/$cr"
+  _case "check-name-after-other-package"   red   doc.md   "javax.krypto.$cr"
+  # B-NG-3: the carve-out is the exact word "probes", nothing else.
+  _case "check-name-singular-probe"        red   doc.md   "the $cr probe found it"
+  _case "check-name-probed"                red   doc.md   "$cr probed the branch"
+  _case "check-name-probe-verified"        red   doc.md   "$cr probe-verified, no findings"
+  _case "check-name-probes-prefix"         red   doc.md   "$cr probesuite ran"
+  # B-NG-5: an agent's address in lower case; the project addresses stay clean.
+  _case "agent-address-sign-off"           red   doc.md   "Signed-off-by: th""or <th""or@housedevinci.com>"
+  _case "agent-address-short-name"         red   doc.md   "ask r""a@housedevinci.com"
+  _case "project-addresses"                green doc.md   "security@housedevinci.com and hello@housedevinci.com"
   _case "probe-class-identifier"           green doc.md   "class ${cr}ProbeJdbcTest"
   _case "jdk-class-qualified-in-source"    green doc.md   "javax.crypto.$cr c = javax.crypto.$cr.getInstance(x);"
   _case "jdk-class-in-a-class-file"        green doc.md   "(Ljava/lang/String;)Ljavax/crypto/$cr;"
@@ -301,6 +342,8 @@ with zipfile.ZipFile(sys.argv[1], "w") as z: z.write(sys.argv[2], "Entry.class")
   }
   _jar_case "jar-agent-name-in-a-resource"    red   "\001\000\022reviewed by $cr\n"
   _jar_case "jar-length-byte-before-a-string" green "\001\000\122a VAT breakdown line\000\001"
+  # B-NG-6: a member that is itself an archive is refused, not read (fail closed).
+  _jar_case "jar-nested-archive"              red   "PK\003\004\024\000compressed bytes"
 
   # RP-2: a jar `unzip` cannot read must refuse, not report every built jar clean.
   local jar_module rc_jar

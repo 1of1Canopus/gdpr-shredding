@@ -12,6 +12,11 @@ All notable changes to this project. The format follows
   roles. Case-sensitive and whole-word; the script's header lists each name left out and why.
   The jar scan reads class files as text, so a string length byte cannot read as a name on GNU
   grep. `Aes256Gcm` now writes the JDK cipher class fully qualified (no behaviour change).
+- After the security review of that change: a tab, form feed, vertical tab or carriage return
+  before a name no longer hides it; only the JDK cipher class may follow a dot or a slash; the
+  check-name exception is the exact word "probes"; an agent's lower-case address is refused; a
+  jar member that is itself an archive is refused (fail closed); the guard job and the jar step
+  are probed for unconditional wiring by exact command.
 - Pinned the Maven wrapper back to 3.9.16 (Dependabot had moved it to 3.10.0). The Central
   Portal refused the 0.2.0 bundle because central-publishing-maven-plugin 0.11.0 packs local
   repository metadata on Maven 3.10; Dependabot now ignores wrapper versions >= 3.10.

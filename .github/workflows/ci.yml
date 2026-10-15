@@ -140,7 +140,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Self-test the guard (one planted mutation per class, each must go red)
         run: tools/check-private-references.sh --self-test
-      - name: Refuse a reference to a moved-private document or a machine-local path
+      - name: Refuse a reference to a moved-private document, a machine-local path or an agent first name
         run: tools/check-private-references.sh --tree
 
   # N12 (carried over from the reference product, where a probe suite that was only ever run
@@ -348,5 +348,5 @@ jobs:
       # an archive. The loop covers EVERY jar in each published module's target/, the main jar
       # included, not only sources and javadoc. Same single pattern definition as the tree
       # scan, in tools/check-private-references.sh: there is no second copy to drift.
-      - name: Refuse a moved-private document reference or a machine-local path inside a published jar
+      - name: Refuse a moved-private document reference, a machine-local path or an agent first name inside a published jar
         run: tools/check-private-references.sh --jars gdpr-shredding-core gdpr-shredding-spring-boot-starter
