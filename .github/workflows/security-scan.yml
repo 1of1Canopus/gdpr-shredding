@@ -54,7 +54,7 @@ jobs:
             echo
             if [ -s "${RUNNER_TEMP}/below-threshold.txt" ]; then cat "${RUNNER_TEMP}/below-threshold.txt"; else echo "None."; fi
           } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: osv-weekly-report
@@ -105,7 +105,7 @@ jobs:
       - name: OWASP Dependency-Check (fails on CVSS >= 7)
         if: steps.key.outputs.available == 'true'
         run: ./mvnw -B -Psecurity-scan -DskipTests -Dnvd.api.key=${{ secrets.NVD_API_KEY }} verify
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && steps.key.outputs.available == 'true'
         with:
           name: dependency-check-report
