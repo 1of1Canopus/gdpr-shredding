@@ -33,8 +33,8 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Cipher, seventh and eighth pass. S-11: an accepted residual, ruled on and written up in {@code
- * SECURITY-NOTES.md} beside the startup listener check and in {@code
+ * Security review, seventh and eighth pass. S-11: an accepted residual, ruled on and written up in
+ * {@code SECURITY-NOTES.md} beside the startup listener check and in {@code
  * ShreddingStartupCheck.REGISTERED_TYPES}'s own javadoc.
  *
  * <p>{@code ShreddingStartupCheck} proves that this module's own listener is registered on all

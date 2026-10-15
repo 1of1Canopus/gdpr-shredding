@@ -7,6 +7,11 @@ All notable changes to this project. The format follows
 ## [Unreleased]
 
 ### Fixed
+- The reference guard (`tools/check-private-references.sh`) now also refuses the first names of
+  the studio's agents in the tree, the main jar and the sources jar, so public text keeps to
+  roles. Case-sensitive and whole-word; the script's header lists each name left out and why.
+  The jar scan reads class files as text, so a string length byte cannot read as a name on GNU
+  grep. `Aes256Gcm` now writes the JDK cipher class fully qualified (no behaviour change).
 - Pinned the Maven wrapper back to 3.9.16 (Dependabot had moved it to 3.10.0). The Central
   Portal refused the 0.2.0 bundle because central-publishing-maven-plugin 0.11.0 packs local
   repository metadata on Maven 3.10; Dependabot now ignores wrapper versions >= 3.10.
