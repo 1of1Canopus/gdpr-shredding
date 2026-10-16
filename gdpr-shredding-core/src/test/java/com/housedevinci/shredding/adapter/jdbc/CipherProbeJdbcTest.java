@@ -119,11 +119,7 @@ class CipherProbeJdbcTest {
     }
     keys =
         new JdbcKeyProvider(
-            dataSource,
-            schema,
-            MasterKey.fromBytes(new byte[32]),
-            RandomSource.secure(),
-            Clock.systemUTC());
+            schema, MasterKey.fromBytes(new byte[32]), RandomSource.secure(), Clock.systemUTC());
     cache = new DataKeyCache(Duration.ofSeconds(60), 100, Clock.systemUTC());
     cipher =
         new FieldCipher(
@@ -131,8 +127,7 @@ class CipherProbeJdbcTest {
   }
 
   private JdbcErasureStore store(List<BlindIndexColumn> columns) {
-    return new JdbcErasureStore(
-        dataSource, schema, ErasureChain.keyed(SECRET, "k1"), columns, RESIDUAL);
+    return new JdbcErasureStore(schema, ErasureChain.keyed(SECRET, "k1"), columns, RESIDUAL);
   }
 
   /**
@@ -675,9 +670,7 @@ class CipherProbeJdbcTest {
     service(store).erase(new ErasureRequest(TENANT, s, "dpo", "art 17"));
 
     assertThatThrownBy(
-            () ->
-                new JdbcErasureStore(
-                    dataSource, schema, ErasureChain.unkeyed(), List.of(), RESIDUAL))
+            () -> new JdbcErasureStore(schema, ErasureChain.unkeyed(), List.of(), RESIDUAL))
         .isInstanceOf(ShreddingException.class)
         .extracting(e -> ((ShreddingException) e).code())
         .isEqualTo(ErrorCodes.ERASURE_KEY_MISMATCH);

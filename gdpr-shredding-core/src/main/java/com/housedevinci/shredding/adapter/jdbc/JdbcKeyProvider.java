@@ -42,25 +42,43 @@ public final class JdbcKeyProvider implements KeyProvider {
   private final String erasedSubjectTable;
 
   /**
-   * @param schema the schema {@link JdbcSupport#verifySchema} resolved and verified. There is no
-   *     constructor that takes a bare {@code DataSource}: design §16 (finding C-D2-1) requires
-   *     every statement this module issues to name the relation that was verified, and a
-   *     constructor that let a caller skip that would be the one path back to a {@code search_path}
-   *     the runtime role controls.
+   * @param schema the schema {@link JdbcSupport#verifySchema} resolved and verified, bound to the
+   *     {@code DataSource} it was verified on. The store writes through that {@code DataSource} and
+   *     no other (C-PR-1), and every statement names the relation that was verified (design §16,
+   *     C-D2-1). In Spring the schema is {@code ShreddingSchemaGate.schema()}.
    */
+  public JdbcKeyProvider(
+      VerifiedSchema schema, MasterKey masterKey, RandomSource random, Clock clock) {
+    Objects.requireNonNull(schema, "schema");
+    this.dataSource = schema.dataSource();
+    this.masterKey = Objects.requireNonNull(masterKey, "masterKey");
+    this.random = Objects.requireNonNull(random, "random");
+    this.clock = Objects.requireNonNull(clock, "clock");
+    this.dataKeyTable = schema.qualify(SchemaExpectations.DATA_KEY);
+    this.erasedSubjectTable = schema.qualify(SchemaExpectations.ERASED_SUBJECT);
+  }
+
+  /**
+   * The 0.2.0 form. Works only when {@code dataSource} is the very object {@code schema} was
+   * verified on, and refuses with {@code SHRED-SCHEMA-011} otherwise (C-PR-1), before any
+   * connection is opened. A second pool to the same database, or a wrapper around the verified one,
+   * is refused too. No property weakens this.
+   *
+   * @deprecated since 0.2.1, removed in 0.3.0: use {@link #JdbcKeyProvider(VerifiedSchema,
+   *     MasterKey, RandomSource, Clock)}, which takes the pool from the schema.
+   */
+  @Deprecated(since = "0.2.1", forRemoval = true)
   public JdbcKeyProvider(
       DataSource dataSource,
       VerifiedSchema schema,
       MasterKey masterKey,
       RandomSource random,
       Clock clock) {
-    this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
-    Objects.requireNonNull(schema, "schema");
-    this.masterKey = Objects.requireNonNull(masterKey, "masterKey");
-    this.random = Objects.requireNonNull(random, "random");
-    this.clock = Objects.requireNonNull(clock, "clock");
-    this.dataKeyTable = schema.qualify(SchemaExpectations.DATA_KEY);
-    this.erasedSubjectTable = schema.qualify(SchemaExpectations.ERASED_SUBJECT);
+    this(
+        VerifiedSchema.requireVerifiedOn(dataSource, schema, "JdbcKeyProvider"),
+        masterKey,
+        random,
+        clock);
   }
 
   @Override

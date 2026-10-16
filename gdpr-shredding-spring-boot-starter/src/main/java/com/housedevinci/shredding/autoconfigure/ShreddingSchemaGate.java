@@ -31,7 +31,12 @@ import org.slf4j.LoggerFactory;
  *       gate.dataSource()} rather than injecting by type, so "the DataSource that was verified" and
  *       "the DataSource that is written to" are the same object by construction. With two {@code
  *       DataSource} beans in a context, injection by type can otherwise verify one database and
- *       write to another.
+ *       write to another. Since 0.2.1 (C-PR-1) the {@link VerifiedSchema} this gate hands out is
+ *       itself bound to that object, and the stores take their pool from it, so an application
+ *       store built from {@code gate.schema()} cannot be pointed at another pool either: the old
+ *       constructors that still take a {@code DataSource} refuse any other object with {@code
+ *       SHRED-SCHEMA-011}. The INFO line this gate prints covers this gate's {@code DataSource}
+ *       only.
  * </ol>
  *
  * <p>It is also the only place in the starter that may call {@link JdbcSupport#initializeSchema},

@@ -59,6 +59,17 @@
       <artifactId>slf4j-simple</artifactId>
       <scope>test</scope>
     </dependency>
+    <!--
+      C-PR-1, test scope only: the P15 test wraps the verified pool in Spring's own
+      LazyConnectionDataSourceProxy and TransactionAwareDataSourceProxy, the two wrappers an
+      application is most likely to reach for. Core main code never sees Spring; the ArchUnit
+      domain rule is unaffected.
+    -->
+    <dependency>
+      <groupId>org.springframework</groupId>
+      <artifactId>spring-jdbc</artifactId>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <!--

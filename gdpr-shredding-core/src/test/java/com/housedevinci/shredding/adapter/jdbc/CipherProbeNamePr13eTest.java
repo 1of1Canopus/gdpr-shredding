@@ -245,8 +245,7 @@ class CipherProbeNamePr13eTest {
 
     var store =
         new JdbcErasureStore(
-            shadowed,
-            schema,
+            TestSchemas.reboundTo(schema, shadowed),
             ErasureChain.keyed(SECRET, "k1"),
             List.of(
                 new com.housedevinci.shredding.domain.BlindIndexColumn(
@@ -563,13 +562,15 @@ class CipherProbeNamePr13eTest {
 
   private JdbcKeyProvider keyProvider(DataSource ds, VerifiedSchema schema) {
     return new JdbcKeyProvider(
-        ds, schema, MasterKey.fromBytes(new byte[32]), RandomSource.secure(), Clock.systemUTC());
+        TestSchemas.reboundTo(schema, ds),
+        MasterKey.fromBytes(new byte[32]),
+        RandomSource.secure(),
+        Clock.systemUTC());
   }
 
   private JdbcErasureStore erasureStore(DataSource ds, VerifiedSchema schema) {
     return new JdbcErasureStore(
-        ds,
-        schema,
+        TestSchemas.reboundTo(schema, ds),
         ErasureChain.keyed(SECRET, "k1"),
         List.of(),
         (connection, column, tenant, subject) -> 0L);

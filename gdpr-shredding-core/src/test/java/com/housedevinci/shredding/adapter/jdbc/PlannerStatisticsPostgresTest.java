@@ -739,7 +739,6 @@ abstract class PlannerStatisticsPostgresTest {
     var attach = new java.util.concurrent.atomic.AtomicReference<String>();
     JdbcErasureStore store =
         new JdbcErasureStore(
-            app,
             schema,
             ErasureChain.keyed(SECRET, "k1"),
             List.of(blindIndexColumn("app.a8")),
@@ -1000,7 +999,6 @@ abstract class PlannerStatisticsPostgresTest {
 
   private JdbcErasureStore store(String table) {
     return new JdbcErasureStore(
-        app,
         schema,
         ErasureChain.keyed(SECRET, "k1"),
         List.of(

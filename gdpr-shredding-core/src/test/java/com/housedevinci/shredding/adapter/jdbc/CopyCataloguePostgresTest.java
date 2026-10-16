@@ -784,8 +784,7 @@ class CopyCataloguePostgresTest {
     var seen = new java.util.concurrent.atomic.AtomicReference<String>();
     var store =
         new JdbcErasureStore(
-            ds,
-            schema,
+            TestSchemas.reboundTo(schema, ds),
             ErasureChain.keyed(SECRET, "k1"),
             List.of(
                 new BlindIndexColumn(
@@ -829,8 +828,7 @@ class CopyCataloguePostgresTest {
     HikariDataSource ds = pool("i2_app", "pw", null);
     var store =
         new JdbcErasureStore(
-            ds,
-            schema,
+            TestSchemas.reboundTo(schema, ds),
             ErasureChain.keyed(SECRET, "k1"),
             List.of(
                 new BlindIndexColumn(
@@ -896,8 +894,7 @@ class CopyCataloguePostgresTest {
                 });
     var store =
         new JdbcErasureStore(
-            refusing,
-            schema,
+            TestSchemas.reboundTo(schema, refusing),
             ErasureChain.keyed(SECRET, "k1"),
             List.of(
                 new BlindIndexColumn(
@@ -1168,7 +1165,6 @@ class CopyCataloguePostgresTest {
 
   private static JdbcErasureStore store(String table, BlindIndexResidual residual) {
     return new JdbcErasureStore(
-        app,
         schema,
         ErasureChain.keyed(SECRET, "k1"),
         List.of(

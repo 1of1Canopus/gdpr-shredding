@@ -89,7 +89,6 @@ class CipherProbeRc020LockTimeoutTest {
               Optional.of("subject"));
       var store =
           new JdbcErasureStore(
-              ds,
               schema,
               ErasureChain.keyed(SECRET, "k1"),
               List.of(column),

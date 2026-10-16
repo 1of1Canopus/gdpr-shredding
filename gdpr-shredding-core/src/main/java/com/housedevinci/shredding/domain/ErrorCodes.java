@@ -217,6 +217,17 @@ public final class ErrorCodes {
   public static final String BLIND_INDEX_COPIED = "SHRED-SCHEMA-010";
 
   /**
+   * C-PR-1: a {@code JdbcKeyProvider} or {@code JdbcErasureStore} was given a {@code DataSource}
+   * that is not the object its {@code VerifiedSchema} was verified on. Its writes would go to a
+   * database whose guards were never checked, so it refuses, before any connection is opened. The
+   * comparison is by identity: a second pool to the same URL, and a wrapper around the verified
+   * pool, are both refused. Raised only by the constructors that still take a {@code DataSource}
+   * (deprecated since 0.2.1, removed in 0.3.0); the other constructors take the pool from the
+   * schema, so the mismatch cannot be written. No property turns this into a warning.
+   */
+  public static final String STORE_DATASOURCE_UNVERIFIED = "SHRED-SCHEMA-011";
+
+  /**
    * RC-7, RC-10: an erasure waited on a lock and gave up: another session held a conflicting lock
    * longer than the connection's {@code lock_timeout} (SQLState 55P03), or the database chose this
    * transaction as a deadlock victim (40P01). Raised at every wait of the erasure transaction: the
