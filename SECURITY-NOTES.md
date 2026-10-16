@@ -1136,6 +1136,46 @@ unqualified, so a role that defines its own `count` aggregate can make that one 
 The erasure store's own same-text read-back runs over the same column in the same transaction, is
 qualified, and refuses on its own.
 
+### Which database the stores write to (C-PR-1)
+
+The gate verifies one `DataSource` object. From 0.2.1 the `VerifiedSchema` it hands out is bound
+to that object, and `JdbcKeyProvider` and `JdbcErasureStore` take their pool from the schema. The
+constructors that still take a `DataSource` (deprecated, removed in 0.3.0) refuse any object that
+is not the one the schema was verified on, with `SHRED-SCHEMA-011`, before any connection is opened.
+The comparison is identity (`==`), never `equals` and never the URL: a second pool to the same
+database can log in as another role, and an application class can override `equals`.
+
+Every path to a module store on a pool the gate did not verify, and what happens:
+
+| Path | Outcome |
+|---|---|
+| Application store bean built from `gate.schema()` and a second `DataSource` bean | refused at startup |
+| Store built on a `DataSource` that is not a bean | refused at construction |
+| A second pool to the same database (same URL) | refused (identity, not URL) |
+| A schema verified on pool B, handed with pool A | refused |
+| A post-processor replaces the store with a module store on another pool | refused at startup |
+| A post-processor wraps the store (proxy, decorator) | verified: the wrapped store keeps its pool |
+| A post-processor wraps the `DataSource` bean | verified, while the wrapper keeps its target: the gate verifies through the wrapper and the stores use it |
+| Spring's `LazyConnectionDataSourceProxy` as the context `DataSource` | verified, same reason |
+| Lazy store (`@Lazy`, `spring.main.lazy-initialization=true`) | refused at creation, before any write |
+| Child application context building its own store | refused |
+| Application constructs its own `VerifiedSchema` | impossible: one package-private constructor, an architecture test refuses any other caller |
+| Store built after startup, or inside another bean, never exposed as a bean | refused at construction |
+| Application wraps the verified pool before passing it | refused; use the constructor without a pool |
+| Application verifies another pool itself (`JdbcSupport.verifySchema(other)`) and builds a store on it | verified: that database was checked by that call, and the schema is bound to it |
+| One `DataSource` object whose target changes after verification (routing pool, refresh-scope proxy, target swap, mutable URL) | **not covered by this check yet**: same object, so identity passes. Tracked as C-PR-1b; the 0.2.1 release waits for it |
+| Reflection, `Unsafe`, a patched jar | out of scope: code with that power can also edit the guards |
+
+**What the gate's log line covers.** The INFO line `schema verified ...` printed by the starter's
+gate covers the gate's own `DataSource` only. A module store on a `DataSource` the application
+verified itself is covered by that verification call, not by the gate's line. A module store
+(`JdbcKeyProvider`, `JdbcErasureStore`) that the application builds itself is checked only by
+identity, at construction, against the pool its schema was verified on.
+
+**What the module cannot vouch for.** A `KeyProvider` or `ErasureStore` the application implements
+itself is application code. The module does not check where it writes, whether it is a bean, a
+post-processor replacement, or anything else.
+
 ### The health endpoint publishes the posture
 
 `/actuator/health` gains two details from the gate's verdict rather than re-deriving them:
