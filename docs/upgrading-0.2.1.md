@@ -39,6 +39,14 @@ module.
 The log line of the starter's gate covers the gate's DataSource only. A store on a DataSource you
 verified yourself is covered by that verification call.
 
+## The jdbc package is sealed
+
+The core jar now seals the package `com.housedevinci.shredding.adapter.jdbc`. A class of yours in
+that package fails to load with `sealing violation` on a plain classpath. Do not declare classes
+there. The seal is not enforced by Spring Boot's executable-jar launcher. Under it, a class you
+place in that package could still build a `VerifiedSchema` on any DataSource. That is deliberate
+application code, in the same trust class as a `KeyProvider` of your own. Do not do it.
+
 ## Equality changed
 
 `VerifiedSchema.equals` and `SchemaVerdict.equals` now include the identity of the DataSource the

@@ -103,5 +103,30 @@
         </includes>
       </resource>
     </resources>
+    <plugins>
+      <!--
+        C-PR38-1: seal the package that holds VerifiedSchema's package-private constructor, so a
+        class of the application placed in the same package (a split package) cannot call it.
+        The JVM refuses it with "sealing violation". Only this package is sealed; no other module
+        declares a class in it. Plain classpath only: Spring Boot's executable-jar launcher does
+        not enforce sealing (see SECURITY-NOTES).
+      -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <configuration>
+          <archive>
+            <manifestSections>
+              <manifestSection>
+                <name>com/housedevinci/shredding/adapter/jdbc/</name>
+                <manifestEntries>
+                  <Sealed>true</Sealed>
+                </manifestEntries>
+              </manifestSection>
+            </manifestSections>
+          </archive>
+        </configuration>
+      </plugin>
+    </plugins>
   </build>
 </project>

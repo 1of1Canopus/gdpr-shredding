@@ -5,8 +5,9 @@ import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
 
 import com.housedevinci.shredding.adapter.jdbc.VerifiedSchema;
 import com.tngtech.archunit.base.DescribedPredicate;
+import com.tngtech.archunit.core.domain.JavaAccess;
 import com.tngtech.archunit.core.domain.JavaClass;
-import com.tngtech.archunit.core.domain.JavaConstructorCall;
+import com.tngtech.archunit.core.domain.JavaConstructor;
 import com.tngtech.archunit.core.importer.ImportOption;
 import com.tngtech.archunit.junit.AnalyzeClasses;
 import com.tngtech.archunit.junit.ArchTest;
@@ -108,9 +109,13 @@ class HexagonalArchitectureTest {
                       !c.getName().equals(SCHEMA_VERIFICATION)
                           && !c.getName().startsWith(SCHEMA_VERIFICATION + "$")))
           .should()
-          .callConstructorWhere(
+          .accessTargetWhere(
               DescribedPredicate.describe(
-                  "a constructor of VerifiedSchema",
-                  (JavaConstructorCall call) ->
-                      call.getTargetOwner().isEquivalentTo(VerifiedSchema.class)));
+                  "a constructor of VerifiedSchema, by call or by reference",
+                  (JavaAccess<?> access) ->
+                      access.getTargetOwner().isEquivalentTo(VerifiedSchema.class)
+                          && access
+                              .getTarget()
+                              .getName()
+                              .equals(JavaConstructor.CONSTRUCTOR_NAME)));
 }

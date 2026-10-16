@@ -22,7 +22,15 @@ All notable changes to this project. The format follows
   [docs/upgrading-0.2.1.md](docs/upgrading-0.2.1.md).
 
 ### Changed
-- `VerifiedSchema.equals` and, through the record, `SchemaVerdict.equals` now include the identity
+- The core jar now seals the package `com.housedevinci.shredding.adapter.jdbc` (manifest entry
+  `Sealed: true`). A class of yours in that package fails to load with `sealing violation` on a
+  plain classpath. This closes a split-package route to the package-private `VerifiedSchema`
+  constructor (C-PR38-1). Spring Boot's executable-jar launcher does not enforce sealing, so under
+  it such a class is still deliberate application code.
+- The architecture rule on `VerifiedSchema` minting now also catches a constructor reference
+  (`VerifiedSchema::new`) (C-PR38-2), and the starter has its own architecture test: no starter
+  class in a core package, no access to the constructor (C-PR38-3).
+- `VerifiedSchema.equals and, through the record, `SchemaVerdict.equals` now include the identity
   of the DataSource the schema was verified on. Two verifications through two different DataSource
   objects are no longer equal, even on the same database.
 - The starter's default `JdbcKeyProvider` and `JdbcErasureStore` beans use the new constructors.

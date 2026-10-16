@@ -1159,7 +1159,7 @@ Every path to a module store on a pool the gate did not verify, and what happens
 | Spring's `LazyConnectionDataSourceProxy` as the context `DataSource` | verified, same reason |
 | Lazy store (`@Lazy`, `spring.main.lazy-initialization=true`) | refused at creation, before any write |
 | Child application context building its own store | refused |
-| Application constructs its own `VerifiedSchema` | impossible: one package-private constructor, an architecture test refuses any other caller |
+| Application constructs its own `VerifiedSchema` | refused on a plain classpath: one package-private constructor, the package `adapter.jdbc` is sealed in the core jar, and architecture rules in the core and in the starter refuse any other minting point in the modules. Spring Boot's executable-jar launcher does not enforce sealing, so under it a class the application places in that package can still mint one: that is application code acting on purpose, like your own `KeyProvider` |
 | Store built after startup, or inside another bean, never exposed as a bean | refused at construction |
 | Application wraps the verified pool before passing it | refused; use the constructor without a pool |
 | Application verifies another pool itself (`JdbcSupport.verifySchema(other)`) and builds a store on it | verified: that database was checked by that call, and the schema is bound to it |
