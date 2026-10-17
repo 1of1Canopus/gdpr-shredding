@@ -961,7 +961,10 @@ class MappingAdmissionPostgresTest {
 
   private static JdbcErasureStore store(DataSource ds, String table, BlindIndexResidual residual) {
     return new JdbcErasureStore(
-        ds, schema, ErasureChain.keyed(SECRET, "k1"), List.of(column(table)), residual);
+        TestSchemas.reboundTo(schema, ds),
+        ErasureChain.keyed(SECRET, "k1"),
+        List.of(column(table)),
+        residual);
   }
 
   private static ErasureStore.Outcome erase(DataSource ds, String table) {

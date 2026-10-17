@@ -212,7 +212,8 @@ class CipherProbeNoDdlPr13Test {
    */
   @Test
   void probe_a_verified_schema_can_be_produced_without_any_verification() throws Exception {
-    var canonical = VerifiedSchema.class.getDeclaredConstructor(String.class);
+    var canonical =
+        VerifiedSchema.class.getDeclaredConstructor(String.class, javax.sql.DataSource.class);
     assertThat(Modifier.isPublic(canonical.getModifiers()))
         .describedAs(
             "VerifiedSchema is the capability that stands for \"this schema was verified\";"
@@ -251,7 +252,7 @@ class CipherProbeNoDdlPr13Test {
           (Connection)
               Proxy.newProxyInstance(
                   Connection.class.getClassLoader(), new Class<?>[] {Connection.class}, handler);
-      SchemaVerification.verify(spy, false);
+      SchemaVerification.verify(spy, appDs, false);
     }
     assertThat(seen).isTrue();
     assertThat(autoCommit.get())

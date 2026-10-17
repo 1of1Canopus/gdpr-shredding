@@ -598,9 +598,10 @@ public final class JdbcSupport {
    * caller should make at its own startup, right after handing the adapters their {@code
    * DataSource}.
    *
-   * @return the schema that was verified. Hand it to {@link JdbcKeyProvider} and {@link
-   *     JdbcErasureStore} so that "the schema that was verified" and "the schema that is written
-   *     to" are the same name by construction (design §16).
+   * @return the schema that was verified, bound to {@code ds}. Hand it to {@link JdbcKeyProvider}
+   *     and {@link JdbcErasureStore}, which take no {@code DataSource} of their own, so that "the
+   *     schema and database that were verified" and "the ones written to" are the same by
+   *     construction (design §16, C-PR-1).
    * @throws com.housedevinci.shredding.domain.ShreddingException {@code SHRED-SCHEMA-001} to {@code
    *     -005} and {@code -007}; see {@link ErrorCodes}
    */
@@ -615,7 +616,7 @@ public final class JdbcSupport {
    */
   public static SchemaVerdict verifySchema(DataSource ds, boolean allowPrivilegedRuntimeRole) {
     try (Connection c = ds.getConnection()) {
-      return SchemaVerification.verify(c, allowPrivilegedRuntimeRole);
+      return SchemaVerification.verify(c, ds, allowPrivilegedRuntimeRole);
     } catch (SQLException e) {
       throw new ShreddingException(
           ErrorCodes.SCHEMA_UNVERIFIABLE,
@@ -666,7 +667,7 @@ public final class JdbcSupport {
         // The caller's transaction, which has just run the DDL under the script's advisory lock:
         // not read-only and not a fresh snapshot, and it must not be made either (C-13-4).
         SchemaVerdict verdict =
-            SchemaVerification.verifyInCallersTransaction(c, allowPrivilegedRuntimeRole);
+            SchemaVerification.verifyInCallersTransaction(c, ds, allowPrivilegedRuntimeRole);
         c.commit();
         return verdict;
       } catch (RuntimeException e) {
