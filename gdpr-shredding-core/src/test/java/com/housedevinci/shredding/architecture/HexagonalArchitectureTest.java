@@ -3,6 +3,7 @@ package com.housedevinci.shredding.architecture;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.classes;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
 
+import com.housedevinci.shredding.adapter.jdbc.JdbcSupport;
 import com.housedevinci.shredding.adapter.jdbc.VerifiedSchema;
 import com.tngtech.archunit.base.DescribedPredicate;
 import com.tngtech.archunit.core.domain.JavaAccess;
@@ -118,4 +119,35 @@ class HexagonalArchitectureTest {
                               .getTarget()
                               .getName()
                               .equals(JavaConstructor.CONSTRUCTOR_NAME)));
+
+  /**
+   * C-PR-1b, round 2, item 9: a connection is taken in one class only, so every connection a store
+   * uses passes the database check of {@code JdbcSupport} before its work. Every {@code
+   * getConnection} overload on any {@code DataSource} type, {@code DriverManager.getConnection} and
+   * {@code Driver.connect}, by call or by method reference.
+   */
+  @ArchTest
+  static final ArchRule getConnection_is_called_only_inside_JdbcSupport =
+      noClasses()
+          .that()
+          .doNotHaveFullyQualifiedName(JdbcSupport.class.getName())
+          .should()
+          .accessTargetWhere(ConnectionAccess.TAKES_A_CONNECTION);
+
+  /** The starter's architecture test has its own copy: it cannot see core test classes. */
+  static final class ConnectionAccess {
+    private ConnectionAccess() {}
+
+    static final DescribedPredicate<JavaAccess<?>> TAKES_A_CONNECTION =
+        DescribedPredicate.describe(
+            "DataSource.getConnection, DriverManager.getConnection or Driver.connect",
+            (JavaAccess<?> access) -> {
+              JavaClass owner = access.getTargetOwner();
+              String name = access.getTarget().getName();
+              return (name.equals("getConnection")
+                      && (owner.isAssignableTo(javax.sql.DataSource.class)
+                          || owner.isEquivalentTo(java.sql.DriverManager.class)))
+                  || (name.equals("connect") && owner.isAssignableTo(java.sql.Driver.class));
+            });
+  }
 }

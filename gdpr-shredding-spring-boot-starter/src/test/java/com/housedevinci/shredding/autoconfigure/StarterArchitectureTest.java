@@ -68,4 +68,28 @@ class StarterArchitectureTest {
                         && access.getTarget().getName().equals(JavaConstructor.CONSTRUCTOR_NAME)))
         .check(starterMain);
   }
+
+  /**
+   * C-PR-1b, round 2, item 9: the starter takes no connection itself. Its reads go through {@code
+   * JdbcSupport.readVerified}, which checks the database before the work; a {@code getConnection}
+   * here would skip that check. Every overload on any {@code DataSource} type, {@code
+   * DriverManager.getConnection} and {@code Driver.connect}, by call or by method reference.
+   */
+  @Test
+  void getConnection_is_called_only_inside_JdbcSupport() {
+    noClasses()
+        .should()
+        .accessTargetWhere(
+            DescribedPredicate.describe(
+                "DataSource.getConnection, DriverManager.getConnection or Driver.connect",
+                (JavaAccess<?> access) -> {
+                  var owner = access.getTargetOwner();
+                  String name = access.getTarget().getName();
+                  return (name.equals("getConnection")
+                          && (owner.isAssignableTo(javax.sql.DataSource.class)
+                              || owner.isEquivalentTo(java.sql.DriverManager.class)))
+                      || (name.equals("connect") && owner.isAssignableTo(java.sql.Driver.class));
+                }))
+        .check(starterMain);
+  }
 }
