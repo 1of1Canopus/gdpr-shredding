@@ -1799,7 +1799,16 @@ probe probe_reference_guard_self_test_misses_carve_out    "B-NG-3 a widened carv
 probe probe_guard_wiring_accepts_a_disabled_job           "B-NG-4 the guard job or the jar step can be switched off"  probe_reference_guard_wiring_accepts_a_disabled_job
 probe probe_reference_guard_lower_case_agent_address      "B-NG-5 a lower-case agent address passes"            probe_reference_guard_lower_case_agent_address_passes
 probe probe_reference_guard_nested_archive_in_jar         "B-NG-6 a name inside a nested archive in a jar passes"  probe_reference_guard_nested_archive_in_jar_passes
+# B-NG-12: a moved-private document name in lower or mixed case passed both scans.
+probe_lower_case_private_document_name_passes() {
+  [ -f "$RG" ] || return 0
+  _ng_tree_red lower1 "see question""s.md" && _ng_tree_red lower2 "see Statu""s.md" \
+    && _ng_tree_red lower3 "see docs/Plan""s/a.md" && return 1
+  return 0
+}
+
 probe probe_reference_guard_step_names_old_scope          "B-NG-8 the CI step names describe the old scope"     probe_reference_guard_step_names_omit_agent_names
+probe probe_reference_guard_lower_case_document_name    "B-NG-12 a lower-case private document name passes"  probe_lower_case_private_document_name_passes
 
 echo
 echo "still weak: $pass    fixed: $flipped    error: $errors"
