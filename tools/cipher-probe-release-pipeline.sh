@@ -1985,6 +1985,35 @@ probe_reference_guard_self_test_misses_three_checks() {
   _ng2_mutant_survives backslash 's/\/\*\|\*.\\.\*\|\.\.\|/\/*|..|/' && return 0
   return 1
 }
+
+# B-NG-30: B-NG-23 escaped the bytes of a hit, but a tree hit line still began with the file
+# path. A tracked file named `::stop-commands::tok` (or ` ::warning::x`) with a hit printed a
+# line that starts with `::`, which the runner reads as a workflow command. WEAK while any
+# output line, split on CR and LF as the runner splits, starts with blanks then `::` and is
+# not the guard's own `::error::check-private-references: ` line.
+probe_reference_guard_hit_path_starts_a_command() {
+  [ -f "$RG" ] || return 0
+  local d o
+  d="$(mktemp -d)"; o="$(mktemp)"
+  ( cd "$d" && git init -q . && printf 'see %s\n' "QUESTION""S.md" > '::stop-commands::tok' \
+      && printf 'see %s\n' "QUESTION""S.md" > ' ::warning::spoofed' && git add -A )
+  CHECK_PRIVATE_REFERENCES_ROOT="$d" bash "$PWD/$RG" --tree > "$o" 2>&1
+  rm -rf "$d"
+  if tr '\r' '\n' < "$o" | grep -a -E '^[[:space:]]*::' | grep -aqv '^::error::check-private-references: '; then
+    rm -f "$o"; return 0
+  fi
+  rm -f "$o"
+  return 1
+}
+
+# B-NG-31: the file-count half of the one-to-one jar check had no self-test case; with it
+# removed the self-test stayed green. The half is deleted from a copy of the guard; WEAK
+# while the copy's self-test is green.
+probe_reference_guard_self_test_misses_the_file_count_half() {
+  [ -f "$RG" ] || return 0
+  _ng2_mutant_survives file-half 's/if \[ "\$have_files" != "\$want_files" \] \|\| \[/if [/' && return 0
+  return 1
+}
 probe probe_reference_guard_step_names_old_scope          "B-NG-8 the CI step names describe the old scope"     probe_reference_guard_step_names_omit_agent_names
 probe probe_reference_guard_name_in_a_path            "B-NG-7 a name in a file path or jar member name passes"  probe_reference_guard_name_in_a_path_passes
 probe probe_reference_guard_non_utf8_byte_hides_name     "B-NG-9 a non-UTF-8 byte before a name hides it"      probe_reference_guard_non_utf8_byte_hides_a_name
@@ -1997,6 +2026,8 @@ probe probe_reference_guard_symlink_member_target      "B-NG-20 a symlink member
 probe probe_reference_guard_directory_entry_data       "B-NG-21 data in a directory entry is never scanned"   probe_reference_guard_directory_entry_data_passes
 probe probe_reference_guard_content_hit_replays        "B-NG-23 a content hit is printed raw"                 probe_reference_guard_content_hit_replays_a_command
 probe probe_reference_guard_self_test_misses_checks    "B-NG-24 three checks have no self-test case"          probe_reference_guard_self_test_misses_three_checks
+probe probe_reference_guard_hit_path_command       "B-NG-30 a hit line can start with a file path"        probe_reference_guard_hit_path_starts_a_command
+probe probe_reference_guard_file_count_half      "B-NG-31 the file-count half has no self-test case"    probe_reference_guard_self_test_misses_the_file_count_half
 
 echo
 echo "still weak: $pass    fixed: $flipped    error: $errors"
