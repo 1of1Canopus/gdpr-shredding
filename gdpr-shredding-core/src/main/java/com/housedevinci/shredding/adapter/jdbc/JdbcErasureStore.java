@@ -56,7 +56,9 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
           + " field_count, blind_index_cleared, outcome, hook_outcomes, backup_clear_at,"
           + " chain_version, key_id, prev_hash, hash";
 
-  private final DataSource dataSource;
+  /** The verified schema; every connection is taken and checked through it (C-PR-1b). */
+  private final VerifiedSchema schema;
+
   private final ErasureChain chain;
   private final List<BlindIndexColumn> blindIndexColumns;
   private final List<MappingAdmission.Target> admissionTargets;
@@ -177,10 +179,9 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
       CopySignatures copySignatures,
       List<AcknowledgedCopy> acknowledged) {
     Objects.requireNonNull(schema, "schema");
-    DataSource dataSource = schema.dataSource();
     this.acknowledged = List.copyOf(acknowledged);
     AcknowledgedCopies.requireDistinct(this.acknowledged);
-    this.dataSource = dataSource;
+    this.schema = schema;
     // Design §16: the four relation names are built once, from the schema that was verified at
     // boot, and no statement below names a relation any other way. The blind-index statements are
     // deliberately not qualified here - they address the application's own tables through the
@@ -198,7 +199,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
     // Fail closed at startup, not on the first erasure: a rolling restart must not serve traffic
     // for a while before it discovers it disagrees with the trail.
     JdbcSupport.withConnection(
-        dataSource,
+        schema,
         c -> {
           refuseIfMismatched(trailState(c));
           return null;
@@ -214,7 +215,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
   public Outcome erase(TenantId tenant, SubjectId subject, RecordFactory factory) {
     // C-25-1: READ COMMITTED whatever the pool or the role says; see JdbcSupport.
     return JdbcSupport.inReadCommittedTransaction(
-        dataSource,
+        schema,
         c -> {
           // CIPHER-03: the (tenant, subject) advisory lock first, ahead of the FOR UPDATE. It is
           // what makes a write racing the *first* mint for a subject line up behind (or in front
@@ -247,7 +248,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
     // The append guard reads the subject's latest record after the advisory lock, so it must read
     // committed data the lock has ordered: READ COMMITTED, as every erasure (C-25-1).
     return JdbcSupport.inReadCommittedTransaction(
-        dataSource, c -> step("the erasure-log append", () -> appendInTransaction(c, record)));
+        schema, c -> step("the erasure-log append", () -> appendInTransaction(c, record)));
   }
 
   private ErasureRecord appendInTransaction(Connection c, ErasureRecord record)
@@ -851,7 +852,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
 
   @Override
   public Optional<ErasureRecord> latestForSubject(TenantId tenant, String subjectPseudonym) {
-    return JdbcSupport.withConnection(dataSource, c -> latest(c, tenant, subjectPseudonym));
+    return JdbcSupport.withConnection(schema, c -> latest(c, tenant, subjectPseudonym));
   }
 
   private Optional<ErasureRecord> latest(Connection c, TenantId tenant, String subjectPseudonym)
@@ -882,7 +883,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
   @Override
   public Optional<Anchor> anchor() {
     return JdbcSupport.withConnection(
-        dataSource,
+        schema,
         c -> {
           try (PreparedStatement ps =
                   c.prepareStatement(
@@ -901,7 +902,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
   public List<ErasureRecord> readAfter(long afterSequence, int limit) {
     int capped = Math.max(1, Math.min(limit, 1000));
     return JdbcSupport.withConnection(
-        dataSource,
+        schema,
         c -> {
           try (PreparedStatement ps =
               c.prepareStatement(

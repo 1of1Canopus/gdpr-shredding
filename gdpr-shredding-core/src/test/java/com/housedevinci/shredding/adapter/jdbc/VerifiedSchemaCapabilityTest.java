@@ -21,6 +21,12 @@ import org.junit.jupiter.api.Test;
  */
 class VerifiedSchemaCapabilityTest {
 
+  private static final DatabaseIdentity ID =
+      new DatabaseIdentity(7_000_000_000_000_000_001L, 16384, "app", 2200, "app_role", "app_role");
+  private static final DatabaseIdentity OTHER_DATABASE =
+      new DatabaseIdentity(
+          7_000_000_000_000_000_001L, 16385, "other", 2200, "app_role", "app_role");
+
   @Test
   void verified_schema_has_no_public_constructor_or_factory() {
     for (Constructor<?> c : VerifiedSchema.class.getDeclaredConstructors()) {
@@ -48,17 +54,22 @@ class VerifiedSchemaCapabilityTest {
     Constructor<?>[] all = VerifiedSchema.class.getDeclaredConstructors();
     assertThat(all).hasSize(1);
     Constructor<?> only = all[0];
-    assertThat(only.getParameterTypes()).containsExactly(String.class, DataSource.class);
+    assertThat(only.getParameterTypes())
+        .containsExactly(String.class, DataSource.class, DatabaseIdentity.class);
     assertThat(Modifier.isPrivate(only.getModifiers())).isFalse();
     assertThat(Modifier.isPublic(only.getModifiers())).isFalse();
 
-    assertThatThrownBy(() -> invoke(only, "public", null))
+    assertThatThrownBy(() -> invoke(only, "public", null, ID))
         .isInstanceOf(NullPointerException.class)
         .hasMessage("dataSource");
-    assertThatThrownBy(() -> invoke(only, null, stub("x")))
+    assertThatThrownBy(() -> invoke(only, null, stub("x"), ID))
         .isInstanceOf(NullPointerException.class)
         .hasMessage("name");
-    assertThat(new VerifiedSchema("public", stub("x")).name()).isEqualTo("public");
+    assertThatThrownBy(() -> invoke(only, "public", stub("x"), null))
+        .describedAs("C-PR-1b: no capability without the database identity it was verified on")
+        .isInstanceOf(NullPointerException.class)
+        .hasMessage("identity");
+    assertThat(new VerifiedSchema("public", stub("x"), ID).name()).isEqualTo("public");
   }
 
   @Test
@@ -67,15 +78,18 @@ class VerifiedSchemaCapabilityTest {
     DataSource b = stub("jdbc:postgresql://db-a/app?user=secret-user");
     DataSource claimsEqual = stubEqualToEverything();
 
-    var onA = new VerifiedSchema("public", a);
-    var onAagain = new VerifiedSchema("public", a);
-    var onB = new VerifiedSchema("public", b);
+    var onA = new VerifiedSchema("public", a, ID);
+    var onAagain = new VerifiedSchema("public", a, ID);
+    var onB = new VerifiedSchema("public", b, ID);
 
     assertThat(onA).isEqualTo(onAagain).hasSameHashCodeAs(onAagain);
     assertThat(onA).isNotEqualTo(onB);
-    assertThat(onA).isNotEqualTo(new VerifiedSchema("other", a));
-    assertThat(onA).isNotEqualTo(new VerifiedSchema("public", claimsEqual));
-    assertThat(new VerifiedSchema("public", claimsEqual)).isNotEqualTo(onA);
+    assertThat(onA).isNotEqualTo(new VerifiedSchema("other", a, ID));
+    assertThat(onA).isNotEqualTo(new VerifiedSchema("public", claimsEqual, ID));
+    assertThat(new VerifiedSchema("public", claimsEqual, ID)).isNotEqualTo(onA);
+    assertThat(onA)
+        .describedAs("C-PR-1b: same pool, another database identity")
+        .isNotEqualTo(new VerifiedSchema("public", a, OTHER_DATABASE));
     assertThat(onA.toString()).isEqualTo("public");
     assertThat(onA.toString()).doesNotContain("jdbc").doesNotContain("secret");
   }
@@ -84,10 +98,12 @@ class VerifiedSchemaCapabilityTest {
   void schema_verdict_equality_follows_the_pool() {
     DataSource a = stub("a");
     DataSource b = stub("b");
-    var onA = new SchemaVerdict(new VerifiedSchema("public", a), "app", "db", List.of(), List.of());
+    var onA =
+        new SchemaVerdict(new VerifiedSchema("public", a, ID), "app", "db", List.of(), List.of());
     var onAagain =
-        new SchemaVerdict(new VerifiedSchema("public", a), "app", "db", List.of(), List.of());
-    var onB = new SchemaVerdict(new VerifiedSchema("public", b), "app", "db", List.of(), List.of());
+        new SchemaVerdict(new VerifiedSchema("public", a, ID), "app", "db", List.of(), List.of());
+    var onB =
+        new SchemaVerdict(new VerifiedSchema("public", b, ID), "app", "db", List.of(), List.of());
 
     assertThat(onA).isEqualTo(onAagain).hasSameHashCodeAs(onAagain);
     assertThat(onA)

@@ -828,7 +828,8 @@ class CopyCataloguePostgresTest {
     HikariDataSource ds = pool("i2_app", "pw", null);
     var store =
         new JdbcErasureStore(
-            TestSchemas.reboundTo(schema, ds),
+            // Logs in as i2_app, not as the verified role: the identity is i2_app's (C-PR-1b).
+            TestSchemas.reboundAs(schema, ds),
             ErasureChain.keyed(SECRET, "k1"),
             List.of(
                 new BlindIndexColumn(

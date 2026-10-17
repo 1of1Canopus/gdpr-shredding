@@ -34,7 +34,9 @@ import javax.sql.DataSource;
  */
 public final class JdbcKeyProvider implements KeyProvider {
 
-  private final DataSource dataSource;
+  /** The verified schema; every connection is taken and checked through it (C-PR-1b). */
+  private final VerifiedSchema schema;
+
   private final MasterKey masterKey;
   private final RandomSource random;
   private final Clock clock;
@@ -50,7 +52,7 @@ public final class JdbcKeyProvider implements KeyProvider {
   public JdbcKeyProvider(
       VerifiedSchema schema, MasterKey masterKey, RandomSource random, Clock clock) {
     Objects.requireNonNull(schema, "schema");
-    this.dataSource = schema.dataSource();
+    this.schema = schema;
     this.masterKey = Objects.requireNonNull(masterKey, "masterKey");
     this.random = Objects.requireNonNull(random, "random");
     this.clock = Objects.requireNonNull(clock, "clock");
@@ -84,7 +86,7 @@ public final class JdbcKeyProvider implements KeyProvider {
   @Override
   public Unwrapped currentForWrite(TenantId tenant, SubjectId subject) {
     return JdbcSupport.inTransaction(
-        dataSource,
+        schema,
         c -> {
           // CIPHER-03: taken before anything else so a write racing the first mint for this
           // subject and an erasure of it can never both observe "no row yet" at the same time.
@@ -107,7 +109,7 @@ public final class JdbcKeyProvider implements KeyProvider {
   @Override
   public Optional<Unwrapped> forRead(TenantId tenant, SubjectId subject, int version) {
     return JdbcSupport.withConnection(
-        dataSource,
+        schema,
         c -> {
           try (PreparedStatement ps =
               c.prepareStatement(
@@ -135,7 +137,7 @@ public final class JdbcKeyProvider implements KeyProvider {
   @Override
   public long recordEncryptions(TenantId tenant, SubjectId subject, int version, int count) {
     return JdbcSupport.inTransaction(
-        dataSource,
+        schema,
         c -> {
           try (PreparedStatement ps =
               c.prepareStatement(
@@ -164,7 +166,7 @@ public final class JdbcKeyProvider implements KeyProvider {
   @Override
   public Unwrapped rotate(TenantId tenant, SubjectId subject) {
     return JdbcSupport.inTransaction(
-        dataSource,
+        schema,
         c -> {
           JdbcSupport.lockSubject(c, tenant, subject);
           Row row = highestVersion(c, tenant, subject, true);
@@ -180,7 +182,7 @@ public final class JdbcKeyProvider implements KeyProvider {
   public boolean healthy() {
     try {
       return JdbcSupport.withConnection(
-          dataSource,
+          schema,
           c -> {
             try (PreparedStatement ps =
                 c.prepareStatement("SELECT 1 FROM " + dataKeyTable + " LIMIT 0")) {
