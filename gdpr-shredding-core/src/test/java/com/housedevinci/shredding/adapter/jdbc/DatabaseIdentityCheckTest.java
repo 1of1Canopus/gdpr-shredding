@@ -128,9 +128,12 @@ class DatabaseIdentityCheckTest {
 
     assertRefused(read, "database");
     assertRefused(write, "database");
+    String ns = "SELECT oid FROM pg_catalog.pg_namespace WHERE nspname = 'public'";
+    assertThat(scalar(otherDs, ns)).isEqualTo(scalar(appDs, ns));
     assertThat(((ShreddingException) write).getMessage())
-        .contains("different: database;")
-        .contains("verified \"" + PG.getDatabaseName() + "\", got \"unguarded\"");
+        .describedAs("only the database differs")
+        .contains(
+            "(different: database; verified \"" + PG.getDatabaseName() + "\", got \"unguarded\")");
   }
 
   // ------------------------------------------------------------------ M5

@@ -70,9 +70,10 @@ final class TwoRoleCluster {
     try (var su = pool(pg, pg.getUsername(), pg.getPassword(), database)) {
       exec(
           su,
-          "DROP SCHEMA public CASCADE",
-          "CREATE SCHEMA public",
+          // Owned by the owner, but never dropped: public keeps oid 2200 in every database and
+          // every cluster, so a test that moves between them changes only what it means to.
           "ALTER SCHEMA public OWNER TO " + OWNER,
+          "REVOKE CREATE ON SCHEMA public FROM PUBLIC",
           "REVOKE ALL ON DATABASE " + database + " FROM " + APP,
           "REVOKE TEMPORARY ON DATABASE " + database + " FROM PUBLIC",
           "GRANT CONNECT ON DATABASE " + database + " TO " + APP);

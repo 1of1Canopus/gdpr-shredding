@@ -1,5 +1,6 @@
 package com.housedevinci.shredding.adapter.jdbc;
 
+import java.sql.SQLException;
 import javax.sql.DataSource;
 
 /**
@@ -22,8 +23,29 @@ final class TestSchemas {
 
   private TestSchemas() {}
 
-  /** The verified schema's name, bound to {@code dataSource} as if it had been verified there. */
+  /**
+   * The verified schema's name and database identity, bound to {@code dataSource} as if it had been
+   * verified there. Since C-PR-1b every store connection is compared with that identity, so a pool
+   * rebound here must still reach the verified database as the verified roles, or its calls refuse
+   * with {@code SHRED-SCHEMA-012} before the control the test is about.
+   */
   static VerifiedSchema reboundTo(VerifiedSchema verified, DataSource dataSource) {
-    return new VerifiedSchema(verified.name(), dataSource);
+    return new VerifiedSchema(verified.name(), dataSource, verified.identity());
+  }
+
+  /**
+   * As {@link #reboundTo}, for a test whose pool logs in as another role on purpose (a member of
+   * the verified role with its own session defaults, say): the database identity is read again
+   * through {@code dataSource}, so the C-PR-1b check sees what that pool reaches and the test
+   * reaches the control it is about.
+   */
+  static VerifiedSchema reboundAs(VerifiedSchema verified, DataSource dataSource) {
+    try (var c = dataSource.getConnection()) {
+      DatabaseIdentity identity =
+          DatabaseIdentity.read(c, verified.name(), false).identity().orElseThrow();
+      return new VerifiedSchema(verified.name(), dataSource, identity);
+    } catch (SQLException e) {
+      throw new IllegalStateException("could not read the database identity", e);
+    }
   }
 }

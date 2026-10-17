@@ -37,20 +37,35 @@ import javax.sql.DataSource;
  * {@code DataSource} object verification ran on, and the stores take their pool from it. There is
  * exactly one constructor and it requires both: there is no way to mint a name-only capability.
  * Equality follows the pool by identity, never by {@code DataSource.equals}.
+ *
+ * <p><b>Bound to what the pool reached</b> (finding C-PR-1b). The pool object staying the same does
+ * not mean its target did: a routing pool, a refresh-scoped proxy, a retargeted delegate or a
+ * mutable URL can reach another database later through the very object that was verified. The
+ * capability therefore also carries the {@link DatabaseIdentity} verification read - cluster,
+ * database, schema, login role, current role - and every store connection is compared with it
+ * before its work ({@code SHRED-SCHEMA-012}).
  */
 public final class VerifiedSchema {
 
   private final String name;
   private final DataSource dataSource;
+  private final DatabaseIdentity identity;
 
-  VerifiedSchema(String name, DataSource dataSource) {
+  VerifiedSchema(String name, DataSource dataSource, DatabaseIdentity identity) {
     Objects.requireNonNull(name, "name");
     Objects.requireNonNull(dataSource, "dataSource");
+    Objects.requireNonNull(identity, "identity");
     if (name.isBlank()) {
       throw new IllegalArgumentException("verified schema name is blank");
     }
     this.name = name;
     this.dataSource = dataSource;
+    this.identity = identity;
+  }
+
+  /** What verification's connection reached (C-PR-1b). Package-private, like the pool. */
+  DatabaseIdentity identity() {
+    return identity;
   }
 
   /**
@@ -107,21 +122,22 @@ public final class VerifiedSchema {
   }
 
   /**
-   * Same name and the same {@code DataSource} object. Two verifications through two different
-   * {@code DataSource} objects are not equal, even on the same database: a second pool can log in
-   * as another role. {@code DataSource.equals} is never consulted, because an application class can
-   * override it to answer true.
+   * Same name, the same {@code DataSource} object and the same {@link DatabaseIdentity}. Two
+   * verifications through two different {@code DataSource} objects are not equal, even on the same
+   * database: a second pool can log in as another role. {@code DataSource.equals} is never
+   * consulted, because an application class can override it to answer true.
    */
   @Override
   public boolean equals(Object other) {
     return other instanceof VerifiedSchema that
         && name.equals(that.name)
-        && dataSource == that.dataSource;
+        && dataSource == that.dataSource
+        && identity.equals(that.identity);
   }
 
   @Override
   public int hashCode() {
-    return 31 * name.hashCode() + System.identityHashCode(dataSource);
+    return 31 * (31 * name.hashCode() + System.identityHashCode(dataSource)) + identity.hashCode();
   }
 
   /**
