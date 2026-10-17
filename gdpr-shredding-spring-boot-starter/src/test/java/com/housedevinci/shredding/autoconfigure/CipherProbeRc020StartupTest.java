@@ -97,6 +97,29 @@ class CipherProbeRc020StartupTest {
     }
   }
 
+  /**
+   * C-PR-1d: core logs the verification line (WARN here, the role is privileged). The starter gate
+   * must not print it a second time.
+   */
+  @Test
+  void c_pr_1d_the_verification_line_is_logged_once_on_the_starter_path() {
+    try (var ctx = builder(null).run(args())) {
+      assertThat(
+              events.list.stream()
+                  .map(ILoggingEvent::getFormattedMessage)
+                  .filter(m -> m.contains("schema verified in schema"))
+                  .toList())
+          .hasSize(1);
+      assertThat(
+              events.list.stream()
+                  .filter(e -> e.getLevel() == Level.WARN)
+                  .map(ILoggingEvent::getFormattedMessage)
+                  .filter(m -> m.contains("is privileged over the shredding objects"))
+                  .toList())
+          .hasSize(1);
+    }
+  }
+
   @Test
   void rc_unkeyed_erasure_log_warns_at_every_startup() {
     String[] extra = {

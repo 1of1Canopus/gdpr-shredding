@@ -665,7 +665,7 @@ public final class JdbcSupport {
    *
    * <p>The strict form: a privileged runtime role is a refusal. This is the assertion a non-Spring
    * caller should make at its own startup, right after handing the adapters their {@code
-   * DataSource}.
+   * DataSource}. Logs one INFO line with {@link SchemaVerdict#summary()}.
    *
    * @return the schema that was verified, bound to {@code ds}. Hand it to {@link JdbcKeyProvider}
    *     and {@link JdbcErasureStore}, which take no {@code DataSource} of their own, so that "the
@@ -679,13 +679,18 @@ public final class JdbcSupport {
   }
 
   /**
+   * Logs one line at every call (C-PR-1d): INFO with the summary when the role is unprivileged,
+   * WARN naming the privilege legs when {@code allowPrivilegedRuntimeRole} let a privileged role
+   * through. The caller does not need to warn, and a caller that also logs the verdict prints the
+   * line twice.
+   *
    * @param allowPrivilegedRuntimeRole when true, {@code SHRED-SCHEMA-004} is not thrown and the
-   *     legs that fired are returned in {@link SchemaVerdict#privilegeLegs()} for the caller to
-   *     warn about at every startup. {@code SHRED-SCHEMA-007} is never downgraded.
+   *     legs that fired are returned in {@link SchemaVerdict#privilegeLegs()} and named in the WARN
+   *     this method logs. {@code SHRED-SCHEMA-007} is never downgraded.
    */
   public static SchemaVerdict verifySchema(DataSource ds, boolean allowPrivilegedRuntimeRole) {
     try (Connection c = ds.getConnection()) {
-      return SchemaVerification.verify(c, ds, allowPrivilegedRuntimeRole);
+      return logVerdict(SchemaVerification.verify(c, ds, allowPrivilegedRuntimeRole));
     } catch (SQLException e) {
       throw new ShreddingException(
           ErrorCodes.SCHEMA_UNVERIFIABLE,
@@ -695,6 +700,28 @@ public final class JdbcSupport {
               + "). Unverifiable is not clean, so this is a refusal.",
           e);
     }
+  }
+
+  /**
+   * The one line per verification. Printed at every call, never once, so a weaker mode cannot be on
+   * without the log of that start saying so.
+   */
+  private static SchemaVerdict logVerdict(SchemaVerdict verdict) {
+    if (verdict.runtimeRoleIsUnprivileged()) {
+      log.info("shredding: {}", verdict.summary());
+    } else {
+      log.warn(
+          "shredding: the runtime role {} is privileged over the shredding objects in schema {}: {}."
+              + " The append-only controls are advisory in this configuration: nothing stops this"
+              + " application from disabling or replacing its own guards. Record this in your"
+              + " processing documentation, or move the application to a non-privileged role (see"
+              + " docs/upgrading-0.2.0.md). {}",
+          verdict.role(),
+          verdict.schema().name(),
+          String.join("; ", verdict.privilegeLegs()),
+          verdict.summary());
+    }
+    return verdict;
   }
 
   /**
@@ -738,7 +765,7 @@ public final class JdbcSupport {
         SchemaVerdict verdict =
             SchemaVerification.verifyInCallersTransaction(c, ds, allowPrivilegedRuntimeRole);
         c.commit();
-        return verdict;
+        return logVerdict(verdict);
       } catch (RuntimeException e) {
         c.rollback();
         throw e;

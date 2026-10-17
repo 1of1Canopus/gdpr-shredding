@@ -1442,7 +1442,9 @@ final class SchemaVerification {
         + " SECURITY-NOTES.md, and point spring.datasource.username at the runtime role. Step by"
         + " step: docs/upgrading-0.2.0.md. To boot anyway and accept that the append-only controls"
         + " are advisory in this configuration, set"
-        + " shredding.jdbc.allow-privileged-runtime-role=true, which warns at every startup.";
+        + " shredding.jdbc.allow-privileged-runtime-role=true (starter), or call"
+        + " JdbcSupport.verifySchema(ds, true) / initializeAndVerifySchema(ds, true) (core"
+        + " without the starter, which never reads the property). Both warn at every call.";
   }
 
   private static String underprivilegedRemedy() {
