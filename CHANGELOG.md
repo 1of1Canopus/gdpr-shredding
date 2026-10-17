@@ -30,7 +30,7 @@ All notable changes to this project. The format follows
 - The architecture rule on `VerifiedSchema` minting now also catches a constructor reference
   (`VerifiedSchema::new`) (C-PR38-2), and the starter has its own architecture test: no starter
   class in a core package, no access to the constructor (C-PR38-3).
-- `VerifiedSchema.equals and, through the record, `SchemaVerdict.equals` now include the identity
+- `VerifiedSchema.equals` and, through the record, `SchemaVerdict.equals` now include the identity
   of the DataSource the schema was verified on. Two verifications through two different DataSource
   objects are no longer equal, even on the same database.
 - The starter's default `JdbcKeyProvider` and `JdbcErasureStore` beans use the new constructors.

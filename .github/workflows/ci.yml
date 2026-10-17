@@ -173,6 +173,10 @@ jobs:
         run: ./mvnw -B -ntp verify -DskipTests -Djacoco.skip=true
       - name: Probe the sealed jdbc package
         run: tools/cipher-probe-c-pr-1-split-package.sh .
+      # C-PR38-5: every CHANGELOG item closes its code spans (an odd backtick count renders the
+      # wrong words as code).
+      - name: Probe the CHANGELOG code spans
+        run: tools/cipher-probe-c-pr38-p2-changelog-codespans.sh .
       - name: Probe the starter scope of the VerifiedSchema rule
         run: tools/cipher-probe-c-pr-1-starter-scope.sh .
 
