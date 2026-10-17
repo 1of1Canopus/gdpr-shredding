@@ -100,7 +100,26 @@
 #       name is never seen; split into lines first, one path would become two clean ones.
 #   N6  A refused name is printed after the refusal, every byte outside printable ASCII as
 #       `\xHH` (B-NG-13). A raw newline in a path cannot start an output line that the CI
-#       runner reads as a workflow command.
+#       runner reads as a workflow command. Content hits are printed the same way, line by
+#       line (`escape_lines`, B-NG-23): a hit line holds no newline, but it can hold a
+#       carriage return, and the runner ends a line there too, so `\r::warning::` in a hit
+#       would start a command.
+#   N7  Extraction is checked one to one, after unzip and before the content scan (B-NG-19,
+#       B-NG-20, B-NG-21). unzip does not write every listed member as one regular file: it
+#       folds `./a.txt` onto `a.txt` (the later member overwrites the earlier one), it drops
+#       the data of a directory entry, and it makes a symlink whose stored target the
+#       recursive grep never reads. So: any symlink in the extraction folder is refused
+#       (`symlink`); then the number of regular files must equal the number of listed
+#       members that are not directories, and their total size must equal the `bytes
+#       uncompressed` figure of `unzip -Zt` (`listing mismatch`). Any rewrite or disk
+#       collision loses a file or bytes, so this closes the class, not only the spellings
+#       below. A jar that fails N7 is not content-scanned: its extraction proves nothing.
+#       Before extraction, empty and `.` segments (`./`, `//`, `/./`, a trailing `/.`) are
+#       refused by name (`dot segment`), so the common spellings get a precise reason.
+#       Measured on the 12 published jars of the three modules (2026-10-17): files and
+#       bytes equal on every one. The "listed, not extracted" refusal stays: Apple's unzip
+#       lists a non-ASCII member name as `?`, so the name is not found on disk although
+#       the counts agree; the self-test reaches it by calling `check_extracted_members`.
 #   Tree: symlinks (mode 120000, the target is a path string) and gitlinks (160000) are
 #       refused. Jars, before extraction: `unzip -Z1` prints a control byte as `^J`, `^I`,
 #       so any `^` in a member name is refused (B-NG-11), and the -Z1 line count must equal
@@ -115,7 +134,8 @@
 #   agent-guard 210 entries, gdpr-shredding 457, stripe-einvoice 311; no control byte, no
 #   symlink, no gitlink; 5, 10 and 13 name hits, every one of them a review document of the
 #   admitted shape.
-#   Not here: gzip members in jars (B-NG-14, own change); look-alike Unicode letters.
+#   Not here: gzip members in jars and a nested zip behind a prefix byte (B-NG-14,
+#   B-NG-22, own change); look-alike Unicode letters (B-NG-28, design stop).
 #
 set -uo pipefail
 # N0: the C locale for every grep, git grep, sort and case pattern below. Exported before
@@ -151,6 +171,18 @@ escape_bytes() {
     for (i = 1; i <= NF; i++) {
       b = $i + 0
       if (b >= 32 && b < 127 && b != 92) printf "%c", b; else printf "\\x%02X", b
+    }
+  }'
+}
+
+# N6, B-NG-23: the same escape for a stream of lines; only the newline stays a newline.
+escape_lines() {
+  od -An -v -tu1 | awk '{
+    for (i = 1; i <= NF; i++) {
+      b = $i + 0
+      if (b == 10) printf "\n"
+      else if (b >= 32 && b < 127 && b != 92) printf "%c", b
+      else printf "\\x%02X", b
     }
   }'
 }
@@ -240,7 +272,7 @@ scan_tree_content() {
   case "$rc" in
     0)
       echo "::error::check-private-references: content: found a reference to a moved-private document, a machine-local path or an agent first name:"
-      printf '%s\n' "$hits"
+      printf '%s\n' "$hits" | escape_lines
       return 1
       ;;
     1)
@@ -277,8 +309,10 @@ scan_dir() {
 # B-NG-11: the -Z1 name list must have exactly as many lines as `unzip -Zt` has entries.
 # The -Zt line is parsed strictly: `1 file, ...` or `N files, ...`, nothing else. An empty
 # jar ("Empty zipfile.") or a line that does not parse is refused.
+# The `unzip -Zt` total line, defined once: entry count, then bytes uncompressed.
+zt_line_re='^([0-9]+) files?, ([0-9]+) bytes uncompressed, [0-9]+ bytes compressed: *-?[0-9]+[.][0-9]%$'
 jar_counts_match() { # jar_counts_match <list-file> <total-file>
-  local re='^([0-9]+) files?, [0-9]+ bytes uncompressed, [0-9]+ bytes compressed: *-?[0-9]+[.][0-9]%$'
+  local re="$zt_line_re"
   local line n lines
   if [ ! -f "$1" ] || [ ! -f "$2" ] || [ "$(wc -l < "$2" | tr -d ' ')" != "1" ]; then
     refuse "cannot list" "entry count of $1"; return 1
@@ -309,7 +343,7 @@ check_jar_listing() { # check_jar_listing <jar> <list-file> <work-dir>
       *[[:cntrl:]]*|*'^'*) refuse "control byte" "$jar!$name"; status=1; continue ;;
     esac
     case "$name" in
-      /*|*'\'*|..|../*|*/..|*/../*) refuse "dot segment" "$jar!$name"; status=1; continue ;;
+      /*|*'\'*|..|../*|*/..|*/../*|.|./*|*/.|*/./*|*//*|'') refuse "dot segment" "$jar!$name"; status=1; continue ;;
     esac
   done < "$lst"
   # B-NG-10: exact duplicates, then names equal after case folding among the distinct ones
@@ -343,8 +377,57 @@ check_jar_listing() { # check_jar_listing <jar> <list-file> <work-dir>
   return 0
 }
 
+# N7: after extraction, before the content scan. Exit 0: every listed byte is in a regular
+# file the content scan will read. Exit 1: refused, do not trust the extraction.
+extracted_matches_listing() { # extracted_matches_listing <jar> <list-file> <total-file> <dest>
+  local jar="$1" lst="$2" tot="$3" dest="$4" f name line status=0
+  local want_files=0 want_bytes have_files=0 have_bytes
+  listing "$jar (symlinks in the extraction)" "$dest.links" find "$dest" -type l -print0 || return 1
+  while IFS= read -r -d '' f; do
+    refuse "symlink" "$jar!${f#"$dest"/}"; status=1
+  done < "$dest.links"
+  [ "$status" -eq 0 ] || return 1
+  IFS= read -r line < "$tot"
+  if ! [[ "$line" =~ $zt_line_re ]]; then
+    refuse "cannot list" "entry count line: $line"; return 1
+  fi
+  want_bytes="${BASH_REMATCH[2]}"
+  while IFS= read -r name || [ -n "$name" ]; do
+    case "$name" in */) ;; *) want_files=$((want_files + 1)) ;; esac
+  done < "$lst"
+  listing "$jar (files in the extraction)" "$dest.files" find "$dest" -type f -print0 || return 1
+  while IFS= read -r -d '' f; do have_files=$((have_files + 1)); done < "$dest.files"
+  listing "$jar (bytes in the extraction)" "$dest.bytes" \
+    bash -o pipefail -c 'find "$1" -type f -exec cat {} + | wc -c' _ "$dest" || return 1
+  have_bytes="$(tr -d ' \t\n' < "$dest.bytes")"
+  if [ "$have_files" != "$want_files" ] || [ "$have_bytes" != "$want_bytes" ]; then
+    refuse "listing mismatch" "$jar: $want_files files and $want_bytes bytes listed, $have_files files and $have_bytes bytes extracted"
+    return 1
+  fi
+  return 0
+}
+
+# B-NG-6: a member that is itself a zip archive is compressed bytes to grep, so any text
+# inside it is unverifiable. Refuse it rather than call it clean. The members come from the
+# same -Z1 list as the names, not from a second listing tool.
+check_extracted_members() { # check_extracted_members <jar> <list-file> <dest>
+  local jar="$1" lst="$2" dest="$3" name magic status=0
+  while IFS= read -r name; do
+    case "$name" in */) continue ;; esac
+    if [ ! -f "$dest/$name" ]; then
+      refuse "cannot list" "$jar!$name (listed, not extracted)"; status=1; continue
+    fi
+    magic="$(od -An -N4 -tx1 "$dest/$name" 2>/dev/null | tr -d ' \n')"
+    if [ "$magic" = "504b0304" ]; then
+      refuse "nested archive" "$jar!$name (not scanned, refusing to call it clean)"
+      status=1
+    fi
+  done < "$lst"
+  return "$status"
+}
+
 scan_jars() {
-  local status=0 module jar dest w lst tot name magic found_any=0 i=0 out
+  local status=0 module jar dest w lst tot found_any=0 i=0 out rc
   for module in "$@"; do
     for jar in "$module"/target/*.jar; do
       [ -f "$jar" ] || continue
@@ -369,23 +452,11 @@ scan_jars() {
         status=1
         continue
       fi
-      # B-NG-6: a member that is itself a zip archive is compressed bytes to grep, so any
-      # text inside it is unverifiable. Refuse it rather than call it clean. The members
-      # come from the same -Z1 list as the names, not from a second listing tool.
-      while IFS= read -r name; do
-        case "$name" in */) continue ;; esac
-        if [ ! -f "$dest/$name" ]; then
-          refuse "cannot list" "$jar!$name (listed, not extracted)"; status=1; continue
-        fi
-        magic="$(od -An -N4 -tx1 "$dest/$name" 2>/dev/null | tr -d ' \n')"
-        if [ "$magic" = "504b0304" ]; then
-          refuse "nested archive" "$jar!$name (not scanned, refusing to call it clean)"
-          status=1
-        fi
-      done < "$lst"
+      extracted_matches_listing "$jar" "$lst" "$tot" "$dest" || { status=1; continue; }
+      check_extracted_members "$jar" "$lst" "$dest" || status=1
       if ! scan_dir "$dest" > "$w/hits.txt"; then
         echo "::error::check-private-references: content: $(escape_bytes "$jar") contains a reference to a moved-private document, a machine-local path or an agent first name:"
-        cat "$w/hits.txt"
+        escape_lines < "$w/hits.txt"
         status=1
       fi
     done
@@ -700,7 +771,8 @@ with zipfile.ZipFile(sys.argv[1], "w") as z: z.write(sys.argv[2], "Entry.class")
 
   # Member names (B-NG-7, B-NG-10, B-NG-11). The jar is built by Python's zipfile from
   # pairs of arguments, member name then member text; a text of `@nested:<name>` stores a
-  # zip holding one clean member of that name. A name ending in `/` is a directory entry.
+  # zip holding one clean member of that name, `@link:<target>` a symlink member with that
+  # stored target. A name ending in `/` is a directory entry (its text is stored as data).
   _zip_case() { # _zip_case <name> <expect> <jar file name> <member> <text> [<member> <text>]...
     local name="$1" expect="$2" mod="$work/zip-$1" rc=0
     mkdir -p "$mod/target"
@@ -713,6 +785,11 @@ with zipfile.ZipFile(sys.argv[1], "w") as z:
             with zipfile.ZipFile(b, "w") as n:
                 n.writestr(t[len("@nested:"):], "clean\n")
             z.writestr(m, b.getvalue())
+        elif t.startswith("@link:"):
+            zi = zipfile.ZipInfo(m)
+            zi.create_system = 3
+            zi.external_attr = 0o120777 << 16
+            z.writestr(zi, t[len("@link:"):])
         else:
             z.writestr(m, t)' "$mod/target/$3" "${@:4}"; then
       echo "self-test FAIL  $name: could not build the scratch jar (python3 missing?)"
@@ -736,6 +813,37 @@ with zipfile.ZipFile(sys.argv[1], "w") as z:
   _zip_case "jar-nested-member-name"           "red:nested archive"   case.jar "lib/inner.zip" "@nested:$q"
   _zip_case "jar-empty"                        "red:cannot list"      case.jar
   _zip_case "jar-clean-cipher-class"           green                  case.jar "com/housedevinci/x/Field$cr.class" "clean" "META-INF/" ""
+  # N7 (B-NG-19, B-NG-20, B-NG-21): unzip folds these pairs onto one file, keeping the clean
+  # one; a directory entry's data is dropped; a symlink's stored target is never read.
+  local crb lt
+  crb=$'\r'
+  lt="$work/link-target.txt"
+  printf 'clean\n' > "$lt"
+  _zip_case "jar-member-dot-slash-folds"       "red:dot segment"      case.jar "./a.txt" "see $q" "a.txt" "clean"
+  _zip_case "jar-member-double-slash-folds"    "red:dot segment"      case.jar "b//a.txt" "see $q" "b/a.txt" "clean"
+  _zip_case "jar-member-dot-segment-folds"     "red:dot segment"      case.jar "b/./a.txt" "see $q" "b/a.txt" "clean"
+  _zip_case "jar-member-backslash"             "red:dot segment"      case.jar 'a\b.txt' "clean"
+  _zip_case "jar-directory-entry-data"         "red:listing mismatch" case.jar "a.txt" "clean" "d/" "see $q"
+  _zip_case "jar-symlink-member"               red:symlink            case.jar "a.txt" "clean" "link" "@link:$lt"
+  _zip_case "jar-file-name-control-byte"       "red:control byte"     "a${nl}b.jar" "a.txt" "clean"
+  # N6, B-NG-23: a content hit holding a carriage return is printed escaped, on both sides.
+  _case     "content-hit-carriage-return"      red:content   doc.md   "see $q${crb}::warning::spoofed"
+  _zip_case "jar-content-hit-carriage-return"  red:content            case.jar "a.txt" "see $q${crb}::warning::spoofed"
+  for v in "$work/content-hit-carriage-return.out" "$work/zip-jar-content-hit-carriage-return.out"; do
+    if tr '\r' '\n' < "$v" | grep -aq '^::warning::'; then
+      echo "self-test FAIL  $(basename "$v" .out): a content hit started a runner command line (N6)"
+      failures=$((failures + 1))
+    else
+      echo "self-test OK    $(basename "$v" .out) printed escaped (N6)"
+    fi
+  done
+  # The "listed, not extracted" refusal, on the real function: Apple's unzip lists a
+  # non-ASCII name as `?`, which no portable jar reproduces on both systems.
+  mkdir -p "$work/not-extracted"
+  printf 'a.txt\n' > "$work/not-extracted.lst"
+  local nrc=0
+  ( check_extracted_members "$work/x.jar" "$work/not-extracted.lst" "$work/not-extracted" ) > "$work/not-extracted.out" 2>&1 || nrc=1
+  _verdict "listed-not-extracted" "red:cannot list" "$nrc" "$work/not-extracted.out"
 
   # N4: a listing that fails refuses. The real `listing` function on a missing jar, no stub.
   local lrc=0

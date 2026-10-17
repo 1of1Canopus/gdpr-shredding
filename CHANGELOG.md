@@ -17,6 +17,12 @@ All notable changes to this project. The format follows
   jar's entry count are refused before extraction. The guard runs in the C locale, so a byte
   that is not valid UTF-8 no longer hides a name, and a refused name is printed with every
   non-printable byte escaped.
+- The jar side of the reference guard checks that extraction was one to one: no symlink in the
+  extracted folder, and the number of regular files and their total bytes equal what the jar's
+  central directory lists. Before, a member at `./a.txt` next to `a.txt`, the data of a
+  directory entry, or a symlink member's stored target could carry text the content scan never
+  read. Member names with an empty or `.` segment are refused by name. Content hits are printed
+  with control bytes escaped, so a carriage return in a hit cannot start a workflow command.
 - The reference guard (`tools/check-private-references.sh`) now also refuses the first names of
   the studio's agents in the tree, the main jar and the sources jar, so public text keeps to
   roles. Case-sensitive and whole-word; the script's header lists each name left out and why.
