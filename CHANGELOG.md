@@ -7,6 +7,9 @@ All notable changes to this project. The format follows
 ## [Unreleased]
 
 ### Fixed
+- The reference guard now refuses the moved-private document names in any letter case (for
+  example a lower-case copy of a private document), in content and in file names. The bare
+  review and release words stay upper case only, because in lower case they are plain English.
 - The reference guard (`tools/check-private-references.sh`) now also refuses the first names of
   the studio's agents in the tree, the main jar and the sources jar, so public text keeps to
   roles. Case-sensitive and whole-word; the script's header lists each name left out and why.
