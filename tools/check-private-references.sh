@@ -103,7 +103,9 @@
 #       runner reads as a workflow command. Content hits are printed the same way, line by
 #       line (`escape_lines`, B-NG-23): a hit line holds no newline, but it can hold a
 #       carriage return, and the runner ends a line there too, so `\r::warning::` in a hit
-#       would start a command.
+#       would start a command. Every hit line, tree and jar, also starts with the fixed
+#       prefix `hit: ` (B-NG-30), so a file path such as `::stop-commands::tok` cannot be the
+#       first bytes of a line.
 #   N7  Extraction is checked one to one, after unzip and before the content scan (B-NG-19,
 #       B-NG-20, B-NG-21). unzip does not write every listed member as one regular file: it
 #       folds `./a.txt` onto `a.txt` (the later member overwrites the earlier one), it drops
@@ -175,13 +177,17 @@ escape_bytes() {
   }'
 }
 
-# N6, B-NG-23: the same escape for a stream of lines; only the newline stays a newline.
+# N6, B-NG-23, B-NG-30: the same escape for a stream of lines; only the newline stays a
+# newline. Every non-empty line starts with the fixed prefix `hit: `, so a hit line can never
+# start with the file path it carries: a tracked file named `::stop-commands::tok` would
+# otherwise print a line the runner reads as a workflow command.
 escape_lines() {
-  od -An -v -tu1 | awk '{
+  od -An -v -tu1 | awk 'BEGIN { start = 1 } {
     for (i = 1; i <= NF; i++) {
       b = $i + 0
-      if (b == 10) printf "\n"
-      else if (b >= 32 && b < 127 && b != 92) printf "%c", b
+      if (b == 10) { printf "\n"; start = 1; continue }
+      if (start) { printf "hit: "; start = 0 }
+      if (b >= 32 && b < 127 && b != 92) printf "%c", b
       else printf "\\x%02X", b
     }
   }'
@@ -837,6 +843,30 @@ with zipfile.ZipFile(sys.argv[1], "w") as z:
       echo "self-test OK    $(basename "$v" .out) printed escaped (N6)"
     fi
   done
+  # N6, B-NG-30: a tracked file whose NAME is a runner command, with a hit inside. Every output
+  # line, split on CR and LF as the runner splits, must not start with `::` (after blanks)
+  # except the guard's own error line; the hit line starts with `hit: `.
+  _case "hit-path-starts-a-command" red:content '::stop-commands::tok' "see $q"
+  if tr '\r' '\n' < "$work/hit-path-starts-a-command.out" | grep -a -E '^[[:space:]]*::' \
+       | grep -aqv '^::error::check-private-references: '; then
+    echo "self-test FAIL  hit-path-starts-a-command: a hit line started with its file path (N6)"
+    failures=$((failures + 1))
+  elif ! grep -aq '^hit: ' "$work/hit-path-starts-a-command.out"; then
+    echo "self-test FAIL  hit-path-starts-a-command: no hit line found to check (N6)"
+    failures=$((failures + 1))
+  else
+    echo "self-test OK    hit-path-starts-a-command hit lines start with the fixed prefix (N6)"
+  fi
+  # N7, B-NG-31: the file-count half of the one-to-one check, alone. Equal bytes, unequal file
+  # count: the dirty `./a.txt` listed at size 0 plus a clean `a.txt` (6 bytes, 2 files listed),
+  # extracted as one 6-byte file. Only the file-count comparison can refuse this.
+  mkdir -p "$work/file-count-half"
+  printf 'clean\n' > "$work/file-count-half/a.txt"
+  printf './a.txt\na.txt\n' > "$work/file-count-half.lst"
+  printf '2 files, 6 bytes uncompressed, 6 bytes compressed:  0.0%%\n' > "$work/file-count-half.tot"
+  local frc=0
+  ( extracted_matches_listing "$work/x.jar" "$work/file-count-half.lst" "$work/file-count-half.tot" "$work/file-count-half" ) > "$work/file-count-half.out" 2>&1 || frc=1
+  _verdict "file-count-half" "red:listing mismatch" "$frc" "$work/file-count-half.out"
   # The "listed, not extracted" refusal, on the real function: Apple's unzip lists a
   # non-ASCII name as `?`, which no portable jar reproduces on both systems.
   mkdir -p "$work/not-extracted"
