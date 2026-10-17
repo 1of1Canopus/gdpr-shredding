@@ -85,8 +85,8 @@ class CipherProbeRc020StartupTest {
     "shredding.allow-second-level-cache=true, shredding.allow-second-level-cache=true",
     "shredding.erased-value.policy=null, shredding.erased-value.policy=null",
     "shredding.jdbc.initialize-schema=true, shredding.jdbc.initialize-schema=true",
-    "shredding.jdbc.allow-privileged-runtime-role=true,"
-        + " shredding.jdbc.allow-privileged-runtime-role=true",
+    // C-PR-1d: core logs this WARN; it names the role and legs, not the starter property.
+    "shredding.jdbc.allow-privileged-runtime-role=true, is privileged over the shredding objects",
   })
   void rc_each_weaker_mode_warns_at_every_startup(String property, String expected) {
     for (int boot = 0; boot < 2; boot++) {
@@ -94,6 +94,29 @@ class CipherProbeRc020StartupTest {
       try (var ctx = builder(property).run(args(property))) {
         assertThat(warnsContaining(expected)).describedAs("boot %d, %s", boot, property).isTrue();
       }
+    }
+  }
+
+  /**
+   * C-PR-1d: core logs the verification line (WARN here, the role is privileged). The starter gate
+   * must not print it a second time.
+   */
+  @Test
+  void c_pr_1d_the_verification_line_is_logged_once_on_the_starter_path() {
+    try (var ctx = builder(null).run(args())) {
+      assertThat(
+              events.list.stream()
+                  .map(ILoggingEvent::getFormattedMessage)
+                  .filter(m -> m.contains("schema verified in schema"))
+                  .toList())
+          .hasSize(1);
+      assertThat(
+              events.list.stream()
+                  .filter(e -> e.getLevel() == Level.WARN)
+                  .map(ILoggingEvent::getFormattedMessage)
+                  .filter(m -> m.contains("is privileged over the shredding objects"))
+                  .toList())
+          .hasSize(1);
     }
   }
 

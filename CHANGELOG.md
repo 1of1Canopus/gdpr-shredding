@@ -7,6 +7,13 @@ All notable changes to this project. The format follows
 ## [Unreleased]
 
 ### Security
+- **C-PR-1d (LOW): core stayed silent in the weaker privileged mode.**
+  `JdbcSupport.verifySchema(ds, true)` and `initializeAndVerifySchema(ds, true)` accepted a
+  privileged runtime role and logged nothing. The javadoc left the WARN to the caller, so a team
+  using core without the starter had no warning that the append-only guards can be disabled by
+  that role. Core now logs one line per verification, at every call: INFO with the summary in the
+  strict mode, WARN naming the privilege legs in the privileged mode. The starter gate no longer
+  prints the same line a second time. The privileged WARN no longer names the starter property.
 - **C-PR-1 (MEDIUM): a JDBC store could write to a database the schema gate never checked.**
   `VerifiedSchema` held only a schema name, so `new JdbcKeyProvider(otherDataSource,
   gate.schema(), ...)` built, the context started, and keys, erasure log, tombstones and the anchor

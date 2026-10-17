@@ -240,7 +240,8 @@ class StoreDataSourceBindingStarterTest {
       log.detach();
     }
     assertThat(keyRows(POSTGRES.getJdbcUrl())).isEqualTo(verifiedBefore + 1);
-    assertThat(log.lines).anyMatch(l -> l.startsWith("INFO|") && l.contains("schema verified"));
+    // Core logs it (INFO, or WARN when this test role is privileged), exactly once (C-PR-1d).
+    assertThat(log.lines).filteredOn(l -> l.contains("schema verified")).hasSize(1);
   }
 
   @Test

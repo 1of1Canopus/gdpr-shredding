@@ -68,16 +68,15 @@ public final class ShreddingSchemaGate {
                         + " schema-postgresql.sql as the owner role.",
                     index,
                     verdict.schema()));
-    // Printed in both modes. summary() drops the clause about the role when a leg fired, so the
-    // line claims only what was actually established (C-D2-4): an INFO line an auditor reads is a
-    // claim, by the same argument a refusal is.
-    log.info("shredding: {}", verdict.summary());
+    // The INFO summary, or the WARN naming the privilege legs, is logged by core at every
+    // verification (C-PR-1d). It is not printed again here.
   }
 
   /**
-   * Both WARNs fire at <em>every</em> startup, never once. An operator who reads one boot log a
-   * month has to see it in that log, and a weaker mode that announces itself only the first time is
-   * a weaker mode nobody knows is on.
+   * The {@code initialize-schema} WARN fires at <em>every</em> startup, never once. An operator who
+   * reads one boot log a month has to see it in that log, and a weaker mode that announces itself
+   * only the first time is a weaker mode nobody knows is on. The privileged-role WARN is logged by
+   * core.
    */
   private void warn(ShreddingProperties.JdbcProperties jdbc) {
     if (jdbc.isInitializeSchema()) {
@@ -91,20 +90,6 @@ public final class ShreddingSchemaGate {
               + " production: apply schema-postgresql.sql once with an owner role, grant the"
               + " runtime role the statements in SECURITY-NOTES.md \"Database roles\", and leave"
               + " shredding.jdbc.initialize-schema=false. See docs/upgrading-0.2.0.md.");
-    }
-    if (!verdict.runtimeRoleIsUnprivileged()) {
-      log.warn(
-          "shredding: {} and the runtime role {} is"
-              + " privileged over the shredding objects in schema {}: {}. The append-only controls"
-              + " are advisory in this configuration: nothing stops this application from disabling"
-              + " or replacing its own guards. Record this in your processing documentation, or"
-              + " follow docs/upgrading-0.2.0.md to move the application to a non-privileged role.",
-          jdbc.isAllowPrivilegedRuntimeRole()
-              ? "shredding.jdbc.allow-privileged-runtime-role=true"
-              : "shredding.jdbc.initialize-schema=true implies a role that can run DDL here",
-          verdict.role(),
-          verdict.schema(),
-          String.join("; ", verdict.privilegeLegs()));
     }
   }
 
