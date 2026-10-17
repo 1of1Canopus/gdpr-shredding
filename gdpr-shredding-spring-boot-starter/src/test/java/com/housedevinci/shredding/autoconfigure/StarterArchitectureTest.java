@@ -5,6 +5,7 @@ import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
 import com.housedevinci.shredding.adapter.jdbc.VerifiedSchema;
 import com.tngtech.archunit.base.DescribedPredicate;
 import com.tngtech.archunit.core.domain.JavaAccess;
+import com.tngtech.archunit.core.domain.JavaClass;
 import com.tngtech.archunit.core.domain.JavaClasses;
 import com.tngtech.archunit.core.domain.JavaConstructor;
 import com.tngtech.archunit.core.importer.ClassFileImporter;
@@ -70,26 +71,57 @@ class StarterArchitectureTest {
   }
 
   /**
-   * C-PR-1b, round 2, item 9: the starter takes no connection itself. Its reads go through {@code
-   * JdbcSupport.readVerified}, which checks the database before the work; a {@code getConnection}
-   * here would skip that check. Every overload on any {@code DataSource} type, {@code
-   * DriverManager.getConnection} and {@code Driver.connect}, by call or by method reference.
+   * C-PR-1b, round 2, item 9 and C-PR42-1: the starter takes no connection itself. Its reads go
+   * through {@code JdbcSupport.readVerified}, which checks the database before the work; any other
+   * way to open a connection would skip that check. The predicate is {@link
+   * ConnectionAccess#TAKES_A_CONNECTION}, the twin of the core's, with its own probe.
    */
   @Test
   void getConnection_is_called_only_inside_JdbcSupport() {
-    noClasses()
-        .should()
-        .accessTargetWhere(
-            DescribedPredicate.describe(
-                "DataSource.getConnection, DriverManager.getConnection or Driver.connect",
-                (JavaAccess<?> access) -> {
-                  var owner = access.getTargetOwner();
-                  String name = access.getTarget().getName();
-                  return (name.equals("getConnection")
-                          && (owner.isAssignableTo(javax.sql.DataSource.class)
-                              || owner.isEquivalentTo(java.sql.DriverManager.class)))
-                      || (name.equals("connect") && owner.isAssignableTo(java.sql.Driver.class));
-                }))
-        .check(starterMain);
+    noClasses().should().accessTargetWhere(ConnectionAccess.TAKES_A_CONNECTION).check(starterMain);
+  }
+
+  /**
+   * The twin of the core's {@code HexagonalArchitectureTest.ConnectionAccess}: this test cannot see
+   * core test classes. Keep the two equal. It refuses, by call or by method reference: {@code
+   * getConnection} on any {@code DataSource}, {@code DriverManager} or {@code PooledConnection};
+   * {@code Driver.connect}; {@code createConnectionBuilder} and {@code ConnectionBuilder.build};
+   * {@code getPooledConnection}; {@code getXAConnection}; Spring's {@code DataSourceUtils}; and any
+   * class in {@code org.springframework.jdbc.core} (templates, {@code JdbcClient}, {@code
+   * SimpleJdbcInsert}, {@code SimpleJdbcCall}).
+   */
+  static final class ConnectionAccess {
+    private ConnectionAccess() {}
+
+    static final DescribedPredicate<JavaAccess<?>> TAKES_A_CONNECTION =
+        DescribedPredicate.describe(
+            "a JDBC connection taken outside JdbcSupport (DataSource, Driver, pooled or XA"
+                + " connection, ConnectionBuilder, Spring DataSourceUtils or JDBC template)",
+            (JavaAccess<?> access) -> {
+              JavaClass owner = access.getTargetOwner();
+              String name = access.getTarget().getName();
+              boolean directConnection =
+                  name.equals("getConnection")
+                      && (owner.isAssignableTo(javax.sql.DataSource.class)
+                          || owner.isAssignableTo(javax.sql.PooledConnection.class)
+                          || owner.isEquivalentTo(java.sql.DriverManager.class));
+              boolean driver =
+                  name.equals("connect") && owner.isAssignableTo(java.sql.Driver.class);
+              boolean builder =
+                  (name.equals("createConnectionBuilder")
+                          && owner.isAssignableTo(javax.sql.DataSource.class))
+                      || (name.equals("build")
+                          && owner.isAssignableTo(java.sql.ConnectionBuilder.class));
+              boolean pooledOrXa =
+                  (name.equals("getPooledConnection")
+                          && owner.isAssignableTo(javax.sql.ConnectionPoolDataSource.class))
+                      || (name.equals("getXAConnection")
+                          && owner.isAssignableTo(javax.sql.XADataSource.class));
+              boolean spring =
+                  owner.getName().equals("org.springframework.jdbc.datasource.DataSourceUtils")
+                      || owner.getPackageName().equals("org.springframework.jdbc.core")
+                      || owner.getPackageName().startsWith("org.springframework.jdbc.core.");
+              return directConnection || driver || builder || pooledOrXa || spring;
+            });
   }
 }

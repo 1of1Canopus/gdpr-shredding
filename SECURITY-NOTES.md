@@ -1035,7 +1035,9 @@ installation are in [docs/upgrading-0.2.0.md](docs/upgrading-0.2.0.md).
 Grant exactly this, no more, with the module's schema on the `search_path` of whoever runs it (or
 the names qualified). The runtime role must also be able to execute
 `pg_catalog.pg_control_system()`, which PostgreSQL grants to `PUBLIC` by default; startup refuses
-with `SHRED-SCHEMA-005` otherwise (C-PR-1b):
+with `SHRED-SCHEMA-005` otherwise (C-PR-1b). If your service denies the call, the master user
+fixes it with one statement: `GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO
+shredding_app;`.
 
 ```sql
 GRANT USAGE                  ON SCHEMA <schema>                     TO shredding_app;
@@ -1202,9 +1204,13 @@ so a role-owned operator ahead of `pg_catalog` cannot pick another row. Client-s
 `DatabaseMetaData`) are never used: a wrapper can say anything, and DNS can move a server behind
 one URL.
 
-`JdbcSupport` is the only class that takes a connection, in core and in the starter (an
-architecture rule refuses `getConnection`, `DriverManager.getConnection` and `Driver.connect`
-anywhere else). The starter's boot-time mapping check reads through `JdbcSupport.readVerified`.
+`JdbcSupport` is the only class that takes a connection, in core and in the starter. Two
+architecture rules (one per module) refuse, anywhere else: `getConnection` on a `DataSource`, a
+`PooledConnection` or `DriverManager`; `Driver.connect`; `createConnectionBuilder` and
+`ConnectionBuilder.build`; `getPooledConnection`; `getXAConnection`; Spring's `DataSourceUtils`;
+and any class of `org.springframework.jdbc.core` (templates, `JdbcClient`, `SimpleJdbcInsert`,
+`SimpleJdbcCall`). The rules read compiled calls and method references. They do not see a
+connection taken by reflection or through an ORM API. The starter's boot-time mapping check reads through `JdbcSupport.readVerified`.
 
 | # | Path | Outcome |
 |---|---|---|
