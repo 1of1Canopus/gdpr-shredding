@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import javax.sql.DataSource;
 
 /**
  * Reads the PostgreSQL catalogue and decides whether the schema in {@code current_schema()} still
@@ -80,7 +81,8 @@ final class SchemaVerification {
    *     SchemaVerdict#privilegeLegs()} for the caller to warn about, instead of a refusal. {@code
    *     007} is never downgraded.
    */
-  static SchemaVerdict verify(Connection connection, boolean allowPrivilegedRuntimeRole) {
+  static SchemaVerdict verify(
+      Connection connection, DataSource dataSource, boolean allowPrivilegedRuntimeRole) {
     boolean previousAutoCommit;
     boolean previousReadOnly;
     int previousIsolation;
@@ -96,7 +98,7 @@ final class SchemaVerification {
       throw unverifiable(e);
     }
     try {
-      return run(connection, allowPrivilegedRuntimeRole);
+      return run(connection, dataSource, allowPrivilegedRuntimeRole);
     } catch (SQLException e) {
       throw unverifiable(e);
     } finally {
@@ -117,9 +119,9 @@ final class SchemaVerification {
    * eleven legs that are qualified in text and unqualified in substance.
    */
   static SchemaVerdict verifyInCallersTransaction(
-      Connection connection, boolean allowPrivilegedRuntimeRole) {
+      Connection connection, DataSource dataSource, boolean allowPrivilegedRuntimeRole) {
     try {
-      return run(connection, allowPrivilegedRuntimeRole);
+      return run(connection, dataSource, allowPrivilegedRuntimeRole);
     } catch (SQLException e) {
       throw unverifiable(e);
     }
@@ -138,13 +140,18 @@ final class SchemaVerification {
     }
   }
 
-  private static SchemaVerdict run(Connection c, boolean allowPrivileged) throws SQLException {
+  /**
+   * @param dataSource the object {@code c} was taken from. It is bound into the {@link
+   *     VerifiedSchema} (C-PR-1), so a store can only write through the pool that was verified.
+   */
+  private static SchemaVerdict run(Connection c, DataSource dataSource, boolean allowPrivileged)
+      throws SQLException {
     // §4.9, in this order and before any leg: capture the session facts through qualified names,
     // pin the path so a name somebody forgets to prefix later still resolves in pg_catalog, and
     // read the pin back because set_config echoes its own argument whether or not it took.
     SessionFacts facts = sessionFacts(c);
     pinSearchPath(c);
-    Session session = new Session(facts, namespaceOid(c, facts));
+    Session session = new Session(facts, dataSource, namespaceOid(c, facts));
     VerifiedSchema schema = session.schema();
     long ns = session.schemaOid();
 
@@ -233,8 +240,12 @@ final class SchemaVerification {
   private record SessionFacts(String schema, String role, String database) {}
 
   private record Session(VerifiedSchema schema, long schemaOid, String role, String database) {
-    Session(SessionFacts facts, long schemaOid) {
-      this(new VerifiedSchema(facts.schema()), schemaOid, facts.role(), facts.database());
+    Session(SessionFacts facts, DataSource dataSource, long schemaOid) {
+      this(
+          new VerifiedSchema(facts.schema(), dataSource),
+          schemaOid,
+          facts.role(),
+          facts.database());
     }
   }
 

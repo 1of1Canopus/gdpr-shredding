@@ -6,6 +6,40 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Security
+- **C-PR-1 (MEDIUM): a JDBC store could write to a database the schema gate never checked.**
+  `VerifiedSchema` held only a schema name, so `new JdbcKeyProvider(otherDataSource,
+  gate.schema(), ...)` built, the context started, and keys, erasure log, tombstones and the anchor
+  went to another database while the boot log said "schema verified". A `VerifiedSchema` is now
+  bound to the `DataSource` object it was verified on, at both creation points
+  (`JdbcSupport.verifySchema` and `JdbcSupport.initializeAndVerifySchema`). New constructors
+  `JdbcKeyProvider(VerifiedSchema, MasterKey, RandomSource, Clock)` and
+  `JdbcErasureStore(VerifiedSchema, ErasureChain, ...)` take no `DataSource`; the store writes
+  through the one the schema carries. The old constructors refuse any other object with
+  `SHRED-SCHEMA-011` (`ErrorCodes.STORE_DATASOURCE_UNVERIFIED`, new), compared by identity, before
+  any connection is opened. A second pool to the same database and a wrapper around the verified
+  pool are refused too. No property weakens this. The default beans were never affected. See
+  [docs/upgrading-0.2.1.md](docs/upgrading-0.2.1.md).
+
+### Changed
+- The core jar now seals the package `com.housedevinci.shredding.adapter.jdbc` (manifest entry
+  `Sealed: true`). A class of yours in that package fails to load with `sealing violation` on a
+  plain classpath. This closes a split-package route to the package-private `VerifiedSchema`
+  constructor (C-PR38-1). Spring Boot's executable-jar launcher does not enforce sealing, so under
+  it such a class is still deliberate application code.
+- The architecture rule on `VerifiedSchema` minting now also catches a constructor reference
+  (`VerifiedSchema::new`) (C-PR38-2), and the starter has its own architecture test: no starter
+  class in a core package, no access to the constructor (C-PR38-3).
+- `VerifiedSchema.equals` and, through the record, `SchemaVerdict.equals` now include the identity
+  of the DataSource the schema was verified on. Two verifications through two different DataSource
+  objects are no longer equal, even on the same database.
+- The starter's default `JdbcKeyProvider` and `JdbcErasureStore` beans use the new constructors.
+
+### Deprecated
+- The four constructors that take a `DataSource` and a `VerifiedSchema` (one on
+  `JdbcKeyProvider`, three on `JdbcErasureStore`). They still work when given the very object the
+  schema was verified on. They are removed in 0.3.0.
+
 ### Fixed
 - The reference guard (`tools/check-private-references.sh`) now also refuses the first names of
   the studio's agents in the tree, the main jar and the sources jar, so public text keeps to

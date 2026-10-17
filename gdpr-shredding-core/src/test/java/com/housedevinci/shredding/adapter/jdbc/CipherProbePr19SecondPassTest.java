@@ -339,7 +339,10 @@ class CipherProbePr19SecondPassTest {
             Optional.of("subject"));
     var store =
         new JdbcErasureStore(
-            ds, schema, ErasureChain.keyed(SECRET, "k1"), List.of(column), frameworkResidual());
+            TestSchemas.reboundTo(schema, ds),
+            ErasureChain.keyed(SECRET, "k1"),
+            List.of(column),
+            frameworkResidual());
     TenantId t = TenantId.of(tenant);
     SubjectId s = SubjectId.of(subject);
     store.erase(

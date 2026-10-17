@@ -228,8 +228,7 @@ class CipherProbePr25Test {
 
   private static JdbcErasureStore store(DataSource ds, String table, BlindIndexResidual residual) {
     return new JdbcErasureStore(
-        ds,
-        schema,
+        TestSchemas.reboundTo(schema, ds),
         ErasureChain.keyed(SECRET, "k1"),
         List.of(
             new BlindIndexColumn(

@@ -363,7 +363,6 @@ class CipherProbeSchemaGateTest {
     @Bean
     KeyProvider shreddingKeyProvider(ShreddingSchemaGate gate) {
       return new com.housedevinci.shredding.adapter.jdbc.JdbcKeyProvider(
-          gate.dataSource(),
           gate.schema(),
           MasterKey.fromBytes(new byte[32]),
           RandomSource.secure(),

@@ -192,7 +192,6 @@ class LockWaitStepsTest {
               Optional.of("subject"));
       var store =
           new JdbcErasureStore(
-              ds,
               schema,
               ErasureChain.keyed(SECRET, "k1"),
               List.of(column),

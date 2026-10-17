@@ -300,7 +300,6 @@ class CipherProbeReadBackIndependenceTest {
               .map(CipherProbeReadBackIndependenceTest::decoy)
               .toList();
       return new com.housedevinci.shredding.adapter.jdbc.JdbcErasureStore(
-          gate.dataSource(),
           gate.schema(),
           chain,
           decoys,

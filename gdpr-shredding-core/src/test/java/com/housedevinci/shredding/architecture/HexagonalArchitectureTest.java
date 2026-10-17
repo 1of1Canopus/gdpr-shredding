@@ -3,6 +3,11 @@ package com.housedevinci.shredding.architecture;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.classes;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
 
+import com.housedevinci.shredding.adapter.jdbc.VerifiedSchema;
+import com.tngtech.archunit.base.DescribedPredicate;
+import com.tngtech.archunit.core.domain.JavaAccess;
+import com.tngtech.archunit.core.domain.JavaClass;
+import com.tngtech.archunit.core.domain.JavaConstructor;
 import com.tngtech.archunit.core.importer.ImportOption;
 import com.tngtech.archunit.junit.AnalyzeClasses;
 import com.tngtech.archunit.junit.ArchTest;
@@ -83,4 +88,34 @@ class HexagonalArchitectureTest {
           .should()
           .dependOnClassesThat()
           .resideInAnyPackage("org.springframework..", "org.hibernate..", "..adapter..");
+
+  /**
+   * C-PR-1, path P11. {@code VerifiedSchema} stands for "this schema, verified on this DataSource",
+   * so the only production code that may construct one is {@code SchemaVerification} (its nested
+   * {@code Session} included), which does so after the catalogue checks on a connection of that
+   * DataSource. Package-private access alone would let any later class in the package mint one.
+   */
+  /** Package-private, so named rather than referenced. */
+  private static final String SCHEMA_VERIFICATION =
+      "com.housedevinci.shredding.adapter.jdbc.SchemaVerification";
+
+  @ArchTest
+  static final ArchRule only_SchemaVerification_constructs_VerifiedSchema =
+      noClasses()
+          .that(
+              DescribedPredicate.describe(
+                  "are not SchemaVerification or nested in it",
+                  (JavaClass c) ->
+                      !c.getName().equals(SCHEMA_VERIFICATION)
+                          && !c.getName().startsWith(SCHEMA_VERIFICATION + "$")))
+          .should()
+          .accessTargetWhere(
+              DescribedPredicate.describe(
+                  "a constructor of VerifiedSchema, by call or by reference",
+                  (JavaAccess<?> access) ->
+                      access.getTargetOwner().isEquivalentTo(VerifiedSchema.class)
+                          && access
+                              .getTarget()
+                              .getName()
+                              .equals(JavaConstructor.CONSTRUCTOR_NAME)));
 }

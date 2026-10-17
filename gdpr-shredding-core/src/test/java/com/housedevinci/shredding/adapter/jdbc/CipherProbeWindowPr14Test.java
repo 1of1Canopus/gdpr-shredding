@@ -702,8 +702,7 @@ class CipherProbeWindowPr14Test {
         };
     var store =
         new JdbcErasureStore(
-            ds,
-            schema,
+            TestSchemas.reboundTo(schema, ds),
             ErasureChain.keyed(SECRET, "k1"),
             List.of(
                 new BlindIndexColumn(
@@ -720,7 +719,10 @@ class CipherProbeWindowPr14Test {
 
   private JdbcKeyProvider keyProvider(DataSource ds, VerifiedSchema schema) {
     return new JdbcKeyProvider(
-        ds, schema, MasterKey.fromBytes(new byte[32]), RandomSource.secure(), Clock.systemUTC());
+        TestSchemas.reboundTo(schema, ds),
+        MasterKey.fromBytes(new byte[32]),
+        RandomSource.secure(),
+        Clock.systemUTC());
   }
 
   private ErasureRecord record(SubjectId subject, int destroyed, int cleared) {

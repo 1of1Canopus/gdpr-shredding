@@ -168,7 +168,6 @@ class SchemaVerificationTest {
     var store = store(verdict.schema());
     var keys =
         new JdbcKeyProvider(
-            appDs,
             verdict.schema(),
             MasterKey.fromBytes(new byte[32]),
             RandomSource.secure(),
@@ -761,8 +760,7 @@ class SchemaVerificationTest {
             pinned,
             "CREATE TEMP TABLE shredding_erasure (LIKE public.shredding_erasure INCLUDING ALL)");
         new JdbcErasureStore(
-                pinnedDataSource(pinned),
-                verdict.schema(),
+                TestSchemas.reboundTo(verdict.schema(), pinnedDataSource(pinned)),
                 ErasureChain.unkeyed(),
                 List.of(),
                 (c, column, tenant, subject) -> 0L)
@@ -836,8 +834,7 @@ class SchemaVerificationTest {
           .isEqualTo(1);
 
       new JdbcErasureStore(
-              pinnedDataSource(pinned),
-              verdict.schema(),
+              TestSchemas.reboundTo(verdict.schema(), pinnedDataSource(pinned)),
               ErasureChain.unkeyed(),
               List.of(),
               (c, column, tenant, subject) -> 0L)
@@ -865,8 +862,7 @@ class SchemaVerificationTest {
     try (Connection pinned = appDs.getConnection()) {
       var store =
           new JdbcErasureStore(
-              pinnedDataSource(pinned),
-              verdict.schema(),
+              TestSchemas.reboundTo(verdict.schema(), pinnedDataSource(pinned)),
               ErasureChain.unkeyed(),
               List.of(),
               (c, column, tenant, subject) -> 0L);
@@ -1084,7 +1080,7 @@ class SchemaVerificationTest {
       var thrown =
           org.assertj.core.api.Assertions.catchThrowableOfType(
               ShreddingException.class,
-              () -> SchemaVerification.verifyInCallersTransaction(c, false));
+              () -> SchemaVerification.verifyInCallersTransaction(c, appDs, false));
       assertThat(thrown.code()).isEqualTo(ErrorCodes.SCHEMA_UNVERIFIABLE);
       assertThat(thrown).hasMessageContaining("pin its own search_path");
     } catch (SQLException e) {
@@ -1176,8 +1172,7 @@ class SchemaVerificationTest {
 
     var store =
         new JdbcErasureStore(
-            appDs,
-            verdict.schema(),
+            TestSchemas.reboundTo(verdict.schema(), appDs),
             ErasureChain.unkeyed(),
             List.of(
                 new com.housedevinci.shredding.domain.BlindIndexColumn(
@@ -1329,7 +1324,10 @@ class SchemaVerificationTest {
 
   private JdbcErasureStore store(VerifiedSchema schema) {
     return new JdbcErasureStore(
-        appDs, schema, ErasureChain.unkeyed(), List.of(), (c, column, tenant, subject) -> 0L);
+        TestSchemas.reboundTo(schema, appDs),
+        ErasureChain.unkeyed(),
+        List.of(),
+        (c, column, tenant, subject) -> 0L);
   }
 
   private static ErasureRecord record(String pseudonym) {
