@@ -68,6 +68,7 @@ class DatabaseIdentityCheckTest {
     TwoRoleCluster.roles(PG);
     TwoRoleCluster.install(PG, PG.getDatabaseName());
     TwoRoleCluster.install(PG, "unguarded");
+    TwoRoleCluster.install(PG, "swapdb");
     appDs = TwoRoleCluster.app(PG, PG.getDatabaseName());
     otherDs = TwoRoleCluster.app(PG, "unguarded");
     suOther = TwoRoleCluster.superuser(PG, "unguarded");
@@ -317,6 +318,92 @@ class DatabaseIdentityCheckTest {
     assertThat(rows(appDs, "caller_mark"))
         .describedAs("the module committed a transaction it did not begin")
         .isEqualTo(before);
+  }
+
+  // ------------------------------------------------------------------ C-PR42-2: one test per leg
+
+  /**
+   * Leg {@code current_user}. A mutable delegate moves to a data source on the same database and
+   * the same login, whose startup option sets another role ({@code -c role=...}, which PostgreSQL
+   * accepts from any member of the role). Only {@code current_user} differs. Removing the {@code
+   * current_user} comparison turns this red.
+   */
+  @Test
+  void current_role_moved_by_a_startup_option_refuses() throws SQLException {
+    exec(suOther, "CREATE ROLE shadow NOLOGIN", "GRANT shadow TO " + APP);
+    var moving = new Swappable(appDs);
+    var keys = keys(JdbcSupport.verifySchema(moving).schema());
+
+    var shadowed = new PGSimpleDataSource();
+    shadowed.setURL(TwoRoleCluster.url(PG, PG.getDatabaseName()));
+    shadowed.setUser(APP);
+    shadowed.setPassword(PASSWORD);
+    shadowed.setOptions("-c role=shadow");
+    // Precondition: same login, another current role.
+    assertThat(scalar(shadowed, "SELECT session_user || '/' || current_user"))
+        .isEqualTo(APP + "/shadow");
+    moving.target.set(shadowed);
+
+    Throwable read = catchThrowable(() -> keys.forRead(TenantId.of("t"), SubjectId.of("s"), 1));
+    Throwable write = catchThrowable(() -> keys.currentForWrite(TenantId.of("t"), subject()));
+
+    assertRefused(read, "current role");
+    assertRefused(write, "current role");
+    assertThat(((ShreddingException) write).getMessage())
+        .describedAs("only the current role differs")
+        .doesNotContain("database;")
+        .doesNotContain("login role")
+        .doesNotContain("cluster");
+  }
+
+  /**
+   * Leg schema oid. Same pool, same database, same roles; the verified schema's name now resolves
+   * to another schema object (the owner renamed the verified one and created a new one of that
+   * name). Removing the schema oid comparison turns this from 012 into a key-store outage (42P01 on
+   * the first statement).
+   */
+  @Test
+  void schema_recreated_under_the_verified_name_refuses() throws SQLException {
+    try (var swapApp = TwoRoleCluster.app(PG, "swapdb");
+        var swapSu = TwoRoleCluster.superuser(PG, "swapdb")) {
+      var keys = keys(JdbcSupport.verifySchema(swapApp).schema());
+      exec(
+          swapSu,
+          "ALTER SCHEMA public RENAME TO public_verified",
+          "CREATE SCHEMA public AUTHORIZATION " + TwoRoleCluster.OWNER,
+          "GRANT USAGE ON SCHEMA public TO " + APP);
+
+      Throwable write = catchThrowable(() -> keys.currentForWrite(TenantId.of("t"), subject()));
+
+      assertRefused(write, "schema");
+      assertThat(((ShreddingException) write).getMessage())
+          .doesNotContain("database;")
+          .doesNotContain("login role")
+          .doesNotContain("cluster");
+    }
+  }
+
+  /**
+   * The M21 branch of {@code readVerified}: a connection that arrives inside the application's own
+   * transaction. The application's {@code @Transactional} runs on a delegate that has moved to
+   * another database, through {@code TransactionAwareDataSourceProxy}. The module's read must still
+   * refuse. Removing the check from that branch returns the other database's answer.
+   */
+  @Test
+  void read_inside_a_caller_transaction_on_a_moved_target_refuses() throws SQLException {
+    var moving = new Swappable(appDs);
+    var aware = new TransactionAwareDataSourceProxy(moving);
+    var keys = keys(JdbcSupport.verifySchema(aware).schema());
+    moving.target.set(otherDs);
+    var tx = new TransactionTemplate(new DataSourceTransactionManager(moving));
+
+    Throwable thrown =
+        catchThrowable(
+            () ->
+                tx.executeWithoutResult(
+                    status -> keys.forRead(TenantId.of("t"), SubjectId.of("s"), 1)));
+
+    assertRefused(thrown, "database");
   }
 
   // ------------------------------------------------------------------ messages, regression
