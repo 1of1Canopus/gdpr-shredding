@@ -1890,6 +1890,101 @@ probe_reference_guard_step_names_omit_file_names() {
   return 1
 }
 
+# ---------------------------------------------------------------------------
+# Security review of the file-name scan, pass 1 (B-NG-19 to B-NG-24). Each probe runs the
+# REAL guard against a planted jar or tree, or mutates a copy of the guard and runs its real
+# self-test. B-NG-22 (a nested zip behind a prefix byte) is fixed in the B-NG-14 change; its
+# probe stays in the internal review folder until then, because a WEAK probe here fails CI.
+# ---------------------------------------------------------------------------
+_ng2_jar_red() { # _ng2_jar_red <case> <python body, z = open ZipFile>; 0 when the guard refuses
+  local m rc=0
+  m="$(mktemp -d)"; mkdir -p "$m/target"
+  python3 -I -W ignore - "$m/target/x.jar" "QUESTION""S.md" "$2" <<'PY' || { rm -rf "$m"; return 1; }
+import stat, sys, zipfile
+out, q, body = sys.argv[1], sys.argv[2], sys.argv[3]
+def link(name):
+    zi = zipfile.ZipInfo(name); zi.create_system = 3
+    zi.external_attr = (stat.S_IFLNK | 0o777) << 16
+    return zi
+def dirent(name):
+    zi = zipfile.ZipInfo(name); zi.external_attr = ((stat.S_IFDIR | 0o755) << 16) | 0x10
+    return zi
+with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+    exec(body)
+PY
+  bash "$RG" --jars "$m" > "$m.out" 2>&1 || rc=1
+  [ -z "${NG2_KEEP_OUT:-}" ] || cp "$m.out" "$NG2_KEEP_OUT"
+  cat "$m.out" >>"${PROBE_CAPTURE:-/dev/null}" 2>/dev/null
+  rm -rf "$m" "$m.out"
+  [ "$rc" -eq 1 ]
+}
+
+# B-NG-19: unzip folds `./`, `//` and `/./`; the later member overwrote the earlier one, so
+# the dirty first member was never scanned while its bytes stayed in the jar.
+probe_reference_guard_folded_member_path_hides_content() {
+  [ -f "$RG" ] || return 0
+  _ng2_jar_red dotslash 'z.writestr("./a.txt", "see " + q + "\n"); z.writestr("a.txt", "clean\n")' || return 0
+  _ng2_jar_red dslash   'z.writestr("b//a.txt", "see " + q + "\n"); z.writestr("b/a.txt", "clean\n")' || return 0
+  _ng2_jar_red dotseg   'z.writestr("b/./a.txt", "see " + q + "\n"); z.writestr("b/a.txt", "clean\n")' || return 0
+  return 1
+}
+
+# B-NG-20: a symlink member stores its target path as data; unzip made a link and the
+# recursive grep did not follow it. The target exists under $HOME, a machine path everywhere.
+probe_reference_guard_symlink_member_target_passes() {
+  [ -f "$RG" ] || return 0
+  local t="$HOME/.cipher-probe-b-ng-20.$$" rc=0
+  : > "$t" || { PROBE_SKIP_REASON="cannot create a file under HOME"; return 0; }
+  _ng2_jar_red symlink "z.writestr(\"a.txt\", \"clean\\n\"); z.writestr(link(\"link\"), \"$t\")" || rc=1
+  rm -f "$t"
+  [ "$rc" -eq 0 ] && return 1
+  return 0
+}
+
+# B-NG-21: a directory entry carrying data; unzip made the folder and dropped the bytes.
+probe_reference_guard_directory_entry_data_passes() {
+  [ -f "$RG" ] || return 0
+  _ng2_jar_red dirdata 'z.writestr("a.txt", "clean\n"); z.writestr(dirent("d/"), "see " + q + "\n")' && return 1
+  return 0
+}
+
+# B-NG-23: a content hit was printed raw; a carriage return then `::warning::` gives a line
+# the Actions runner reads as a workflow command (it splits on CR as well as LF).
+probe_reference_guard_content_hit_replays_a_command() {
+  [ -f "$RG" ] || return 0
+  local d o
+  d="$(mktemp -d)"; o="$(mktemp)"
+  ( cd "$d" && git init -q . && printf 'see %s\r::warning::spoofed\n' "QUESTION""S.md" > doc.md && git add -A )
+  CHECK_PRIVATE_REFERENCES_ROOT="$d" bash "$PWD/$RG" --tree > "$o" 2>&1
+  rm -rf "$d"
+  if tr '\r' '\n' < "$o" | grep -aq '^::warning::'; then rm -f "$o"; return 0; fi
+  NG2_KEEP_OUT="$o" _ng2_jar_red cr 'z.writestr("a.txt", "see " + q + "\r::warning::spoofed\n")'
+  if tr '\r' '\n' < "$o" | grep -aq '^::warning::'; then rm -f "$o"; return 0; fi
+  rm -f "$o"
+  return 1
+}
+
+# B-NG-24: three checks had no self-test case. Each is deleted from a copy of the guard; the
+# probe is WEAK while any copy keeps the self-test green. A substitution that no longer
+# applies is WEAK too (the probe must be updated with the code, never silently pass).
+_ng2_mutant_survives() { # <id> <perl -0 substitution>; 0 when the mutant's self-test is green
+  local m rc=0
+  m="$(mktemp -d)"; mkdir -p "$m/tools"
+  perl -0pe "$2" "$RG" > "$m/tools/check-private-references.sh"
+  if cmp -s "$RG" "$m/tools/check-private-references.sh"; then
+    echo "mutation $1 did not apply" >>"${PROBE_CAPTURE:-/dev/null}"; rm -rf "$m"; return 0
+  fi
+  bash "$m/tools/check-private-references.sh" --self-test >>"${PROBE_CAPTURE:-/dev/null}" 2>&1 || rc=1
+  rm -rf "$m"
+  [ "$rc" -eq 0 ]
+}
+probe_reference_guard_self_test_misses_three_checks() {
+  [ -f "$RG" ] || return 0
+  _ng2_mutant_survives basename-cntrl 's/\n[^\n]*case "\$base" in \*\[\[:cntrl:\]\]\*\)[^\n]*\n/\n/' && return 0
+  _ng2_mutant_survives not-extracted 's/refuse "cannot list" "\$jar!\$name \(listed, not extracted\)"; status=1; continue/continue/' && return 0
+  _ng2_mutant_survives backslash 's/\/\*\|\*.\\.\*\|\.\.\|/\/*|..|/' && return 0
+  return 1
+}
 probe probe_reference_guard_step_names_old_scope          "B-NG-8 the CI step names describe the old scope"     probe_reference_guard_step_names_omit_agent_names
 probe probe_reference_guard_name_in_a_path            "B-NG-7 a name in a file path or jar member name passes"  probe_reference_guard_name_in_a_path_passes
 probe probe_reference_guard_non_utf8_byte_hides_name     "B-NG-9 a non-UTF-8 byte before a name hides it"      probe_reference_guard_non_utf8_byte_hides_a_name
@@ -1897,6 +1992,11 @@ probe probe_reference_guard_duplicate_member_hides       "B-NG-10 a duplicate ja
 probe probe_reference_guard_escaped_member_name          "B-NG-11 a control byte in a jar member name hides it"  probe_reference_guard_escaped_member_name_passes
 probe probe_reference_guard_replays_a_hostile_path       "B-NG-13 a refused path is replayed raw"              probe_reference_guard_replays_a_hostile_path
 probe probe_reference_guard_step_names_omit_file_names   "B-NG-7 the CI step names do not say file names"      probe_reference_guard_step_names_omit_file_names
+probe probe_reference_guard_folded_member_path         "B-NG-19 a member path unzip folds hides content"     probe_reference_guard_folded_member_path_hides_content
+probe probe_reference_guard_symlink_member_target      "B-NG-20 a symlink member's target is never scanned"   probe_reference_guard_symlink_member_target_passes
+probe probe_reference_guard_directory_entry_data       "B-NG-21 data in a directory entry is never scanned"   probe_reference_guard_directory_entry_data_passes
+probe probe_reference_guard_content_hit_replays        "B-NG-23 a content hit is printed raw"                 probe_reference_guard_content_hit_replays_a_command
+probe probe_reference_guard_self_test_misses_checks    "B-NG-24 three checks have no self-test case"          probe_reference_guard_self_test_misses_three_checks
 
 echo
 echo "still weak: $pass    fixed: $flipped    error: $errors"
