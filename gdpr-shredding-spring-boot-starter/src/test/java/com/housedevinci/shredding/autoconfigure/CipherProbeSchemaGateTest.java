@@ -174,6 +174,9 @@ class CipherProbeSchemaGateTest {
                 line.contains("is privileged over the shredding objects")
                     && line.contains("owns table shredding_erasure")
                     && line.contains("advisory in this configuration"));
+    // C-PR41-1: the legs stay in core's line; the property is named by the starter's own line.
+    assertThat(ownerLog.warnings())
+        .anyMatch(line -> line.contains("shredding.jdbc.allow-privileged-runtime-role=true"));
     // C-PR-1d: core logs one line, the WARN, which carries the summary. No second INFO line.
     assertThat(ownerLog.infos()).noneMatch(line -> line.contains("schema verified"));
     assertThat(ownerLog.warnings())

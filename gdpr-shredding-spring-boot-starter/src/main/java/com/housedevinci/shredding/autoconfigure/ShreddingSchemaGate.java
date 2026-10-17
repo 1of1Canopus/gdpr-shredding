@@ -75,8 +75,8 @@ public final class ShreddingSchemaGate {
   /**
    * The {@code initialize-schema} WARN fires at <em>every</em> startup, never once. An operator who
    * reads one boot log a month has to see it in that log, and a weaker mode that announces itself
-   * only the first time is a weaker mode nobody knows is on. The privileged-role WARN is logged by
-   * core.
+   * only the first time is a weaker mode nobody knows is on. The privileged-role WARN with the role
+   * and legs is logged by core; the one here names the property that allowed it.
    */
   private void warn(ShreddingProperties.JdbcProperties jdbc) {
     if (jdbc.isInitializeSchema()) {
@@ -90,6 +90,19 @@ public final class ShreddingSchemaGate {
               + " production: apply schema-postgresql.sql once with an owner role, grant the"
               + " runtime role the statements in SECURITY-NOTES.md \"Database roles\", and leave"
               + " shredding.jdbc.initialize-schema=false. See docs/upgrading-0.2.0.md.");
+    }
+    if (jdbc.isAllowPrivilegedRuntimeRole() && !verdict.runtimeRoleIsUnprivileged()) {
+      // Core logs the role and the legs (C-PR-1d). This line names the switch and the way out.
+      log.warn(
+          jdbc.isInitializeSchema()
+              ? "shredding: shredding.jdbc.allow-privileged-runtime-role=true is set and the"
+                  + " runtime role is privileged. shredding.jdbc.initialize-schema=true already"
+                  + " puts this start in the privileged mode, so removing the property alone"
+                  + " does not make it refuse."
+              : "shredding: shredding.jdbc.allow-privileged-runtime-role=true is what lets this"
+                  + " start proceed with a privileged runtime role. Remove the property, or set"
+                  + " it to false (the default), and the same start refuses with"
+                  + " SHRED-SCHEMA-004.");
     }
   }
 

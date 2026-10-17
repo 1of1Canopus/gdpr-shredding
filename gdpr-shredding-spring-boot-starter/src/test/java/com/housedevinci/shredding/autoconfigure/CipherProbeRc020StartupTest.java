@@ -85,8 +85,8 @@ class CipherProbeRc020StartupTest {
     "shredding.allow-second-level-cache=true, shredding.allow-second-level-cache=true",
     "shredding.erased-value.policy=null, shredding.erased-value.policy=null",
     "shredding.jdbc.initialize-schema=true, shredding.jdbc.initialize-schema=true",
-    // C-PR-1d: core logs this WARN; it names the role and legs, not the starter property.
-    "shredding.jdbc.allow-privileged-runtime-role=true, is privileged over the shredding objects",
+    "shredding.jdbc.allow-privileged-runtime-role=true,"
+        + " shredding.jdbc.allow-privileged-runtime-role=true",
   })
   void rc_each_weaker_mode_warns_at_every_startup(String property, String expected) {
     for (int boot = 0; boot < 2; boot++) {
