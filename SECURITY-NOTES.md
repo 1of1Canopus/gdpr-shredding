@@ -34,6 +34,13 @@ The erasure is complete **only at `erasedAt + shredding.erasure.backup-retention
 erasure record states that date so the erasure record can print it. Set that property to your
 real retention, not to a number that reads well.
 
+A physical copy of the database is the same case, and the module cannot tell it apart (C-PR-1b,
+path M16). A base backup restored elsewhere, a storage snapshot, a point-in-time restore, or a
+staging database cloned from production holds production's wrapped keys. It has the same cluster
+identifier, the same oids and the same roles, so it passes the per-connection check by
+construction. An erasure in one copy does not reach another. Use a different master key per
+environment, so a copied key store cannot be unwrapped anywhere else.
+
 ### MVCC dead tuples
 `DELETE` marks the row dead; the bytes stay in the heap page until `VACUUM` reclaims them, and a
 `VACUUM FULL` or a page-level forensic read can still see them. This is also why the erasure is a
@@ -1026,7 +1033,9 @@ wrong, unguarded, or when its own role could remove the guards. The upgrade step
 installation are in [docs/upgrading-0.2.0.md](docs/upgrading-0.2.0.md).
 
 Grant exactly this, no more, with the module's schema on the `search_path` of whoever runs it (or
-the names qualified):
+the names qualified). The runtime role must also be able to execute
+`pg_catalog.pg_control_system()`, which PostgreSQL grants to `PUBLIC` by default; startup refuses
+with `SHRED-SCHEMA-005` otherwise (C-PR-1b):
 
 ```sql
 GRANT USAGE                  ON SCHEMA <schema>                     TO shredding_app;
@@ -1163,7 +1172,7 @@ Every path to a module store on a pool the gate did not verify, and what happens
 | Store built after startup, or inside another bean, never exposed as a bean | refused at construction |
 | Application wraps the verified pool before passing it | refused; use the constructor without a pool |
 | Application verifies another pool itself (`JdbcSupport.verifySchema(other)`) and builds a store on it | verified: that database was checked by that call, and the schema is bound to it |
-| One `DataSource` object whose target changes after verification (routing pool, refresh-scope proxy, target swap, mutable URL) | **not covered by this check yet**: same object, so identity passes. Tracked as C-PR-1b; the 0.2.1 release waits for it |
+| One `DataSource` object whose target changes after verification (routing pool, refresh-scope proxy, target swap, mutable URL) | not caught by this identity check (same object); refused by the per-connection check of the next section (C-PR-1b) |
 | Reflection, `Unsafe`, a patched jar | out of scope: code with that power can also edit the guards |
 
 **What the gate's log line covers.** The INFO line `schema verified ...` printed by the starter's
@@ -1175,6 +1184,62 @@ identity, at construction, against the pool its schema was verified on.
 **What the module cannot vouch for.** A `KeyProvider` or `ErasureStore` the application implements
 itself is application code. The module does not check where it writes, whether it is a bean, a
 post-processor replacement, or anything else.
+
+### Which database each connection reaches (C-PR-1b)
+
+The identity check above proves the store uses the verified `DataSource` object. It does not prove
+the object still reaches the verified database: a routing pool, a refreshed proxy or a mutable URL
+keeps the object and moves the target. So every connection a store takes is checked again, by
+facts only the server supplies, before the call's first statement of work.
+
+One query, inside the call's own transaction, reads: the cluster's system identifier
+(`pg_control_system()`), the database oid and name, the oid that the verified schema's name
+resolves to, `session_user`, `current_user`, and `pg_is_in_recovery()`. Verification read the same
+facts at startup. Any difference, a result other than exactly one row, a server in recovery, or a
+failed query refuses the call with `SHRED-SCHEMA-012`. The transaction is rolled back and the work
+never runs. Every comparison in the query is `OPERATOR(pg_catalog.=)` and every name is qualified,
+so a role-owned operator ahead of `pg_catalog` cannot pick another row. Client-side facts (the URL,
+`DatabaseMetaData`) are never used: a wrapper can say anything, and DNS can move a server behind
+one URL.
+
+`JdbcSupport` is the only class that takes a connection, in core and in the starter (an
+architecture rule refuses `getConnection`, `DriverManager.getConnection` and `Driver.connect`
+anywhere else). The starter's boot-time mapping check reads through `JdbcSupport.readVerified`.
+
+| # | Path | Outcome |
+|---|---|---|
+| M1 | `AbstractRoutingDataSource` whose lookup key selects another target | refused at that call; a call routed to the verified target still works |
+| M2 | Refresh-scoped `DataSource` rebuilt with a new URL | refused |
+| M3 | `DelegatingDataSource.setTargetDataSource(other)` after startup | refused |
+| M4 | An application delegate whose target changes (any class) | refused |
+| M5 | Mutable URL on `DriverManagerDataSource` or `PGSimpleDataSource` | refused |
+| M6 | Same server, another database | refused: database oid and name differ |
+| M7 | Another cluster built by the same script (same names, same `public` oid, possibly the same database oid) | refused: the system identifier differs |
+| M8 | Multi-host URL failing over to another cluster | refused: the system identifier differs |
+| M9 | Multi-host URL failing over to a promoted physical standby of the verified cluster | accepted: the same database |
+| M10 | Hikari credentials changed through its management bean | refused: `session_user` differs |
+| M11 | Connections opened before the target moved | accepted, and checked at each use |
+| M12 | A pooler (PgBouncer) in transaction mode | covered: check and work run in one transaction |
+| M13 | Spring's `LazyConnectionDataSourceProxy` or `TransactionAwareDataSourceProxy` as the context `DataSource` | accepted: they reach the verified database |
+| M14 | The starter's own boot reads after the gate | refused if the target moved: they go through the same check |
+| M15 | `SET ROLE` or `SET SESSION AUTHORIZATION` inside the connection | `current_user` and `session_user` are compared; the judgement of an authenticated role that differs from the session one is a separate finding (C-PR-1c) |
+| M16 | A physical copy of the verified cluster (backup restore, snapshot, PITR, staging clone) | not distinguishable at runtime: same facts by construction. See "Backups" above |
+| M17 | `pg_control_system()` not executable by the runtime role | refused at startup with `SHRED-SCHEMA-005`, naming the `GRANT`. No fallback |
+| M18 | A read replica or hot standby still replaying | refused for reads and writes: it can serve a key the primary already destroyed. Refused at startup too (`SHRED-SCHEMA-005`) |
+| M19 | A role-owned `=(name, name)` ahead of `pg_catalog` on the moved target | refused: every comparison is qualified, exactly one row is required |
+| M20 | A read/write-splitting driver that switches host on `Connection.setReadOnly(true)` | not triggered: the module never calls `setReadOnly`; read-only is set with SQL |
+| M21 | A read on a connection inside the application's own transaction | accepted and checked inside that transaction; the module does not commit, roll back or make it read-only |
+
+**What the check resists, and what it does not.** It resists accident (a misrouted pool, a
+refreshed URL, a failover to the wrong cluster) and an unprivileged role on the wrong target. It
+does not resist a superuser on the wrong target: a superuser can create a database with a chosen
+oid, replace a `pg_catalog` function, and a system identifier is not a secret. That is the same
+deployment boundary as code in your JVM that can reflect into the module.
+
+**Cost.** One extra statement per write and per erasure. A read pays one extra statement and a
+`COMMIT`, because it now runs in a short read-only transaction of its own. A decrypt calls the key
+store on every read, a cache hit included (the key row, not the cache, decides whether the key may
+be used), so the read cost applies to every decrypt.
 
 ### The health endpoint publishes the posture
 
