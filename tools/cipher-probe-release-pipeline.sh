@@ -1653,8 +1653,8 @@ _guard_step_wired_unconditionally() { # <workflow> <job id> <exact command>
 # Security review of the agent-name group, pass 1 (B-NG-1 to B-NG-8). Each probe runs the
 # REAL guard (--tree or --jars, real exit code) against a planted scratch input, never a copy
 # of the regex. Planted names are assembled from fragments so this file stays clean.
-# B-NG-7 (names in file paths are never scanned) is a design stop with its own PR; its probe
-# stays in the internal review folder until then, because a WEAK probe here fails CI.
+# B-NG-7 (names in file paths are never scanned) was a design stop with its own PR; its
+# probes are in the file-name block below.
 # ---------------------------------------------------------------------------
 _ng_tree_red() { # _ng_tree_red <case> <printf %b content>; 0 when the guard refuses the line
   local base d rc=0
@@ -1799,7 +1799,235 @@ probe probe_reference_guard_self_test_misses_carve_out    "B-NG-3 a widened carv
 probe probe_guard_wiring_accepts_a_disabled_job           "B-NG-4 the guard job or the jar step can be switched off"  probe_reference_guard_wiring_accepts_a_disabled_job
 probe probe_reference_guard_lower_case_agent_address      "B-NG-5 a lower-case agent address passes"            probe_reference_guard_lower_case_agent_address_passes
 probe probe_reference_guard_nested_archive_in_jar         "B-NG-6 a name inside a nested archive in a jar passes"  probe_reference_guard_nested_archive_in_jar_passes
+# ---------------------------------------------------------------------------
+# Security review of the file-name scan (B-NG-7, B-NG-9, B-NG-10, B-NG-11, B-NG-13). Each
+# probe runs the REAL guard against a planted scratch input. Tree paths go straight into the
+# index (`git update-index --cacheinfo`), never to disk, so a newline or a byte the macOS disk
+# refuses is planted the same way on a laptop and on a runner.
+# ---------------------------------------------------------------------------
+_ng_index_red() { # _ng_index_red <out-file> <path>; 0 when the guard refuses the planted path
+  local base d rc=0 blob
+  base="$(mktemp -d)"; d="$base/r"; mkdir -p "$d"
+  ( cd "$d" && git init -q . && printf 'clean\n' > ok.txt && git add ok.txt ) || { rm -rf "$base"; return 1; }
+  blob="$( cd "$d" && printf 'clean\n' | git hash-object -w --stdin )"
+  ( cd "$d" && git update-index --add --cacheinfo "100644,$blob,$2" ) || { rm -rf "$base"; return 1; }
+  CHECK_PRIVATE_REFERENCES_ROOT="$d" LC_ALL="${NG_UTF8_LOCALE:-C.UTF-8}" bash "$PWD/$RG" --tree > "$1" 2>&1 || rc=1
+  rm -rf "$base"
+  [ "$rc" -eq 1 ]
+}
+_ng_jar_red() { # _ng_jar_red <member> <text> [<member> <text>]...; 0 when the guard refuses the jar
+  local m rc=0
+  m="$(mktemp -d)"; mkdir -p "$m/target"
+  python3 -I -W ignore -c 'import sys, zipfile
+a = sys.argv[2:]
+with zipfile.ZipFile(sys.argv[1], "w") as z:
+    for n, t in zip(a[0::2], a[1::2]): z.writestr(n, t)' "$m/target/x.jar" "$@" || { rm -rf "$m"; return 1; }
+  bash "$RG" --jars "$m" >/dev/null 2>&1 || rc=1
+  rm -rf "$m"
+  [ "$rc" -eq 1 ]
+}
+
+# B-NG-7: a name in a file path, in the tree or as a jar member, was never scanned.
+probe_reference_guard_name_in_a_path_passes() {
+  [ -f "$RG" ] || return 0
+  local t="Th""or" o
+  o="$(mktemp)"
+  _ng_index_red "$o" "docs/review-by-$t.md" || { rm -f "$o"; return 0; }
+  _ng_index_red "$o" "QUESTION""S.md" || { rm -f "$o"; return 0; }
+  rm -f "$o"
+  _ng_jar_red "META-INF/review-by-$t.txt" "clean" || return 0
+  return 1
+}
+
+# B-NG-9: a byte that is not valid UTF-8 before a name hid it in a UTF-8 locale.
+probe_reference_guard_non_utf8_byte_hides_a_name() {
+  [ -f "$RG" ] || return 0
+  local o d rc=0
+  o="$(mktemp)"
+  _ng_index_red "$o" "x/$(printf '\377')Th""or.md" || { rm -f "$o"; return 0; }
+  rm -f "$o"
+  d="$(mktemp -d)"
+  ( cd "$d" && git init -q . && printf '\377Th''or wrote this\n' > doc.md && git add -A )
+  CHECK_PRIVATE_REFERENCES_ROOT="$d" LC_ALL="${NG_UTF8_LOCALE:-C.UTF-8}" bash "$PWD/$RG" --tree >/dev/null 2>&1 || rc=1
+  rm -rf "$d"
+  [ "$rc" -eq 1 ] && return 1
+  return 0
+}
+
+# B-NG-10: two members with one name (or one name after case folding) let extraction keep
+# the clean one, so the dirty one was never scanned.
+probe_reference_guard_duplicate_member_hides_content() {
+  [ -f "$RG" ] || return 0
+  _ng_jar_red "a.txt" "see QUESTION""S.md" "a.txt" "clean" || return 0
+  _ng_jar_red "b/X.txt" "see QUESTION""S.md" "b/x.txt" "clean" || return 0
+  return 1
+}
+
+# B-NG-11: `unzip -Z1` prints a control byte as ^J, so a newline split a refused name.
+probe_reference_guard_escaped_member_name_passes() {
+  [ -f "$RG" ] || return 0
+  _ng_jar_red "QUEST"$'\n'"IONS.md" "clean" || return 0
+  _ng_jar_red "t"$'\t'"ab.txt" "clean" || return 0
+  return 1
+}
+
+# B-NG-13: a refused path with a raw newline would start an output line the runner reads as
+# a workflow command. Weak while the path is not refused, or a line starts with `::warning::`.
+probe_reference_guard_replays_a_hostile_path() {
+  [ -f "$RG" ] || return 0
+  local o
+  o="$(mktemp)"
+  if _ng_index_red "$o" "a"$'\n'"::warning::x.md" && ! grep -aq '^::warning::' "$o"; then
+    rm -f "$o"; return 1
+  fi
+  rm -f "$o"
+  return 0
+}
+
+# B-NG-7: the step names say what the guard reads; file names are now part of it.
+probe_reference_guard_step_names_omit_file_names() {
+  grep -hE 'name: Refuse .*moved-private' "$CI" "$WF" | grep -qv 'file names' && return 0
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Security review of the file-name scan, pass 1 (B-NG-19 to B-NG-24). Each probe runs the
+# REAL guard against a planted jar or tree, or mutates a copy of the guard and runs its real
+# self-test. B-NG-22 (a nested zip behind a prefix byte) is fixed in the B-NG-14 change; its
+# probe stays in the internal review folder until then, because a WEAK probe here fails CI.
+# ---------------------------------------------------------------------------
+_ng2_jar_red() { # _ng2_jar_red <case> <python body, z = open ZipFile>; 0 when the guard refuses
+  local m rc=0
+  m="$(mktemp -d)"; mkdir -p "$m/target"
+  python3 -I -W ignore - "$m/target/x.jar" "QUESTION""S.md" "$2" <<'PY' || { rm -rf "$m"; return 1; }
+import stat, sys, zipfile
+out, q, body = sys.argv[1], sys.argv[2], sys.argv[3]
+def link(name):
+    zi = zipfile.ZipInfo(name); zi.create_system = 3
+    zi.external_attr = (stat.S_IFLNK | 0o777) << 16
+    return zi
+def dirent(name):
+    zi = zipfile.ZipInfo(name); zi.external_attr = ((stat.S_IFDIR | 0o755) << 16) | 0x10
+    return zi
+with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+    exec(body)
+PY
+  bash "$RG" --jars "$m" > "$m.out" 2>&1 || rc=1
+  [ -z "${NG2_KEEP_OUT:-}" ] || cp "$m.out" "$NG2_KEEP_OUT"
+  cat "$m.out" >>"${PROBE_CAPTURE:-/dev/null}" 2>/dev/null
+  rm -rf "$m" "$m.out"
+  [ "$rc" -eq 1 ]
+}
+
+# B-NG-19: unzip folds `./`, `//` and `/./`; the later member overwrote the earlier one, so
+# the dirty first member was never scanned while its bytes stayed in the jar.
+probe_reference_guard_folded_member_path_hides_content() {
+  [ -f "$RG" ] || return 0
+  _ng2_jar_red dotslash 'z.writestr("./a.txt", "see " + q + "\n"); z.writestr("a.txt", "clean\n")' || return 0
+  _ng2_jar_red dslash   'z.writestr("b//a.txt", "see " + q + "\n"); z.writestr("b/a.txt", "clean\n")' || return 0
+  _ng2_jar_red dotseg   'z.writestr("b/./a.txt", "see " + q + "\n"); z.writestr("b/a.txt", "clean\n")' || return 0
+  return 1
+}
+
+# B-NG-20: a symlink member stores its target path as data; unzip made a link and the
+# recursive grep did not follow it. The target exists under $HOME, a machine path everywhere.
+probe_reference_guard_symlink_member_target_passes() {
+  [ -f "$RG" ] || return 0
+  local t="$HOME/.cipher-probe-b-ng-20.$$" rc=0
+  : > "$t" || { PROBE_SKIP_REASON="cannot create a file under HOME"; return 0; }
+  _ng2_jar_red symlink "z.writestr(\"a.txt\", \"clean\\n\"); z.writestr(link(\"link\"), \"$t\")" || rc=1
+  rm -f "$t"
+  [ "$rc" -eq 0 ] && return 1
+  return 0
+}
+
+# B-NG-21: a directory entry carrying data; unzip made the folder and dropped the bytes.
+probe_reference_guard_directory_entry_data_passes() {
+  [ -f "$RG" ] || return 0
+  _ng2_jar_red dirdata 'z.writestr("a.txt", "clean\n"); z.writestr(dirent("d/"), "see " + q + "\n")' && return 1
+  return 0
+}
+
+# B-NG-23: a content hit was printed raw; a carriage return then `::warning::` gives a line
+# the Actions runner reads as a workflow command (it splits on CR as well as LF).
+probe_reference_guard_content_hit_replays_a_command() {
+  [ -f "$RG" ] || return 0
+  local d o
+  d="$(mktemp -d)"; o="$(mktemp)"
+  ( cd "$d" && git init -q . && printf 'see %s\r::warning::spoofed\n' "QUESTION""S.md" > doc.md && git add -A )
+  CHECK_PRIVATE_REFERENCES_ROOT="$d" bash "$PWD/$RG" --tree > "$o" 2>&1
+  rm -rf "$d"
+  if tr '\r' '\n' < "$o" | grep -aq '^::warning::'; then rm -f "$o"; return 0; fi
+  NG2_KEEP_OUT="$o" _ng2_jar_red cr 'z.writestr("a.txt", "see " + q + "\r::warning::spoofed\n")'
+  if tr '\r' '\n' < "$o" | grep -aq '^::warning::'; then rm -f "$o"; return 0; fi
+  rm -f "$o"
+  return 1
+}
+
+# B-NG-24: three checks had no self-test case. Each is deleted from a copy of the guard; the
+# probe is WEAK while any copy keeps the self-test green. A substitution that no longer
+# applies is WEAK too (the probe must be updated with the code, never silently pass).
+_ng2_mutant_survives() { # <id> <perl -0 substitution>; 0 when the mutant's self-test is green
+  local m rc=0
+  m="$(mktemp -d)"; mkdir -p "$m/tools"
+  perl -0pe "$2" "$RG" > "$m/tools/check-private-references.sh"
+  if cmp -s "$RG" "$m/tools/check-private-references.sh"; then
+    echo "mutation $1 did not apply" >>"${PROBE_CAPTURE:-/dev/null}"; rm -rf "$m"; return 0
+  fi
+  bash "$m/tools/check-private-references.sh" --self-test >>"${PROBE_CAPTURE:-/dev/null}" 2>&1 || rc=1
+  rm -rf "$m"
+  [ "$rc" -eq 0 ]
+}
+probe_reference_guard_self_test_misses_three_checks() {
+  [ -f "$RG" ] || return 0
+  _ng2_mutant_survives basename-cntrl 's/\n[^\n]*case "\$base" in \*\[\[:cntrl:\]\]\*\)[^\n]*\n/\n/' && return 0
+  _ng2_mutant_survives not-extracted 's/refuse "cannot list" "\$jar!\$name \(listed, not extracted\)"; status=1; continue/continue/' && return 0
+  _ng2_mutant_survives backslash 's/\/\*\|\*.\\.\*\|\.\.\|/\/*|..|/' && return 0
+  return 1
+}
+
+# B-NG-30: B-NG-23 escaped the bytes of a hit, but a tree hit line still began with the file
+# path. A tracked file named `::stop-commands::tok` (or ` ::warning::x`) with a hit printed a
+# line that starts with `::`, which the runner reads as a workflow command. WEAK while any
+# output line, split on CR and LF as the runner splits, starts with blanks then `::` and is
+# not the guard's own `::error::check-private-references: ` line.
+probe_reference_guard_hit_path_starts_a_command() {
+  [ -f "$RG" ] || return 0
+  local d o
+  d="$(mktemp -d)"; o="$(mktemp)"
+  ( cd "$d" && git init -q . && printf 'see %s\n' "QUESTION""S.md" > '::stop-commands::tok' \
+      && printf 'see %s\n' "QUESTION""S.md" > ' ::warning::spoofed' && git add -A )
+  CHECK_PRIVATE_REFERENCES_ROOT="$d" bash "$PWD/$RG" --tree > "$o" 2>&1
+  rm -rf "$d"
+  if tr '\r' '\n' < "$o" | grep -a -E '^[[:space:]]*::' | grep -aqv '^::error::check-private-references: '; then
+    rm -f "$o"; return 0
+  fi
+  rm -f "$o"
+  return 1
+}
+
+# B-NG-31: the file-count half of the one-to-one jar check had no self-test case; with it
+# removed the self-test stayed green. The half is deleted from a copy of the guard; WEAK
+# while the copy's self-test is green.
+probe_reference_guard_self_test_misses_the_file_count_half() {
+  [ -f "$RG" ] || return 0
+  _ng2_mutant_survives file-half 's/if \[ "\$have_files" != "\$want_files" \] \|\| \[/if [/' && return 0
+  return 1
+}
 probe probe_reference_guard_step_names_old_scope          "B-NG-8 the CI step names describe the old scope"     probe_reference_guard_step_names_omit_agent_names
+probe probe_reference_guard_name_in_a_path            "B-NG-7 a name in a file path or jar member name passes"  probe_reference_guard_name_in_a_path_passes
+probe probe_reference_guard_non_utf8_byte_hides_name     "B-NG-9 a non-UTF-8 byte before a name hides it"      probe_reference_guard_non_utf8_byte_hides_a_name
+probe probe_reference_guard_duplicate_member_hides       "B-NG-10 a duplicate jar member hides its content"    probe_reference_guard_duplicate_member_hides_content
+probe probe_reference_guard_escaped_member_name          "B-NG-11 a control byte in a jar member name hides it"  probe_reference_guard_escaped_member_name_passes
+probe probe_reference_guard_replays_a_hostile_path       "B-NG-13 a refused path is replayed raw"              probe_reference_guard_replays_a_hostile_path
+probe probe_reference_guard_step_names_omit_file_names   "B-NG-7 the CI step names do not say file names"      probe_reference_guard_step_names_omit_file_names
+probe probe_reference_guard_folded_member_path         "B-NG-19 a member path unzip folds hides content"     probe_reference_guard_folded_member_path_hides_content
+probe probe_reference_guard_symlink_member_target      "B-NG-20 a symlink member's target is never scanned"   probe_reference_guard_symlink_member_target_passes
+probe probe_reference_guard_directory_entry_data       "B-NG-21 data in a directory entry is never scanned"   probe_reference_guard_directory_entry_data_passes
+probe probe_reference_guard_content_hit_replays        "B-NG-23 a content hit is printed raw"                 probe_reference_guard_content_hit_replays_a_command
+probe probe_reference_guard_self_test_misses_checks    "B-NG-24 three checks have no self-test case"          probe_reference_guard_self_test_misses_three_checks
+probe probe_reference_guard_hit_path_command       "B-NG-30 a hit line can start with a file path"        probe_reference_guard_hit_path_starts_a_command
+probe probe_reference_guard_file_count_half      "B-NG-31 the file-count half has no self-test case"    probe_reference_guard_self_test_misses_the_file_count_half
 
 echo
 echo "still weak: $pass    fixed: $flipped    error: $errors"
