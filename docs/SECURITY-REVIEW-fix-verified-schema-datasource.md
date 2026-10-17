@@ -141,3 +141,83 @@ starter wires.
 All four go to the fix pass. None is a design stop. The fixer adds the three RED probes to the
 suite first, then fixes. The second pass checks each probe green, re-runs M7 and M8 (both must be
 red), and re-runs the sealed-package probe on the sample's build.
+
+## Pass 2, 2026-10-17
+
+Head reviewed: `f96326c` ("fix(core): seal the jdbc adapter package and widen the minting
+rules"). Method: full build and tests, the four pass-1 probes and their characterisations, both
+probe scripts against the jar of this build, the builder's six mutations and the two review
+mutations re-run, the sealed probe on the core jar nested in the sample's Boot jar, then the new
+surfaces of the fix pass: the two CI steps, the starter rule's package list, the release jar
+configuration, and the changed public text.
+
+### Verdict: MERGE WITH FIXES
+
+All four pass-1 findings are closed. The fix pass introduced one new INFO (C-PR38-5, a broken code
+span in the CHANGELOG). Under the no-allowance rule it is fixed before merge. It is text only, so
+the fix needs no third review pass: the probe below turning green is the confirmation.
+
+### Numbers on this head
+
+| What | Result |
+| --- | --- |
+| `./mvnw -B verify`, Docker up, tests run | green: core 574, starter 302, sample 25; 0 failures, 0 errors, 0 skipped |
+| `CipherProbePr38Test` (3), `CipherProbePr38StarterTest` (2), `HexagonalArchitectureTest` (6), `StarterArchitectureTest` (2) | all green in the run above; the three probe files are byte-identical to the internal originals |
+| `cipher-probe-c-pr-1-split-package.sh` on this build's core jar | GREEN, exit 0: `sealing violation: can't seal package ...adapter.jdbc: already defined` |
+| Same probe on the core jar nested in the sample's Boot jar (`BOOT-INF/lib`) | GREEN, exit 0; manifest carries `Sealed: true` |
+| `cipher-probe-c-pr-1-starter-scope.sh` | GREEN, exit 0: both `StarterArchitectureTest` rules fail on the planted class (core 574 green, starter 302 with 2 failures) |
+| CI run 38979015817 on `f96326c` | 6 of 6 green; the Cipher probes job prints both GREEN lines |
+
+### Mutations (each applied alone, run, restored)
+
+| Mutation | Result |
+| --- | --- |
+| M1 identity check replaced by `false` | red: core 14, starter 8 (the 7 of pass 1 plus `lazy_injection_point_on_the_deprecated_constructor_is_refused_with_011`) |
+| M2 5-argument `JdbcErasureStore` overload calls the new form, skipping the check | red: 7 |
+| M3a constructor made public | red: 3 |
+| M3b factory calling `new VerifiedSchema` in `JdbcSupport` | red: `only_SchemaVerification_constructs_VerifiedSchema` |
+| M4 `initializeAndVerifySchema` verifies through a proxy, so it binds another object | red: `initialize_and_verify_binds_the_schema_to_its_pool`, `t14_creation_mode_as_the_owner_creates_verifies_and_is_idempotent` |
+| M5 `equals` instead of `!=` | red: `a_wrapper_around_the_verified_pool_is_refused` (delegate case) |
+| M7 `VerifiedSchema::new` held in a `BiFunction` field of `JdbcSupport` | red: `only_SchemaVerification_constructs_VerifiedSchema` (survived in pass 1) |
+| M8 starter class in `adapter.jdbc` calls the constructor | red: both `StarterArchitectureTest` rules (survived in pass 1) |
+
+### Pass-1 findings
+
+| Finding | Status | Evidence |
+| --- | --- | --- |
+| C-PR38-1 LOW | closed | manifest section `com/housedevinci/shredding/adapter/jdbc/` `Sealed: true` in the built jar; split-package probe GREEN on the plain jar and on the jar nested in the sample. SECURITY-NOTES, upgrade guide, CHANGELOG and `TestSchemas` state the Boot-launcher limit truthfully |
+| C-PR38-2 LOW | closed | `CipherProbePr38Test.probe_a_constructor_reference_outside_SchemaVerification_passes_the_rule` green; M7 red |
+| C-PR38-3 LOW | closed | `StarterArchitectureTest` green on the tree, red on the plant; M8 red; the package list (`adapter`, `domain`, `application`, `api`) covers every package of the core's `main` |
+| C-PR38-4 INFO | closed | the advisory now reads "For this first issue, the starter's default beans are not affected. C-PR-1b and C-PR-1c do affect the default beans", and lists core and starter 0.2.0 as affected |
+
+### New surfaces, attacks that held
+
+| Attack | Result |
+| --- | --- |
+| Does the split-package CI step read a stale jar from the local Maven repository | no. It reads `gdpr-shredding-core/target` only. The job checks out fresh and the setup cache restores the local repository, never `target`. The jar is the one the priming `verify -DskipTests` just built from the same commit |
+| Does it fail closed when the jar is missing | yes. Empty `target`: `UNVERIFIABLE`, exit 2. Missing directory: `find` fails under `pipefail`, exit 1. Both fail the step (`bash -e`) |
+| Starter-scope script reads a stale core | no. It copies the tree without `target` and builds core and starter in one reactor run |
+| A parent or release profile overrides the jar plugin's `archive` and drops the seal | no. No other `maven-jar-plugin` configuration and no `combine.*` attribute in any pom |
+| A starter or sample class (main or test) in a core package hits the seal when run against the jar | none exists in any source tree |
+| Class load order: the forged class loads first, then the sealed jar | refused too (`already defined`); the probe exercises exactly that order |
+
+### Findings
+
+**C-PR38-5 (INFO, docs). The fix pass broke a code span in the CHANGELOG.**
+The edit to `CHANGELOG.md` `[Unreleased]` dropped one backtick. The line now reads
+``- `VerifiedSchema.equals and, through the record, `SchemaVerdict.equals` now include ...``. On
+`main` it read `` `VerifiedSchema.equals` and ``. The item has three backticks, so the rendered
+entry shows the wrong words as code and loses the second code span. This is the public text that
+announces the equality change.
+
+- Probe: `cipher-probe-c-pr38-p2-changelog-codespans.sh`
+  (`probe_changelog_entry_has_an_unclosed_code_span`). It counts backticks per list item. RED on
+  `f96326c` (`ODD (3): line 33`). GREEN on `main`.
+- Fix, for the fix pass: `CHANGELOG.md` line 33, restore the closing backtick after
+  `VerifiedSchema.equals`. Add the probe to `tools/` and to the `cipher-probes` job, so a broken
+  span in the CHANGELOG fails CI.
+
+### Routing
+
+C-PR38-5 goes to the fix pass. It is not a design stop. The probe turning green, with CI green,
+closes it without a third review pass.
