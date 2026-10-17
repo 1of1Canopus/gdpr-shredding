@@ -7,6 +7,16 @@ All notable changes to this project. The format follows
 ## [Unreleased]
 
 ### Fixed
+- The reference guard (`tools/check-private-references.sh`) now reads file names as well as
+  file content, with the same pattern: every tracked path in the tree, every member name and
+  the file name of each built jar. One shape is admitted by name only, a security review
+  document at the root of `docs/`; its text is still scanned. The tree listing is read
+  NUL-separated, and a control byte in a path, a symlink and a submodule entry are refused. In
+  a jar, a member name holding a control byte, a `..` segment or a leading `/`, two members
+  with one name (also after case folding), an empty jar and a listing that does not match the
+  jar's entry count are refused before extraction. The guard runs in the C locale, so a byte
+  that is not valid UTF-8 no longer hides a name, and a refused name is printed with every
+  non-printable byte escaped.
 - The reference guard (`tools/check-private-references.sh`) now also refuses the first names of
   the studio's agents in the tree, the main jar and the sources jar, so public text keeps to
   roles. Case-sensitive and whole-word; the script's header lists each name left out and why.
