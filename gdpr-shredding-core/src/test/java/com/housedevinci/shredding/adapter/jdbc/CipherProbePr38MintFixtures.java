@@ -1,6 +1,5 @@
 package com.housedevinci.shredding.adapter.jdbc;
 
-import java.util.function.BiFunction;
 import javax.sql.DataSource;
 
 /**
@@ -15,8 +14,8 @@ public final class CipherProbePr38MintFixtures {
   public static final class ByCall {
     private ByCall() {}
 
-    static VerifiedSchema mint(String name, DataSource ds) {
-      return new VerifiedSchema(name, ds);
+    static VerifiedSchema mint(String name, DataSource ds, DatabaseIdentity identity) {
+      return new VerifiedSchema(name, ds, identity);
     }
   }
 
@@ -24,6 +23,11 @@ public final class CipherProbePr38MintFixtures {
   public static final class ByReference {
     private ByReference() {}
 
-    static final BiFunction<String, DataSource, VerifiedSchema> MINT = VerifiedSchema::new;
+    /** The constructor gained the database identity in C-PR-1b; the reference is the same. */
+    interface Mint {
+      VerifiedSchema mint(String name, DataSource ds, DatabaseIdentity identity);
+    }
+
+    static final Mint MINT = VerifiedSchema::new;
   }
 }

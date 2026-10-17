@@ -32,6 +32,21 @@ All notable changes to this project. The format follows
   any connection is opened. A second pool to the same database and a wrapper around the verified
   pool are refused too. No property weakens this. The default beans were never affected. See
   [docs/upgrading-0.2.1.md](docs/upgrading-0.2.1.md).
+- **C-PR-1b (MEDIUM): a DataSource whose target moved after verification reached an unchecked
+  database.** The fix above binds the schema to one `DataSource` object, but that object can be
+  routed (`AbstractRoutingDataSource`), refreshed (a refresh-scoped proxy), retargeted
+  (`DelegatingDataSource.setTargetDataSource`, a mutable URL, an application delegate), fail over
+  on a multi-host URL, or log in as another role (Hikari credentials changed at runtime). Keys,
+  erasure log, tombstones and the anchor then reached a database nobody verified, default beans
+  included. Every store connection now runs one fingerprint query inside the call's own
+  transaction and before its work: the cluster's system identifier, the database oid and name,
+  the oid the verified schema name resolves to, `session_user`, `current_user`, and
+  `pg_is_in_recovery()`, which must be false. Any difference, a result other than one row, or a
+  failed query refuses with `SHRED-SCHEMA-012` (`ErrorCodes.STORE_CONNECTION_UNVERIFIED`, new) and
+  the transaction is rolled back. A promoted physical standby of the verified cluster is accepted;
+  a standby still in recovery is refused, for reads too. Verification refuses a server in recovery,
+  and a runtime role that cannot execute `pg_control_system()`, with `SHRED-SCHEMA-005`. No
+  property weakens this. The starter's boot-time mapping check reads through the same check.
 
 ### Changed
 - The core jar now seals the package `com.housedevinci.shredding.adapter.jdbc` (manifest entry
@@ -46,6 +61,15 @@ All notable changes to this project. The format follows
   of the DataSource the schema was verified on. Two verifications through two different DataSource
   objects are no longer equal, even on the same database.
 - The starter's default `JdbcKeyProvider` and `JdbcErasureStore` beans use the new constructors.
+- Store reads (`forRead`, `healthy`, `latestForSubject`, `anchor`, `readAfter`, the store's boot
+  trail check) now run in a read-only transaction of their own, which adds a `COMMIT`; inside a
+  caller's transaction they run in it and never end it (C-PR-1b).
+- Schema verification sets its read-only `REPEATABLE READ` transaction with `SET TRANSACTION`
+  instead of `Connection.setReadOnly` and `setTransactionIsolation`; the module calls
+  `setReadOnly` nowhere (C-PR-1b).
+- New public `JdbcSupport.readVerified(VerifiedSchema, SqlWork)`; `JdbcSupport.SqlWork` is now
+  public. An architecture rule allows `getConnection` only inside `JdbcSupport`, in core and
+  starter (C-PR-1b).
 
 ### Deprecated
 - The four constructors that take a `DataSource` and a `VerifiedSchema` (one on

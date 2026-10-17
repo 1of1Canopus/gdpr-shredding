@@ -213,7 +213,9 @@ class CipherProbeNoDdlPr13Test {
   @Test
   void probe_a_verified_schema_can_be_produced_without_any_verification() throws Exception {
     var canonical =
-        VerifiedSchema.class.getDeclaredConstructor(String.class, javax.sql.DataSource.class);
+        // C-PR-1b: the one constructor also takes the database identity it was verified on.
+        VerifiedSchema.class.getDeclaredConstructor(
+            String.class, javax.sql.DataSource.class, DatabaseIdentity.class);
     assertThat(Modifier.isPublic(canonical.getModifiers()))
         .describedAs(
             "VerifiedSchema is the capability that stands for \"this schema was verified\";"
@@ -240,7 +242,16 @@ class CipherProbeNoDdlPr13Test {
           (proxy, method, args) -> {
             if ("prepareStatement".equals(method.getName()) && seen.compareAndSet(false, true)) {
               autoCommit.set(real.getAutoCommit());
-              readOnly.set(real.isReadOnly());
+              // C-PR-1b, round 2, item 1: verification sets read-only with SQL, not with
+              // setReadOnly, so the driver's flag stays false. The server's own setting is the
+              // witness the probe's sentence asks for ("refused a write by the server").
+              try (var st = real.createStatement();
+                  var rs =
+                      st.executeQuery(
+                          "SELECT pg_catalog.current_setting('transaction_read_only')")) {
+                rs.next();
+                readOnly.set("on".equals(rs.getString(1)));
+              }
             }
             try {
               return method.invoke(real, args);

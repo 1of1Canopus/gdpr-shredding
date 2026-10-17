@@ -44,7 +44,9 @@ public final class Forge {
       public <T> T unwrap(Class<T> iface) { throw new UnsupportedOperationException(); }
       public boolean isWrapperFor(Class<?> iface) { return false; }
     };
-    VerifiedSchema forged = new VerifiedSchema("public", unverified);
+    // C-PR-1b: the one constructor also takes the database identity; forged as well.
+    DatabaseIdentity identity = new DatabaseIdentity(0L, 0L, "app", 2200L, "app", "app");
+    VerifiedSchema forged = new VerifiedSchema("public", unverified, identity);
     System.out.println("MINTED " + forged.name() + " bound to "
         + (forged.dataSource() == unverified ? "the unverified DataSource" : "something else"));
   }

@@ -1,13 +1,13 @@
 package com.housedevinci.shredding.autoconfigure;
 
 import com.housedevinci.shredding.adapter.jdbc.AcknowledgedCopies;
+import com.housedevinci.shredding.adapter.jdbc.JdbcSupport;
 import com.housedevinci.shredding.adapter.jdbc.MappingAdmission;
 import com.housedevinci.shredding.application.AcknowledgedCopy;
 import com.housedevinci.shredding.application.ErasureService;
 import com.housedevinci.shredding.application.PostErasureHook;
 import com.housedevinci.shredding.domain.ErrorCodes;
 import com.housedevinci.shredding.domain.ShreddingException;
-import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
@@ -79,28 +79,41 @@ public final class MappingAdmissionCheck {
     var copies = new ArrayList<String>();
     Map<Integer, String> warnings = new TreeMap<>();
     List<String> unused;
-    try (Connection c = gate.dataSource().getConnection()) {
-      for (MappingAdmission.Target target : targets) {
-        switch (MappingAdmission.verdict(c, target, model.copySignatures(), acknowledged)) {
-          case MappingAdmission.Admitted admitted -> {
-            admitted.warnings().forEach(w -> log.warn("shredding: {}", w));
-            admitted.acknowledged().forEach(a -> warnings.putIfAbsent(a.entry(), a.warning()));
-          }
-          case MappingAdmission.Absent absent ->
-              log.warn(
-                  "{} At startup this is a warning, because the table may be created after the"
-                      + " application starts; every erasure that reaches it is refused with {}"
-                      + " until it exists and is admissible.",
-                  absent.message(),
-                  ErrorCodes.MAPPING_INADMISSIBLE);
-          case MappingAdmission.Refused refused -> refusals.add(refused.message());
-          case MappingAdmission.Copied copied -> {
-            copies.add(copied.message());
-            copied.acknowledged().forEach(a -> warnings.putIfAbsent(a.entry(), a.warning()));
-          }
-        }
-      }
-      unused = AcknowledgedCopies.unused(c, acknowledged, warnings.keySet());
+    try {
+      // C-PR-1b: through the core's checked read path, never getConnection here. The target of
+      // the gate's DataSource may have moved since the gate verified it; this read refuses with
+      // SHRED-SCHEMA-012 before its first catalogue statement if it has.
+      unused =
+          JdbcSupport.readVerified(
+              gate.schema(),
+              c -> {
+                for (MappingAdmission.Target target : targets) {
+                  switch (MappingAdmission.verdict(
+                      c, target, model.copySignatures(), acknowledged)) {
+                    case MappingAdmission.Admitted admitted -> {
+                      admitted.warnings().forEach(w -> log.warn("shredding: {}", w));
+                      admitted
+                          .acknowledged()
+                          .forEach(a -> warnings.putIfAbsent(a.entry(), a.warning()));
+                    }
+                    case MappingAdmission.Absent absent ->
+                        log.warn(
+                            "{} At startup this is a warning, because the table may be created after the"
+                                + " application starts; every erasure that reaches it is refused with {}"
+                                + " until it exists and is admissible.",
+                            absent.message(),
+                            ErrorCodes.MAPPING_INADMISSIBLE);
+                    case MappingAdmission.Refused refused -> refusals.add(refused.message());
+                    case MappingAdmission.Copied copied -> {
+                      copies.add(copied.message());
+                      copied
+                          .acknowledged()
+                          .forEach(a -> warnings.putIfAbsent(a.entry(), a.warning()));
+                    }
+                  }
+                }
+                return AcknowledgedCopies.unused(c, acknowledged, warnings.keySet());
+              });
     } catch (SQLException e) {
       throw new ShreddingException(
           ErrorCodes.SCHEMA_UNVERIFIABLE,
