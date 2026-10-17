@@ -1259,7 +1259,7 @@ probe_reference_guard_pattern_is_defined_more_than_once() {
   n=0
   while IFS= read -r f; do
     [ -f "$f" ] || continue
-    grep -q "docs\[/\]plans" "$f" 2>/dev/null && n=$((n + 1))
+    grep -q "\[Dd\]\[Oo\]\[Cc\]\[Ss\]\[/\]" "$f" 2>/dev/null && n=$((n + 1))
   done <<<"$files"
   [ "$n" -eq 1 ] && return 1     # exactly one definition: FIXED
   return 0
