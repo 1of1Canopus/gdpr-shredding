@@ -1,7 +1,8 @@
 # Upgrading to 0.2.1
 
-0.2.1 binds a `VerifiedSchema` to the DataSource it was verified on (finding C-PR-1), and checks
-on every connection that the DataSource still reaches the database it verified (finding C-PR-1b).
+0.2.1 binds a `VerifiedSchema` to the DataSource it was verified on (finding C-PR-1), checks
+on every connection that the DataSource still reaches the database it verified (finding C-PR-1b),
+and judges the role each pool logs in as, not only the role it switched to (finding C-PR-1c).
 
 ## If you use the starter's default beans
 
@@ -90,3 +91,30 @@ application code, in the same trust class as a `KeyProvider` of your own. Do not
 schema was verified on, and the database it reached (C-PR-1b). Two verifications through two different DataSource objects are no longer
 equal, even on the same database. Nothing in the module compares them; check your own code if it
 does.
+
+## The pool's login role is judged, and every role it can become (C-PR-1c)
+
+The schema check now judges the role your pool logs in as, and every role it can become, not only
+the role it switched to. A pool that logs in as the owner or a superuser and runs `SET ROLE` or
+`SET SESSION AUTHORIZATION` in its init SQL is refused with `SHRED-SCHEMA-004`: any statement on it
+can switch back. Log in as the runtime role, or as a login whose only membership is the runtime
+role.
+
+Startup also refuses when the login, or any role it is a member of (with or without INHERIT), is a
+superuser, has CREATEROLE, is `pg_execute_server_program`, `pg_write_server_files` or
+`pg_read_server_files`, holds any parameter grant (`GRANT SET` or `ALTER SYSTEM ON PARAMETER`), or
+is a predefined role outside this list: `pg_signal_backend`, `pg_create_subscription`,
+`pg_checkpoint`, `pg_use_reserved_connections`, `pg_stat_scan_tables`. In particular a runtime role
+granted `pg_monitor`, `pg_read_all_stats`, `pg_read_all_settings` or `pg_read_all_data` refuses:
+they can read other logins' passwords. Use a separate login for monitoring. The message names the
+role and the membership; remove it with `REVOKE <role> FROM <member>`.
+
+The check reads the login from `pg_catalog.pg_stat_get_activity`, which PostgreSQL lets every role
+execute by default. If it was revoked, startup refuses with `SHRED-SCHEMA-005` and prints the
+`GRANT`. On PostgreSQL 14 and earlier startup refuses with `SHRED-SCHEMA-005`: the module is
+tested on 16 and 17.
+
+Each store connection leaves one session setting, `shredding.login_checked`, on its server
+backend. It records that the backend's login was checked, so the next calls skip that read. It
+changes nothing else. `DISCARD ALL` and `RESET ALL` clear it, which only makes the next call read
+the login again.

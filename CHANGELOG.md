@@ -47,6 +47,23 @@ All notable changes to this project. The format follows
   a standby still in recovery is refused, for reads too. Verification refuses a server in recovery,
   and a runtime role that cannot execute `pg_control_system()`, with `SHRED-SCHEMA-005`. No
   property weakens this. The starter's boot-time mapping check reads through the same check.
+- **C-PR-1c (MEDIUM): the schema check judged only the role a connection switched to.** A pool
+  that logged in as the owner and ran `SET ROLE shredding_app` in its init SQL, or as a superuser
+  with `SET SESSION AUTHORIZATION shredding_app`, passed as an unprivileged runtime role, and any
+  statement on it could switch back and disable the guards. A login that reached a privileged role
+  through a NOINHERIT membership passed too. The check now reads the login role from the backend's
+  own activity entry (`pg_stat_get_activity(pg_backend_pid())`), which no `SET` moves, and judges
+  it and every role it is a member of (`pg_has_role(.., 'MEMBER')`, including ADMIN-only grants).
+  New refusals with `SHRED-SCHEMA-004`: a superuser or CREATEROLE role in reach; the server-file
+  and server-program roles in reach (C-PR1c-1); a parameter grant to a role in reach or to PUBLIC
+  (C-PR1c-2); any predefined role outside an accepted list (C-PR1c-7). The refused-privilege legs
+  are now an allow list read from the grants themselves, so a privilege type added by a later
+  release, such as PostgreSQL 17's `MAINTAIN`, is refused without a version switch (C-PR1c-4).
+  A login role that cannot be read is `SHRED-SCHEMA-005`. Every store connection also checks its
+  login role (`SHRED-SCHEMA-012`): it reads it once per server backend and then remembers the
+  result in a session setting of that backend, `shredding.login_checked` (C-PR1c-3). The 1b
+  refusal now says "session role" for `session_user`. `SchemaVerdict` gains `loginRole()`. See
+  [docs/upgrading-0.2.1.md](docs/upgrading-0.2.1.md).
 
 ### Changed
 - The core jar now seals the package `com.housedevinci.shredding.adapter.jdbc` (manifest entry
