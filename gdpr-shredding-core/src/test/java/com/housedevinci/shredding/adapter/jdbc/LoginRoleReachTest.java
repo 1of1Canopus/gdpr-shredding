@@ -475,6 +475,43 @@ class LoginRoleReachTest {
     }
   }
 
+  @Test
+  void reach_read_failing_with_any_sqlstate_refuses_with_005_naming_the_login_read()
+      throws SQLException {
+    // Round 2 item 1: any SQLException from the login or reach read is 005 with the login
+    // message, not only 42501. A connection killed by an administrator (57P01) stands in here.
+    try (Connection real = connect(APP)) {
+      Connection failing =
+          (Connection)
+              java.lang.reflect.Proxy.newProxyInstance(
+                  Connection.class.getClassLoader(),
+                  new Class<?>[] {Connection.class},
+                  (proxy, method, args) -> {
+                    if (method.getName().equals("prepareStatement")
+                        && String.valueOf(args[0]).contains("FROM pg_catalog.pg_roles r")) {
+                      throw new SQLException("terminating connection", "57P01");
+                    }
+                    try {
+                      return method.invoke(real, args);
+                    } catch (java.lang.reflect.InvocationTargetException e) {
+                      throw e.getCause();
+                    }
+                  });
+
+      Throwable thrown =
+          catchThrowable(
+              () ->
+                  SchemaVerification.verify(
+                      failing, new SingleConnectionDataSource(real, true), false));
+
+      assertThat(thrown).isInstanceOf(ShreddingException.class);
+      assertThat(((ShreddingException) thrown).code()).isEqualTo(ErrorCodes.SCHEMA_UNVERIFIABLE);
+      assertThat(thrown)
+          .hasMessageContaining(
+              "the login role of this connection could not be read (SQLState 57P01)");
+    }
+  }
+
   // ------------------------------------------------------------------ every leg over reach
 
   @ParameterizedTest(name = "{0}")
