@@ -53,12 +53,12 @@
 #     file). ERE has no look-behind, so it is written out by hand, one alternative per
 #     letter of `crypto`. The other eleven names have no JDK or library class and get no
 #     dot or slash exemption (B-NG-2).
-#   - The security-probe suite: the required status check on `main` is named after the
-#     reviewing agent ("C... probes"), and test classes are `C...Probe...Test`. The
-#     identifier form fails the word rule by itself. The name followed by the exact word
-#     " probes" is not refused, because renaming a required check is a ruleset change on
-#     GitHub, not a change in this tree. "probe", "probed", "probe-verified" and every
-#     other use of that name are refused (B-NG-3).
+#   - The security-probe suite: test classes are `C...Probe...Test`. The identifier form
+#     fails the word rule by itself. The required status check on `main` was once named
+#     after the reviewing agent ("C... probes"), and the exact words " probes" were
+#     allowed after the name for that reason (B-NG-3). The check is now named by its role
+#     ("Security probes"), so the carve-out is gone: the name is refused in every use,
+#     the words " probes" included.
 #   - The one lower-case form refused is an agent's address, `<name>@housedevinci...`,
 #     as in a pasted sign-off trailer (B-NG-5). The project and security addresses pass.
 # Names deliberately NOT in the pattern, measured with `git grep -n -w` on the three trees
@@ -161,7 +161,7 @@ trap 'rm -rf "$scratch"' EXIT
 # (the former `internal/**` carve-out protected nothing: this repository has no `internal/`
 # directory and by design never will, and the exemption had no self-test case covering it -
 # see R-3 in the security review).
-pattern='QUESTIONS\.md|STATUS\.md|SPEC\.md|LICENSING\.md|SHARED-CONVENTIONS\.md|AGENTS\.md|docs[/]plans|SECURITY[-]REVIEW|RELEASIN[G]|[/]Users[/]|[/]home[/][a-z]|[/]root[/]|[A-Z]:\\Users|(^|[^[:alnum:][:cntrl:]_]|[[:space:]])([T]hor|[I]sis|[R]a|[A]thena|[O]din|[H]ermes|[H]arvey|[D]ollar|[B]rain|[B]rainus|[L]oki)([^[:alnum:]_]|$)|(^|[^[:alnum:][:cntrl:]_./]|[[:space:]]|(^|[^o]|(^|[^t])o|(^|[^p])to|(^|[^y])pto|(^|[^r])ypto|(^|[^c])rypto)[./])[C]ipher($|[^[:alnum:]_ ]| $| [^p]| p$| p[^r]| pr$| pr[^o]| pro$| pro[^b]| prob$| prob[^e]| probe$| probe[^s]| probes[[:alnum:]_])|(^|[^[:alnum:]._+-])([t]hor|[i]sis|[r]a|[a]thena|[o]din|[h]ermes|[h]arvey|[d]ollar|[b]rain|[b]rainus|[l]oki|[c]ipher)@housedevinci'
+pattern='QUESTIONS\.md|STATUS\.md|SPEC\.md|LICENSING\.md|SHARED-CONVENTIONS\.md|AGENTS\.md|docs[/]plans|SECURITY[-]REVIEW|RELEASIN[G]|[/]Users[/]|[/]home[/][a-z]|[/]root[/]|[A-Z]:\\Users|(^|[^[:alnum:][:cntrl:]_]|[[:space:]])([T]hor|[I]sis|[R]a|[A]thena|[O]din|[H]ermes|[H]arvey|[D]ollar|[B]rain|[B]rainus|[L]oki)([^[:alnum:]_]|$)|(^|[^[:alnum:][:cntrl:]_./]|[[:space:]]|(^|[^o]|(^|[^t])o|(^|[^p])to|(^|[^y])pto|(^|[^r])ypto|(^|[^c])rypto)[./])[C]ipher($|[^[:alnum:]_])|(^|[^[:alnum:]._+-])([t]hor|[i]sis|[r]a|[a]thena|[o]din|[h]ermes|[h]arvey|[d]ollar|[b]rain|[b]rainus|[l]oki|[c]ipher)@housedevinci'
 
 # Rule N2, defined exactly once: the one tree path shape whose NAME may carry a hit. Tree
 # paths only; the slug is scanned again with `pattern` (admitted_review_doc).
@@ -615,7 +615,7 @@ run_self_test() {
   _case "lower-case-crypto-word"           green         doc.md   "a TLS cipher suite and a cipher mode"
   _case "word-that-starts-with-a-name"     green         doc.md   "Maximum length, ${th}ough review, Rate limit, Brainstorm"
   _case "excluded-annotation"              green         doc.md   "@Max(32) and Red on the current text"
-  _case "required-check-name"              green         doc.md   "the $cr probes job and the $cr probes check"
+  _case "former-check-name"               red:content   doc.md   "the $cr probes job and the $cr probes check"
   # B-NG-1: whitespace control bytes are text, so they are boundaries.
   _case "agent-name-after-tab"             red:content   doc.md   "$(printf '\t')$th wrote this"
   _case "agent-name-after-form-feed"       red:content   doc.md   "$(printf '\f')$th wrote this"
@@ -631,7 +631,7 @@ run_self_test() {
   _case "short-agent-name-after-e-g"       red:content   doc.md   "e.g.R""a"
   _case "check-name-after-slash"           red:content   doc.md   "see docs/$cr"
   _case "check-name-after-other-package"   red:content   doc.md   "javax.krypto.$cr"
-  # B-NG-3: the carve-out is the exact word "probes", nothing else.
+  # B-NG-3: no carve-out is left; every use of the name is refused, " probes" included.
   _case "check-name-singular-probe"        red:content   doc.md   "the $cr probe found it"
   _case "check-name-probed"                red:content   doc.md   "$cr probed the branch"
   _case "check-name-probe-verified"        red:content   doc.md   "$cr probe-verified, no findings"

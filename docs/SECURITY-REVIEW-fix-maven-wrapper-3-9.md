@@ -22,7 +22,7 @@ its own PR and blocks the next release tag, not this merge.
 | Same, wrapper mutated to 3.10.0 | 63 entries; 6 foreign: `maven-metadata-local.xml` x3, `_remote.repositories` x3; parent pom and several checksums missing. Reproduces the Portal refusal locally, before any upload |
 | Probe W1, wrapper 3.10.0 + plugin 0.11.0 | WEAK (mutation detected) |
 | Probe W1, PR head | FIXED |
-| Full suite with `CIPHER_PROBE_MAVEN=1` | not re-run here (the Maven probes exceed the 600 s tool limit; stopped on coordinator instruction). Evidence is CI on 2bd139d: 6/6 green, including the Cipher probes check |
+| Full suite with `CIPHER_PROBE_MAVEN=1` | not re-run here (the Maven probes exceed the 600 s tool limit; stopped on coordinator instruction). Evidence is CI on 2bd139d: 6/6 green, including the Security probes check |
 | Dependabot name | PR 17 body: "Updates `org.apache.maven:apache-maven`" in the `maven` ecosystem, directory `/`, group `minor-and-patch`. The ignore matches that name only; `org.sonatype.central:central-publishing-maven-plugin` bumps are not affected. `>= 3.10` also holds back 4.x, which is intended |
 | Replay refusal for a retry | release.yml line 410 counts only PENDING..PUBLISHED; the FAILED 0.2.0 deployment does not block a retry |
 
@@ -82,7 +82,7 @@ validator proves nothing, unless it reproduces the validator's rule locally (B-1
 ## Pass 2 (2026-10-07)
 
 Head reviewed: e349e0a. CI on e349e0a: 6/6 required checks green (Build & test,
-Cipher probes, DCO sign-off, Reference guard, Release dry run, Vulnerability scan) plus the
+Security probes, DCO sign-off, Reference guard, Release dry run, Vulnerability scan) plus the
 Dependabot config check. Full `verify` and `CIPHER_PROBE_MAVEN=1` not re-run locally (CI is
 cited instead, per brief).
 

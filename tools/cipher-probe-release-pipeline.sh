@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Cipher probes for the Maven Central release pipeline (branch feat/release-pipeline).
+# Security probes for the Maven Central release pipeline (branch feat/release-pipeline).
 #
 # Every probe below asserts a WEAKNESS. Each one PASSES while its finding is open and must
 # FLIP TO FAILING once the matching finding from the security review is fixed. A probe
@@ -995,7 +995,7 @@ probe_preflight_accepts_an_environment_with_no_reviewer() {
   local stub_body
   stub_body='case "$*" in
   *environments/release*) echo "{\"name\":\"release\",\"protection_rules\":[{\"type\":\"wait_timer\",\"wait_timer\":0}]}" ;;
-  *rules/branches/main*) echo "[{\"type\":\"required_status_checks\",\"parameters\":{\"required_status_checks\":[{\"context\":\"Build & test\"},{\"context\":\"DCO sign-off\"},{\"context\":\"Cipher probes\"},{\"context\":\"Reference guard\"}]}}]" ;;
+  *rules/branches/main*) echo "[{\"type\":\"required_status_checks\",\"parameters\":{\"required_status_checks\":[{\"context\":\"Build & test\"},{\"context\":\"DCO sign-off\"},{\"context\":\"Security probes\"},{\"context\":\"Reference guard\"}]}}]" ;;
   *) exit 1 ;;
 esac'
   [ "$(_preflight_verdict "$stub_body")" -eq 0 ]
@@ -1021,7 +1021,7 @@ probe_preflight_refuses_even_when_both_gates_are_real() {
   local stub_body
   stub_body='case "$*" in
   *environments/release*) echo "{\"name\":\"release\",\"protection_rules\":[{\"type\":\"required_reviewers\",\"reviewers\":[{\"type\":\"User\",\"reviewer\":{\"login\":\"someone\"}}]}]}" ;;
-  *rules/branches/main*) echo "[{\"type\":\"required_status_checks\",\"parameters\":{\"required_status_checks\":[{\"context\":\"Build & test\"},{\"context\":\"DCO sign-off\"},{\"context\":\"Cipher probes\"},{\"context\":\"Reference guard\"}]}}]" ;;
+  *rules/branches/main*) echo "[{\"type\":\"required_status_checks\",\"parameters\":{\"required_status_checks\":[{\"context\":\"Build & test\"},{\"context\":\"DCO sign-off\"},{\"context\":\"Security probes\"},{\"context\":\"Reference guard\"}]}}]" ;;
   *) exit 1 ;;
 esac'
   [ "$(_preflight_verdict "$stub_body")" -ne 0 ]
@@ -1686,17 +1686,19 @@ probe_reference_guard_name_after_dot_or_slash_passes() {
   return 1
 }
 
-# B-NG-3: the check-name carve-out admitted anything that starts with "<name> probe".
+# B-NG-3: the check-name carve-out admitted anything that starts with "<name> probe". The
+# carve-out is gone (the check is "Security probes"): even " probes" must be refused now.
 probe_reference_guard_carve_out_admits_other_phrases() {
   [ -f "$RG" ] || return 0
   local c="Ci""pher"
   _ng_tree_red singular "the $c probe found it" && _ng_tree_red probed "$c probed the branch" \
     && _ng_tree_red verified "$c probe-verified, no findings" || return 0
-  _ng_tree_red check "the $c probes job is required" && return 0
+  _ng_tree_red check "the $c probes job is required" || return 0
   return 1
 }
 
-# B-NG-3: widening the carve-out to any " p..." left the self-test green (mutation survivor).
+# B-NG-3: putting the " probes" carve-out back must turn the self-test red (the case
+# `former-check-name` expects a refusal). Before the rename this widened the carve-out.
 probe_reference_guard_self_test_misses_a_widened_carve_out() {
   [ -f "$RG" ] || return 0
   local m rc
@@ -1704,8 +1706,10 @@ probe_reference_guard_self_test_misses_a_widened_carve_out() {
   python3 -I - "$m/tools/check-private-references.sh" <<'PYM'
 import re, sys
 p = sys.argv[1]; s = open(p).read()
-# the carve-out tail runs from "| p$| p[^r]" to the first ")" (it holds no parenthesis)
-s2 = re.sub(r"\| p\$\| p\[\^r\][^)]*\)", ")", s, count=1)
+# reinstate the old carve-out: the name may be followed by the exact words " probes"
+old = "[C]ipher($|[^[:alnum:]_])"
+new = "[C]ipher($|[^[:alnum:]_ ]| $| [^p]| p$| p[^r]| pr$| pr[^o]| pro$| pro[^b]| prob$| prob[^e]| probe$| probe[^s]| probes[[:alnum:]_])"
+s2 = s.replace(old, new, 1)
 open(p, "w").write(s2); sys.exit(0 if s2 != s else 3)
 PYM
   rc=$?
