@@ -2038,6 +2038,47 @@ probe probe_reference_guard_self_test_misses_checks    "B-NG-24 three checks hav
 probe probe_reference_guard_hit_path_command       "B-NG-30 a hit line can start with a file path"        probe_reference_guard_hit_path_starts_a_command
 probe probe_reference_guard_file_count_half      "B-NG-31 the file-count half has no self-test case"    probe_reference_guard_self_test_misses_the_file_count_half
 
+# B-NG-25, B-NG-26, B-NG-27 (security review of the letter-case change, PR 50 pass 1). Each probe
+# runs the REAL guard against a planted input, or deletes one check from a copy and runs the
+# self-test. Names are assembled from fragments so this file never matches its own pattern.
+# B-NG-25: the file-name forms of the review word and the release word pass in lower or mixed case.
+probe_lower_case_review_or_release_file_name_passes() {
+  [ -f "$RG" ] || return 0
+  _ng_index_red /dev/null "securit""y-review.md" || return 0
+  _ng_index_red /dev/null "docs/sub/Securit""y-Review-pr12.md" || return 0
+  _ng_index_red /dev/null "docs/Releasin""g.txt" || return 0
+  return 1
+}
+# B-NG-26: the self-test pins five document names in lower case only. Narrowing one alternative
+# to lower case only (the upper-case original no longer refused) must turn the self-test red.
+probe_self_test_misses_an_upper_case_regression() {
+  [ -f "$RG" ] || return 0
+  _ng2_mutant_survives status 's/\[Ss\]\[Tt\]\[Aa\]\[Tt\]\[Uu\]\[Ss\]\[.\]\[Mm\]\[Dd\]/statu[s][.]md/' && return 0
+  _ng2_mutant_survives spec 's/\[Ss\]\[Pp\]\[Ee\]\[Cc\]\[.\]\[Mm\]\[Dd\]/spe[c][.]md/' && return 0
+  _ng2_mutant_survives licensing 's/\[Ll\]\[Ii\]\[Cc\]\[Ee\]\[Nn\]\[Ss\]\[Ii\]\[Nn\]\[Gg\]\[.\]\[Mm\]\[Dd\]/licensin[g][.]md/' && return 0
+  _ng2_mutant_survives shared 's/\[Ss\]\[Hh\]\[Aa\]\[Rr\]\[Ee\]\[Dd\]-\[Cc\]\[Oo\]\[Nn\]\[Vv\]\[Ee\]\[Nn\]\[Tt\]\[Ii\]\[Oo\]\[Nn\]\[Ss\]\[.\]\[Mm\]\[Dd\]/shared-convention[s][.]md/' && return 0
+  _ng2_mutant_survives agents 's/\[Aa\]\[Gg\]\[Ee\]\[Nn\]\[Tt\]\[Ss\]\[.\]\[Mm\]\[Dd\]/agent[s][.]md/' && return 0
+  return 1
+}
+# B-NG-27: with both changes merged, a lower-case private file name must be refused by name, and
+# the slug re-scan of the admitted review shape must have a killing self-test case.
+probe_lower_case_private_file_name_passes() {
+  [ -f "$RG" ] || return 0
+  _ng_index_red /dev/null "notes/question""s.md" || return 0
+  _ng_index_red /dev/null "docs/SECURITY""-REVIEW-statu""s.md.md" || return 0
+  return 1
+}
+probe_slug_rescan_has_no_killing_case() {
+  [ -f "$RG" ] || return 0
+  grep -q '^admitted_review_doc()' "$RG" || return 0
+  _ng2_mutant_survives slug 's/  printf .%s\\n. "\$slug" \| grep -a -q -E "\$pattern"\n  rc=\$\?\n  \[ "\$rc" -eq 1 \]/  return 0/' && return 0
+  return 1
+}
+probe probe_reference_guard_lower_case_file_names       "B-NG-25 a lower-case review or release file name passes"  probe_lower_case_review_or_release_file_name_passes
+probe probe_reference_guard_upper_case_not_in_self_test "B-NG-26 the self-test pins lower case only"            probe_self_test_misses_an_upper_case_regression
+probe probe_reference_guard_lower_case_private_name     "B-NG-27 a lower-case private file name passes"        probe_lower_case_private_file_name_passes
+probe probe_reference_guard_slug_rescan_unkilled        "B-NG-27 the slug re-scan has no killing self-test case"  probe_slug_rescan_has_no_killing_case
+
 echo
 echo "still weak: $pass    fixed: $flipped    error: $errors"
 [ "$pass" -eq 0 ] && [ "$errors" -eq 0 ]
