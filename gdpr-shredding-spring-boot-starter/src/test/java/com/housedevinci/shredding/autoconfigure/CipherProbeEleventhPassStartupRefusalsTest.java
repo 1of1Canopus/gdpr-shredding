@@ -120,7 +120,6 @@ class CipherProbeEleventhPassStartupRefusalsTest {
                           c.subjectProperty()))
               .toList();
       return new com.housedevinci.shredding.adapter.jdbc.JdbcErasureStore(
-          gate.dataSource(),
           gate.schema(),
           chain,
           decoys,

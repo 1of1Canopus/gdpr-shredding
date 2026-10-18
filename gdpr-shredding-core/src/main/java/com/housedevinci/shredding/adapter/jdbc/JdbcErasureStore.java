@@ -56,7 +56,9 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
           + " field_count, blind_index_cleared, outcome, hook_outcomes, backup_clear_at,"
           + " chain_version, key_id, prev_hash, hash";
 
-  private final DataSource dataSource;
+  /** The verified schema; every connection is taken and checked through it (C-PR-1b). */
+  private final VerifiedSchema schema;
+
   private final ErasureChain chain;
   private final List<BlindIndexColumn> blindIndexColumns;
   private final List<MappingAdmission.Target> admissionTargets;
@@ -69,10 +71,47 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
   private final String anchorTable;
 
   /**
+   * @param schema the verified schema, bound to the {@code DataSource} it was verified on; the
+   *     store writes through that one and no other (C-PR-1). In Spring, {@code
+   *     ShreddingSchemaGate.schema()}
    * @param residual the independent read-back (design addendum 4, §4.5). It is not optional and has
    *     no default: an erasure whose own statements are the only thing that ever checks them is the
    *     shape S-22 shipped. See {@link BlindIndexResidual} for what an implementation must not do.
    */
+  public JdbcErasureStore(
+      VerifiedSchema schema,
+      ErasureChain chain,
+      List<BlindIndexColumn> blindIndexColumns,
+      BlindIndexResidual residual) {
+    this(schema, chain, blindIndexColumns, residual, CopySignatures.defaults());
+  }
+
+  /**
+   * @param schema the verified schema, as above
+   * @param residual the independent read-back, as above
+   * @param copySignatures the audit and history tables and revision columns the application's
+   *     mapping names, so the copy leg checked inside every erasure reads the same inputs as the
+   *     one checked at startup (audit-table coverage design, S-4). A core-only user who maps no
+   *     audit or history table passes {@link CopySignatures#defaults()}
+   */
+  public JdbcErasureStore(
+      VerifiedSchema schema,
+      ErasureChain chain,
+      List<BlindIndexColumn> blindIndexColumns,
+      BlindIndexResidual residual,
+      CopySignatures copySignatures) {
+    this(schema, chain, blindIndexColumns, residual, copySignatures, List.of());
+  }
+
+  /**
+   * The 0.2.0 forms below work only when {@code dataSource} is the very object {@code schema} was
+   * verified on. The two shorter ones delegate to the longest, which refuses any other object with
+   * {@code SHRED-SCHEMA-011} (C-PR-1) before any connection is opened. No property weakens this.
+   *
+   * @deprecated since 0.2.1, removed in 0.3.0: use {@link #JdbcErasureStore(VerifiedSchema,
+   *     ErasureChain, List, BlindIndexResidual)}, which takes the pool from the schema.
+   */
+  @Deprecated(since = "0.2.1", forRemoval = true)
   public JdbcErasureStore(
       DataSource dataSource,
       VerifiedSchema schema,
@@ -83,12 +122,10 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
   }
 
   /**
-   * @param residual the independent read-back, as above
-   * @param copySignatures the audit and history tables and revision columns the application's
-   *     mapping names, so the copy leg checked inside every erasure reads the same inputs as the
-   *     one checked at startup (audit-table coverage design, S-4). A core-only user who maps no
-   *     audit or history table passes {@link CopySignatures#defaults()}
+   * @deprecated since 0.2.1, removed in 0.3.0: use {@link #JdbcErasureStore(VerifiedSchema,
+   *     ErasureChain, List, BlindIndexResidual, CopySignatures)}.
    */
+  @Deprecated(since = "0.2.1", forRemoval = true)
   public JdbcErasureStore(
       DataSource dataSource,
       VerifiedSchema schema,
@@ -100,6 +137,31 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
   }
 
   /**
+   * The terminal 0.2.0 form, and the one place the identity check of the deprecated forms sits.
+   *
+   * @deprecated since 0.2.1, removed in 0.3.0: use {@link #JdbcErasureStore(VerifiedSchema,
+   *     ErasureChain, List, BlindIndexResidual, CopySignatures, List)}.
+   */
+  @Deprecated(since = "0.2.1", forRemoval = true)
+  public JdbcErasureStore(
+      DataSource dataSource,
+      VerifiedSchema schema,
+      ErasureChain chain,
+      List<BlindIndexColumn> blindIndexColumns,
+      BlindIndexResidual residual,
+      CopySignatures copySignatures,
+      List<AcknowledgedCopy> acknowledged) {
+    this(
+        VerifiedSchema.requireVerifiedOn(dataSource, schema, "JdbcErasureStore"),
+        chain,
+        blindIndexColumns,
+        residual,
+        copySignatures,
+        acknowledged);
+  }
+
+  /**
+   * @param schema the verified schema, as above
    * @param residual the independent read-back, as above
    * @param copySignatures the audit and history names, as above
    * @param acknowledged the triggers, publications and slots this store admits because a hook
@@ -110,17 +172,16 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
    *     pending on its clearing hook, which {@code ErasureService} built on this store does
    */
   public JdbcErasureStore(
-      DataSource dataSource,
       VerifiedSchema schema,
       ErasureChain chain,
       List<BlindIndexColumn> blindIndexColumns,
       BlindIndexResidual residual,
       CopySignatures copySignatures,
       List<AcknowledgedCopy> acknowledged) {
+    Objects.requireNonNull(schema, "schema");
     this.acknowledged = List.copyOf(acknowledged);
     AcknowledgedCopies.requireDistinct(this.acknowledged);
-    this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
-    Objects.requireNonNull(schema, "schema");
+    this.schema = schema;
     // Design §16: the four relation names are built once, from the schema that was verified at
     // boot, and no statement below names a relation any other way. The blind-index statements are
     // deliberately not qualified here - they address the application's own tables through the
@@ -138,7 +199,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
     // Fail closed at startup, not on the first erasure: a rolling restart must not serve traffic
     // for a while before it discovers it disagrees with the trail.
     JdbcSupport.withConnection(
-        dataSource,
+        schema,
         c -> {
           refuseIfMismatched(trailState(c));
           return null;
@@ -154,7 +215,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
   public Outcome erase(TenantId tenant, SubjectId subject, RecordFactory factory) {
     // C-25-1: READ COMMITTED whatever the pool or the role says; see JdbcSupport.
     return JdbcSupport.inReadCommittedTransaction(
-        dataSource,
+        schema,
         c -> {
           // CIPHER-03: the (tenant, subject) advisory lock first, ahead of the FOR UPDATE. It is
           // what makes a write racing the *first* mint for a subject line up behind (or in front
@@ -187,7 +248,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
     // The append guard reads the subject's latest record after the advisory lock, so it must read
     // committed data the lock has ordered: READ COMMITTED, as every erasure (C-25-1).
     return JdbcSupport.inReadCommittedTransaction(
-        dataSource, c -> step("the erasure-log append", () -> appendInTransaction(c, record)));
+        schema, c -> step("the erasure-log append", () -> appendInTransaction(c, record)));
   }
 
   private ErasureRecord appendInTransaction(Connection c, ErasureRecord record)
@@ -791,7 +852,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
 
   @Override
   public Optional<ErasureRecord> latestForSubject(TenantId tenant, String subjectPseudonym) {
-    return JdbcSupport.withConnection(dataSource, c -> latest(c, tenant, subjectPseudonym));
+    return JdbcSupport.withConnection(schema, c -> latest(c, tenant, subjectPseudonym));
   }
 
   private Optional<ErasureRecord> latest(Connection c, TenantId tenant, String subjectPseudonym)
@@ -822,7 +883,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
   @Override
   public Optional<Anchor> anchor() {
     return JdbcSupport.withConnection(
-        dataSource,
+        schema,
         c -> {
           try (PreparedStatement ps =
                   c.prepareStatement(
@@ -841,7 +902,7 @@ public final class JdbcErasureStore implements ErasureStore, ErasureReader, Eras
   public List<ErasureRecord> readAfter(long afterSequence, int limit) {
     int capped = Math.max(1, Math.min(limit, 1000));
     return JdbcSupport.withConnection(
-        dataSource,
+        schema,
         c -> {
           try (PreparedStatement ps =
               c.prepareStatement(

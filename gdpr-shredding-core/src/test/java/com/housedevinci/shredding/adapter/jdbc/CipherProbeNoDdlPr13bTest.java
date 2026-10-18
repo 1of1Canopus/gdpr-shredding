@@ -379,7 +379,7 @@ class CipherProbeNoDdlPr13bTest {
               Proxy.newProxyInstance(
                   Connection.class.getClassLoader(), new Class<?>[] {Connection.class}, handler);
       try {
-        SchemaVerification.verify(spy, false);
+        SchemaVerification.verify(spy, appDs, false);
       } catch (RuntimeException ignoredBecauseTheWriteAbortedTheTransaction) {
         // The refusal itself aborts the transaction; the SQLState is what this probe asserts.
       }
@@ -400,7 +400,7 @@ class CipherProbeNoDdlPr13bTest {
       boolean autoCommit = c.getAutoCommit();
       boolean readOnly = c.isReadOnly();
       int isolation = c.getTransactionIsolation();
-      assertThatThrownBy(() -> SchemaVerification.verify(c, false))
+      assertThatThrownBy(() -> SchemaVerification.verify(c, appDs, false))
           .isInstanceOf(ShreddingException.class);
       assertThat(c.getAutoCommit()).isEqualTo(autoCommit);
       assertThat(c.isReadOnly()).isEqualTo(readOnly);

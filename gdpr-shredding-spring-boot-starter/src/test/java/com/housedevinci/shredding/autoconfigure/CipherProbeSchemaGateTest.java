@@ -171,12 +171,19 @@ class CipherProbeSchemaGateTest {
     assertThat(ownerLog.warnings())
         .anyMatch(
             line ->
-                line.contains("shredding.jdbc.allow-privileged-runtime-role=true")
+                line.contains("is privileged over the shredding objects")
                     && line.contains("owns table shredding_erasure")
                     && line.contains("advisory in this configuration"));
-    assertThat(ownerLog.infos())
-        .describedAs("the INFO line must not claim the role clause it did not earn")
-        .anyMatch(line -> line.contains("schema verified") && !line.contains("owns none of the 9"));
+    // C-PR41-1: the legs stay in core's line; the property is named by the starter's own line.
+    assertThat(ownerLog.warnings())
+        .anyMatch(line -> line.contains("shredding.jdbc.allow-privileged-runtime-role=true"));
+    // C-PR-1d: core logs one line, the WARN, which carries the summary. No second INFO line.
+    assertThat(ownerLog.infos()).noneMatch(line -> line.contains("schema verified"));
+    assertThat(ownerLog.warnings())
+        .describedAs("the summary must not claim the role clause it did not earn")
+        .filteredOn(line -> line.contains("schema verified"))
+        .hasSize(1)
+        .noneMatch(line -> line.contains("owns none of the 9"));
   }
 
   @Test
@@ -363,7 +370,6 @@ class CipherProbeSchemaGateTest {
     @Bean
     KeyProvider shreddingKeyProvider(ShreddingSchemaGate gate) {
       return new com.housedevinci.shredding.adapter.jdbc.JdbcKeyProvider(
-          gate.dataSource(),
           gate.schema(),
           MasterKey.fromBytes(new byte[32]),
           RandomSource.secure(),

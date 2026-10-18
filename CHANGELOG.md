@@ -6,10 +6,96 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Security
+- **C-PR-1d (LOW): core stayed silent in the weaker privileged mode.**
+  `JdbcSupport.verifySchema(ds, true)` and `initializeAndVerifySchema(ds, true)` accepted a
+  privileged runtime role and logged nothing. The javadoc left the WARN to the caller, so a team
+  using core without the starter had no warning that the append-only guards can be disabled by
+  that role. Core now logs one line per verification, at every call: INFO with the summary in the
+  strict mode, WARN naming the privilege legs in the privileged mode. The starter gate no longer
+  prints the same line a second time. In the privileged mode the
+  starter adds one WARN of its own that names `shredding.jdbc.allow-privileged-runtime-role=true`
+  and says that removing it makes the start refuse (C-PR41-1). Core's WARN names the role and
+  the legs; the starter's names the property. The core refusal (SHRED-SCHEMA-004) now names both
+  switches: the Spring property and `verifySchema(ds, true)` for callers without Spring
+  (C-PR41-2).
+- **C-PR-1 (MEDIUM): a JDBC store could write to a database the schema gate never checked.**
+  `VerifiedSchema` held only a schema name, so `new JdbcKeyProvider(otherDataSource,
+  gate.schema(), ...)` built, the context started, and keys, erasure log, tombstones and the anchor
+  went to another database while the boot log said "schema verified". A `VerifiedSchema` is now
+  bound to the `DataSource` object it was verified on, at both creation points
+  (`JdbcSupport.verifySchema` and `JdbcSupport.initializeAndVerifySchema`). New constructors
+  `JdbcKeyProvider(VerifiedSchema, MasterKey, RandomSource, Clock)` and
+  `JdbcErasureStore(VerifiedSchema, ErasureChain, ...)` take no `DataSource`; the store writes
+  through the one the schema carries. The old constructors refuse any other object with
+  `SHRED-SCHEMA-011` (`ErrorCodes.STORE_DATASOURCE_UNVERIFIED`, new), compared by identity, before
+  any connection is opened. A second pool to the same database and a wrapper around the verified
+  pool are refused too. No property weakens this. The default beans were never affected. See
+  [docs/upgrading-0.2.1.md](docs/upgrading-0.2.1.md).
+- **C-PR-1b (MEDIUM): a DataSource whose target moved after verification reached an unchecked
+  database.** The fix above binds the schema to one `DataSource` object, but that object can be
+  routed (`AbstractRoutingDataSource`), refreshed (a refresh-scoped proxy), retargeted
+  (`DelegatingDataSource.setTargetDataSource`, a mutable URL, an application delegate), fail over
+  on a multi-host URL, or log in as another role (Hikari credentials changed at runtime). Keys,
+  erasure log, tombstones and the anchor then reached a database nobody verified, default beans
+  included. Every store connection now runs one fingerprint query inside the call's own
+  transaction and before its work: the cluster's system identifier, the database oid and name,
+  the oid the verified schema name resolves to, `session_user`, `current_user`, and
+  `pg_is_in_recovery()`, which must be false. Any difference, a result other than one row, or a
+  failed query refuses with `SHRED-SCHEMA-012` (`ErrorCodes.STORE_CONNECTION_UNVERIFIED`, new) and
+  the transaction is rolled back. A promoted physical standby of the verified cluster is accepted;
+  a standby still in recovery is refused, for reads too. Verification refuses a server in recovery,
+  and a runtime role that cannot execute `pg_control_system()`, with `SHRED-SCHEMA-005`. No
+  property weakens this. The starter's boot-time mapping check reads through the same check.
+
+### Changed
+- The core jar now seals the package `com.housedevinci.shredding.adapter.jdbc` (manifest entry
+  `Sealed: true`). A class of yours in that package fails to load with `sealing violation` on a
+  plain classpath. This closes a split-package route to the package-private `VerifiedSchema`
+  constructor (C-PR38-1). Spring Boot's executable-jar launcher does not enforce sealing, so under
+  it such a class is still deliberate application code.
+- The architecture rule on `VerifiedSchema` minting now also catches a constructor reference
+  (`VerifiedSchema::new`) (C-PR38-2), and the starter has its own architecture test: no starter
+  class in a core package, no access to the constructor (C-PR38-3).
+- `VerifiedSchema.equals` and, through the record, `SchemaVerdict.equals` now include the identity
+  of the DataSource the schema was verified on. Two verifications through two different DataSource
+  objects are no longer equal, even on the same database.
+- The starter's default `JdbcKeyProvider` and `JdbcErasureStore` beans use the new constructors.
+- Store reads (`forRead`, `healthy`, `latestForSubject`, `anchor`, `readAfter`, the store's boot
+  trail check) now run in a read-only transaction of their own, which adds a `COMMIT`; inside a
+  caller's transaction they run in it and never end it (C-PR-1b).
+- Schema verification sets its read-only `REPEATABLE READ` transaction with `SET TRANSACTION`
+  instead of `Connection.setReadOnly` and `setTransactionIsolation`; the module calls
+  `setReadOnly` nowhere (C-PR-1b).
+- New public `JdbcSupport.readVerified(VerifiedSchema, SqlWork)`; `JdbcSupport.SqlWork` is now
+  public. An architecture rule allows `getConnection` only inside `JdbcSupport`, in core and
+  starter (C-PR-1b).
+
+### Deprecated
+- The four constructors that take a `DataSource` and a `VerifiedSchema` (one on
+  `JdbcKeyProvider`, three on `JdbcErasureStore`). They still work when given the very object the
+  schema was verified on. They are removed in 0.3.0.
+
 ### Fixed
 - The reference guard now refuses the moved-private document names in any letter case (for
   example a lower-case copy of a private document), in content and in file names. The bare
   review and release words stay upper case only, because in lower case they are plain English.
+- The reference guard (`tools/check-private-references.sh`) now reads file names as well as
+  file content, with the same pattern: every tracked path in the tree, every member name and
+  the file name of each built jar. One shape is admitted by name only, a security review
+  document at the root of `docs/`; its text is still scanned. The tree listing is read
+  NUL-separated, and a control byte in a path, a symlink and a submodule entry are refused. In
+  a jar, a member name holding a control byte, a `..` segment or a leading `/`, two members
+  with one name (also after case folding), an empty jar and a listing that does not match the
+  jar's entry count are refused before extraction. The guard runs in the C locale, so a byte
+  that is not valid UTF-8 no longer hides a name, and a refused name is printed with every
+  non-printable byte escaped.
+- The jar side of the reference guard checks that extraction was one to one: no symlink in the
+  extracted folder, and the number of regular files and their total bytes equal what the jar's
+  central directory lists. Before, a member at `./a.txt` next to `a.txt`, the data of a
+  directory entry, or a symlink member's stored target could carry text the content scan never
+  read. Member names with an empty or `.` segment are refused by name. Content hits are printed
+  with control bytes escaped, so a carriage return in a hit cannot start a workflow command.
 - The reference guard (`tools/check-private-references.sh`) now also refuses the first names of
   the studio's agents in the tree, the main jar and the sources jar, so public text keeps to
   roles. Case-sensitive and whole-word; the script's header lists each name left out and why.

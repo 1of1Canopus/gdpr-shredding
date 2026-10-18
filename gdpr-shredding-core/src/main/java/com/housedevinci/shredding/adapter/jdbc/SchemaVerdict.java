@@ -10,7 +10,7 @@ import java.util.Objects;
  * privileged" is a global statement over a check that is a list of legs, and an INFO line an
  * auditor reads must claim only the legs that actually ran. {@link #summary()} therefore enumerates
  * what was compared, and the clause about the role is only printed when {@link #privilegeLegs()} is
- * empty - when it is not, the caller prints the weaker-mode WARN instead, naming the legs.
+ * empty - when it is not, core logs the weaker-mode WARN instead, naming the legs (C-PR-1d).
  *
  * @param privilegeLegs the {@code SHRED-SCHEMA-004} legs that fired and were suppressed by {@code
  *     shredding.jdbc.allow-privileged-runtime-role=true}. Empty on the hardened path.

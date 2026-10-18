@@ -627,8 +627,7 @@ class AcknowledgedCopiesPostgresTest {
     pools.add(inTransaction);
     var store =
         new JdbcErasureStore(
-            inTransaction,
-            schema,
+            TestSchemas.reboundTo(schema, inTransaction),
             ErasureChain.keyed(SECRET, "k1"),
             List.of(),
             (c, col, tenant, subject) -> 0L,
@@ -727,7 +726,6 @@ class AcknowledgedCopiesPostgresTest {
 
   private static JdbcErasureStore store(String table, List<AcknowledgedCopy> entries) {
     return new JdbcErasureStore(
-        app,
         schema,
         ErasureChain.keyed(SECRET, "k1"),
         List.of(

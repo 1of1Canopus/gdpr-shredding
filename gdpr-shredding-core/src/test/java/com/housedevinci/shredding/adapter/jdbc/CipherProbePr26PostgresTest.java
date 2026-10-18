@@ -254,7 +254,6 @@ class CipherProbePr26PostgresTest {
 
   private static JdbcErasureStore store(String table) {
     return new JdbcErasureStore(
-        app,
         schema,
         ErasureChain.keyed(SECRET, "k1"),
         List.of(

@@ -144,7 +144,7 @@ public class ShreddingAutoConfiguration {
   @ConditionalOnMissingBean
   public KeyProvider shreddingKeyProvider(
       ShreddingSchemaGate gate, MasterKey masterKey, RandomSource random, Clock clock) {
-    return new JdbcKeyProvider(gate.dataSource(), gate.schema(), masterKey, random, clock);
+    return new JdbcKeyProvider(gate.schema(), masterKey, random, clock);
   }
 
   @Bean
@@ -213,7 +213,6 @@ public class ShreddingAutoConfiguration {
     // them. The residual is rendered by Hibernate from the mapping, on the erasure's own
     // connection - see HibernateBlindIndexResidual for the contract and its two hazards.
     return new JdbcErasureStore(
-        gate.dataSource(),
         gate.schema(),
         chain,
         model.blindIndexColumns(),

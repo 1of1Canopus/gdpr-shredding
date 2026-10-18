@@ -585,14 +585,19 @@ foreign keys, statistics and audit or history tables cannot be acknowledged.
 migration applies the schema. Two things to add:
 
 ```java
+// The schema carries the DataSource it was verified on; the stores take no DataSource (0.2.1).
 VerifiedSchema schema = JdbcSupport.verifySchema(runtimeDataSource).schema();
-var keys = new JdbcKeyProvider(runtimeDataSource, schema, masterKey, random, clock);
-var store = new JdbcErasureStore(runtimeDataSource, schema, chain, blindIndexColumns, residual);
+var keys = new JdbcKeyProvider(schema, masterKey, random, clock);
+var store = new JdbcErasureStore(schema, chain, blindIndexColumns, residual);
 // or, with acknowledged copies (entry n is named shredding.jdbc.acknowledged-copies[n]):
-var store = new JdbcErasureStore(runtimeDataSource, schema, chain, blindIndexColumns, residual,
+var store = new JdbcErasureStore(schema, chain, blindIndexColumns, residual,
     CopySignatures.defaults(),
     List.of(AcknowledgedCopy.trigger("public", "customer", "customer_history", "historyIndexScrubber")));
 ```
+
+On 0.2.0 the constructors also took `runtimeDataSource` as their first argument. That form still
+works on 0.2.1 with the same object, and is removed in 0.3.0: see
+[upgrading-0.2.1.md](upgrading-0.2.1.md).
 
 Build `ErasureService` on that store, or on a wrapper that forwards `acknowledgedCopies()`: the
 store refuses every erasure whose record does not name its acknowledged copies.

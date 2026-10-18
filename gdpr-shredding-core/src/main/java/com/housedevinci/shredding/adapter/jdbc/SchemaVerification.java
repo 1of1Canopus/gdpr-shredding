@@ -13,6 +13,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -20,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import javax.sql.DataSource;
 
 /**
  * Reads the PostgreSQL catalogue and decides whether the schema in {@code current_schema()} still
@@ -71,7 +73,13 @@ final class SchemaVerification {
    * catalogue reads take eleven snapshots, so "schema verified" is a claim about no single instant
    * of the database, and nothing on the server side refuses a write from a connection whose whole
    * contract is "catalogue reads only" - the rule would be enforced by review alone. The connection
-   * is rolled back and all three settings restored whatever happens.
+   * is rolled back and auto-commit restored whatever happens.
+   *
+   * <p>Read-only and the level are set with SQL, as the transaction's first statement, never with
+   * {@code Connection.setReadOnly} or {@code setTransactionIsolation} (C-PR-1b, round 2, item 1): a
+   * read/write-splitting driver moves to a replica when it sees {@code setReadOnly(true)}, and a
+   * {@code SET TRANSACTION} covers this transaction only, so the session's own settings are never
+   * touched and there is nothing else to restore.
    *
    * <p>The pin of §4.9 is transaction-local, so the {@code rollback()} in {@link #restore} undoes
    * it and the connection goes back to the pool with the {@code search_path} it arrived with.
@@ -80,29 +88,29 @@ final class SchemaVerification {
    *     SchemaVerdict#privilegeLegs()} for the caller to warn about, instead of a refusal. {@code
    *     007} is never downgraded.
    */
-  static SchemaVerdict verify(Connection connection, boolean allowPrivilegedRuntimeRole) {
+  static SchemaVerdict verify(
+      Connection connection, DataSource dataSource, boolean allowPrivilegedRuntimeRole) {
     boolean previousAutoCommit;
-    boolean previousReadOnly;
-    int previousIsolation;
     try {
       previousAutoCommit = connection.getAutoCommit();
-      previousReadOnly = connection.isReadOnly();
-      previousIsolation = connection.getTransactionIsolation();
-      // Both before setAutoCommit(false): PostgreSQL refuses either inside an open transaction.
-      connection.setReadOnly(true);
-      connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
       connection.setAutoCommit(false);
     } catch (SQLException e) {
       throw unverifiable(e);
     }
     try {
-      return run(connection, allowPrivilegedRuntimeRole);
+      try (Statement st = connection.createStatement()) {
+        st.execute(BEGIN_SQL);
+      }
+      return run(connection, dataSource, allowPrivilegedRuntimeRole);
     } catch (SQLException e) {
       throw unverifiable(e);
     } finally {
-      restore(connection, previousAutoCommit, previousReadOnly, previousIsolation);
+      restore(connection, previousAutoCommit);
     }
   }
+
+  /** The verification transaction's first statement: one snapshot, refused any write. */
+  static final String BEGIN_SQL = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY";
 
   /**
    * Verifies inside a transaction the caller already opened, changing no connection setting. The
@@ -117,20 +125,18 @@ final class SchemaVerification {
    * eleven legs that are qualified in text and unqualified in substance.
    */
   static SchemaVerdict verifyInCallersTransaction(
-      Connection connection, boolean allowPrivilegedRuntimeRole) {
+      Connection connection, DataSource dataSource, boolean allowPrivilegedRuntimeRole) {
     try {
-      return run(connection, allowPrivilegedRuntimeRole);
+      return run(connection, dataSource, allowPrivilegedRuntimeRole);
     } catch (SQLException e) {
       throw unverifiable(e);
     }
   }
 
-  private static void restore(Connection c, boolean autoCommit, boolean readOnly, int isolation) {
+  private static void restore(Connection c, boolean autoCommit) {
     try {
       c.rollback();
       c.setAutoCommit(autoCommit);
-      c.setReadOnly(readOnly);
-      c.setTransactionIsolation(isolation);
     } catch (SQLException ignored) {
       // The connection is about to be closed or returned to a pool that discards a broken one. A
       // failure to put settings back is never a reason to turn a clean verification into a refusal,
@@ -138,13 +144,19 @@ final class SchemaVerification {
     }
   }
 
-  private static SchemaVerdict run(Connection c, boolean allowPrivileged) throws SQLException {
+  /**
+   * @param dataSource the object {@code c} was taken from. It is bound into the {@link
+   *     VerifiedSchema} (C-PR-1), so a store can only write through the pool that was verified.
+   */
+  private static SchemaVerdict run(Connection c, DataSource dataSource, boolean allowPrivileged)
+      throws SQLException {
     // §4.9, in this order and before any leg: capture the session facts through qualified names,
     // pin the path so a name somebody forgets to prefix later still resolves in pg_catalog, and
     // read the pin back because set_config echoes its own argument whether or not it took.
     SessionFacts facts = sessionFacts(c);
     pinSearchPath(c);
-    Session session = new Session(facts, namespaceOid(c, facts));
+    long schemaOid = namespaceOid(c, facts);
+    Session session = new Session(facts, dataSource, schemaOid, identity(c, facts, schemaOid));
     VerifiedSchema schema = session.schema();
     long ns = session.schemaOid();
 
@@ -233,9 +245,68 @@ final class SchemaVerification {
   private record SessionFacts(String schema, String role, String database) {}
 
   private record Session(VerifiedSchema schema, long schemaOid, String role, String database) {
-    Session(SessionFacts facts, long schemaOid) {
-      this(new VerifiedSchema(facts.schema()), schemaOid, facts.role(), facts.database());
+    Session(SessionFacts facts, DataSource dataSource, long schemaOid, DatabaseIdentity identity) {
+      this(
+          new VerifiedSchema(facts.schema(), dataSource, identity),
+          schemaOid,
+          facts.role(),
+          facts.database());
     }
+  }
+
+  /**
+   * C-PR-1b: what this connection reaches, read with the fingerprint every store connection runs
+   * later, in this transaction, under the pin. Three refusals, each {@code SHRED-SCHEMA-005}:
+   * {@code pg_control_system()} denied to this role, with the grant that fixes it (there is no
+   * fallback, round 2, item 6); a server in recovery, which can pass every catalogue leg while
+   * every store call would be refused; and a fingerprint that does not return exactly one row.
+   */
+  private static DatabaseIdentity identity(Connection c, SessionFacts facts, long schemaOid)
+      throws SQLException {
+    DatabaseIdentity.Observed observed;
+    try {
+      observed = DatabaseIdentity.read(c, facts.schema(), false);
+    } catch (SQLException e) {
+      if ("42501".equals(e.getSQLState())) {
+        throw new ShreddingException(
+            ErrorCodes.SCHEMA_UNVERIFIABLE,
+            "shredding: the runtime role cannot execute pg_catalog.pg_control_system() (SQLState"
+                + " 42501), so the cluster this connection reaches cannot be identified, and no"
+                + " store connection could later be checked against it (C-PR-1b). Unverifiable is"
+                + " not clean, so this is a refusal. As a superuser, run: GRANT EXECUTE ON"
+                + " FUNCTION pg_catalog.pg_control_system() TO "
+                + roleIdentifier(facts.role())
+                + ". PostgreSQL grants it to PUBLIC by default.",
+            e);
+      }
+      throw e;
+    }
+    if (observed.inRecovery()) {
+      throw new ShreddingException(
+          ErrorCodes.SCHEMA_UNVERIFIABLE,
+          "shredding: the database this connection reaches is in recovery (a standby or read"
+              + " replica). It can lag the primary and serve a data key the primary has already"
+              + " destroyed, and it cannot be written to, so the module does not verify it. Point"
+              + " the module's DataSource at the primary.");
+    }
+    if (observed.rows() != 1 || observed.identity().orElseThrow().schemaOid() != schemaOid) {
+      throw new ShreddingException(
+          ErrorCodes.SCHEMA_UNVERIFIABLE,
+          "shredding: the database this connection reaches could not be identified: the"
+              + " fingerprint returned "
+              + observed.rows()
+              + " rows where exactly one is required, or another schema than the one just"
+              + " verified. Unverifiable is not clean.");
+    }
+    return observed.identity().orElseThrow();
+  }
+
+  /** The role as an SQL identifier for a printed statement: bare when it is plain lower case. */
+  private static String roleIdentifier(String role) {
+    String escaped = com.housedevinci.shredding.application.LogText.escape(role);
+    return role.matches("[a-z_][a-z0-9_$]*")
+        ? escaped
+        : "\"" + escaped.replace("\"", "\"\"") + "\"";
   }
 
   /**
@@ -1371,7 +1442,9 @@ final class SchemaVerification {
         + " SECURITY-NOTES.md, and point spring.datasource.username at the runtime role. Step by"
         + " step: docs/upgrading-0.2.0.md. To boot anyway and accept that the append-only controls"
         + " are advisory in this configuration, set"
-        + " shredding.jdbc.allow-privileged-runtime-role=true, which warns at every startup.";
+        + " shredding.jdbc.allow-privileged-runtime-role=true (starter), or call"
+        + " JdbcSupport.verifySchema(ds, true) / initializeAndVerifySchema(ds, true) (core"
+        + " without the starter, which never reads the property). Both warn at every call.";
   }
 
   private static String underprivilegedRemedy() {

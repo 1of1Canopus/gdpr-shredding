@@ -16,6 +16,7 @@ import java.sql.Statement;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.Objects;
 import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,8 +28,12 @@ public final class JdbcSupport {
 
   private JdbcSupport() {}
 
+  /**
+   * Work on a connection this class took and checked. Public for {@link #readVerified}, the
+   * starter's one entry point (C-PR-1b).
+   */
   @FunctionalInterface
-  interface SqlWork<T> {
+  public interface SqlWork<T> {
     T run(Connection c) throws SQLException;
   }
 
@@ -140,29 +145,37 @@ public final class JdbcSupport {
     return true;
   }
 
-  static <T> T inTransaction(DataSource ds, SqlWork<T> work) {
+  /**
+   * Runs {@code work} in one transaction, on a connection checked first.
+   *
+   * <p><b>Every connection is checked before its work (C-PR-1b).</b> The three entry points below
+   * are the only places a store takes a connection, and each takes it from {@code
+   * schema.dataSource()} and runs {@link DatabaseIdentity#require} on it, inside the call's own
+   * transaction, before the work. The {@code DataSource} object is the verified one (C-PR-1), but
+   * its target can move after verification; the server's own facts cannot. A refusal is {@code
+   * SHRED-SCHEMA-012}, the transaction this class began is rolled back, and the work never runs. An
+   * architecture rule refuses {@code getConnection} anywhere else in core and starter.
+   */
+  static <T> T inTransaction(VerifiedSchema schema, SqlWork<T> work) {
+    try (Connection c = schema.dataSource().getConnection()) {
+      return inTransaction(
+          c,
+          conn -> {
+            DatabaseIdentity.require(conn, schema, false);
+            return work.run(conn);
+          });
+    } catch (SQLException e) {
+      throw unavailable(e);
+    }
+  }
+
+  /**
+   * The schema step only: DDL on a database nothing has verified yet, so there is no identity to
+   * compare with. Never used for a store.
+   */
+  private static void inUncheckedTransaction(DataSource ds, SqlWork<Void> work) {
     try (Connection c = ds.getConnection()) {
-      boolean previous = c.getAutoCommit();
-      c.setAutoCommit(false);
-      T result;
-      try {
-        result = work.run(c);
-        c.commit();
-      } catch (SQLException | RuntimeException e) {
-        try {
-          c.rollback();
-        } catch (SQLException rollback) {
-          e.addSuppressed(rollback);
-        }
-        try {
-          c.setAutoCommit(previous);
-        } catch (SQLException reset) {
-          e.addSuppressed(reset);
-        }
-        throw e;
-      }
-      c.setAutoCommit(previous);
-      return result;
+      inTransaction(c, work);
     } catch (SQLException e) {
       throw unavailable(e);
     }
@@ -190,9 +203,12 @@ public final class JdbcSupport {
    * transaction (auto-commit off) is refused untouched: that transaction is neither joined nor
    * committed. A level that cannot be set, or does not read back as {@code read committed}, is
    * {@code SHRED-SCHEMA-008}: nothing runs.
+   *
+   * <p>The database check of C-PR-1b runs third, after the pin and its read-back and before the
+   * work: {@code SET TRANSACTION} must stay the transaction's first statement.
    */
-  static <T> T inReadCommittedTransaction(DataSource ds, SqlWork<T> work) {
-    try (Connection c = ds.getConnection()) {
+  static <T> T inReadCommittedTransaction(VerifiedSchema schema, SqlWork<T> work) {
+    try (Connection c = schema.dataSource().getConnection()) {
       if (!c.getAutoCommit()) {
         throw notReadCommitted("cannot be set: the connection arrived inside a transaction", null);
       }
@@ -212,6 +228,7 @@ public final class JdbcSupport {
             if (!"read committed".equals(level)) {
               throw notReadCommitted("reads back as \"" + level + "\"", null);
             }
+            DatabaseIdentity.require(conn, schema, false);
             return work.run(conn);
           });
     } catch (SQLException e) {
@@ -254,11 +271,63 @@ public final class JdbcSupport {
         cause);
   }
 
-  static <T> T withConnection(DataSource ds, SqlWork<T> work) {
-    try (Connection c = ds.getConnection()) {
-      return work.run(c);
+  /** The read path of the stores: {@link #readVerified}, with a failure as an outage. */
+  static <T> T withConnection(VerifiedSchema schema, SqlWork<T> work) {
+    try {
+      return readVerified(schema, work);
     } catch (SQLException e) {
       throw unavailable(e);
+    }
+  }
+
+  /**
+   * Runs a read on a connection from the verified {@code DataSource}, checked first (C-PR-1b).
+   *
+   * <p>On a connection in auto-commit, the check and the read run in <b>one read-only transaction
+   * this method begins and commits</b>, so a pooler in transaction mode cannot send them to two
+   * server sessions (path M12). Read-only is set by the fingerprint query itself, with SQL, never
+   * with {@code Connection.setReadOnly}: a read/write-splitting driver moves to a replica on that
+   * call. A connection that arrives inside a caller's transaction (auto-commit off, for example
+   * Spring's {@code TransactionAwareDataSourceProxy} within {@code @Transactional}) is not this
+   * method's to end: the check and the read run inside it, and nothing is committed, rolled back or
+   * made read-only. A refusal is thrown and the caller's transaction manager decides.
+   *
+   * <p>The starter's one way to read through the verified pool; it may not call {@code
+   * getConnection} itself (architecture rule).
+   *
+   * @throws com.housedevinci.shredding.domain.ShreddingException {@code SHRED-SCHEMA-012} when the
+   *     connection does not reach what was verified; the read never runs
+   * @throws SQLException from the connection or the read, for the caller to classify
+   */
+  public static <T> T readVerified(VerifiedSchema schema, SqlWork<T> work) throws SQLException {
+    Objects.requireNonNull(schema, "schema");
+    Objects.requireNonNull(work, "work");
+    try (Connection c = schema.dataSource().getConnection()) {
+      if (!c.getAutoCommit()) {
+        DatabaseIdentity.require(c, schema, false);
+        return work.run(c);
+      }
+      c.setAutoCommit(false);
+      T result;
+      try {
+        DatabaseIdentity.require(c, schema, true);
+        result = work.run(c);
+        c.commit();
+      } catch (SQLException | RuntimeException e) {
+        try {
+          c.rollback();
+        } catch (SQLException rollback) {
+          e.addSuppressed(rollback);
+        }
+        try {
+          c.setAutoCommit(true);
+        } catch (SQLException reset) {
+          e.addSuppressed(reset);
+        }
+        throw e;
+      }
+      c.setAutoCommit(true);
+      return result;
     }
   }
 
@@ -559,7 +628,7 @@ public final class JdbcSupport {
    * at every startup that the controls are advisory in that configuration.
    */
   public static void initializeSchema(DataSource ds) {
-    inTransaction(
+    inUncheckedTransaction(
         ds,
         c -> {
           initializeSchema(c);
@@ -596,11 +665,12 @@ public final class JdbcSupport {
    *
    * <p>The strict form: a privileged runtime role is a refusal. This is the assertion a non-Spring
    * caller should make at its own startup, right after handing the adapters their {@code
-   * DataSource}.
+   * DataSource}. Logs one INFO line with {@link SchemaVerdict#summary()}.
    *
-   * @return the schema that was verified. Hand it to {@link JdbcKeyProvider} and {@link
-   *     JdbcErasureStore} so that "the schema that was verified" and "the schema that is written
-   *     to" are the same name by construction (design §16).
+   * @return the schema that was verified, bound to {@code ds}. Hand it to {@link JdbcKeyProvider}
+   *     and {@link JdbcErasureStore}, which take no {@code DataSource} of their own, so that "the
+   *     schema and database that were verified" and "the ones written to" are the same by
+   *     construction (design §16, C-PR-1).
    * @throws com.housedevinci.shredding.domain.ShreddingException {@code SHRED-SCHEMA-001} to {@code
    *     -005} and {@code -007}; see {@link ErrorCodes}
    */
@@ -609,13 +679,18 @@ public final class JdbcSupport {
   }
 
   /**
+   * Logs one line at every call (C-PR-1d): INFO with the summary when the role is unprivileged,
+   * WARN naming the privilege legs when {@code allowPrivilegedRuntimeRole} let a privileged role
+   * through. The caller does not need to warn, and a caller that also logs the verdict prints the
+   * line twice.
+   *
    * @param allowPrivilegedRuntimeRole when true, {@code SHRED-SCHEMA-004} is not thrown and the
-   *     legs that fired are returned in {@link SchemaVerdict#privilegeLegs()} for the caller to
-   *     warn about at every startup. {@code SHRED-SCHEMA-007} is never downgraded.
+   *     legs that fired are returned in {@link SchemaVerdict#privilegeLegs()} and named in the WARN
+   *     this method logs. {@code SHRED-SCHEMA-007} is never downgraded.
    */
   public static SchemaVerdict verifySchema(DataSource ds, boolean allowPrivilegedRuntimeRole) {
     try (Connection c = ds.getConnection()) {
-      return SchemaVerification.verify(c, allowPrivilegedRuntimeRole);
+      return logVerdict(SchemaVerification.verify(c, ds, allowPrivilegedRuntimeRole));
     } catch (SQLException e) {
       throw new ShreddingException(
           ErrorCodes.SCHEMA_UNVERIFIABLE,
@@ -625,6 +700,28 @@ public final class JdbcSupport {
               + "). Unverifiable is not clean, so this is a refusal.",
           e);
     }
+  }
+
+  /**
+   * The one line per verification. Printed at every call, never once, so a weaker mode cannot be on
+   * without the log of that start saying so.
+   */
+  private static SchemaVerdict logVerdict(SchemaVerdict verdict) {
+    if (verdict.runtimeRoleIsUnprivileged()) {
+      log.info("shredding: {}", verdict.summary());
+    } else {
+      log.warn(
+          "shredding: the runtime role {} is privileged over the shredding objects in schema {}: {}."
+              + " The append-only controls are advisory in this configuration: nothing stops this"
+              + " application from disabling or replacing its own guards. Record this in your"
+              + " processing documentation, or move the application to a non-privileged role (see"
+              + " docs/upgrading-0.2.0.md). {}",
+          verdict.role(),
+          verdict.schema().name(),
+          String.join("; ", verdict.privilegeLegs()),
+          verdict.summary());
+    }
+    return verdict;
   }
 
   /**
@@ -666,9 +763,9 @@ public final class JdbcSupport {
         // The caller's transaction, which has just run the DDL under the script's advisory lock:
         // not read-only and not a fresh snapshot, and it must not be made either (C-13-4).
         SchemaVerdict verdict =
-            SchemaVerification.verifyInCallersTransaction(c, allowPrivilegedRuntimeRole);
+            SchemaVerification.verifyInCallersTransaction(c, ds, allowPrivilegedRuntimeRole);
         c.commit();
-        return verdict;
+        return logVerdict(verdict);
       } catch (RuntimeException e) {
         c.rollback();
         throw e;
