@@ -287,16 +287,15 @@ class DatabaseIdentityEntryPointTest {
   @Test
   void fingerprint_with_two_rows_refuses() throws SQLException {
     VerifiedSchema schema = JdbcSupport.verifySchema(appDs).schema();
-    DatabaseIdentity id = schema.identity();
     for (int rows : new int[] {0, 2}) {
-      Connection fake = fakeConnection(id, rows);
+      Connection fake = fakeConnection(schema, rows);
       Throwable thrown = catchThrowable(() -> DatabaseIdentity.require(fake, schema, false));
       assertThat(thrown).isInstanceOf(ShreddingException.class);
       assertThat(((ShreddingException) thrown).code()).isEqualTo("SHRED-SCHEMA-012");
       assertThat(thrown.getMessage()).contains("returned " + rows + " rows");
     }
     // The same fake with one row passes: the refusals above are about the count.
-    DatabaseIdentity.require(fakeConnection(id, 1), schema, false);
+    DatabaseIdentity.require(fakeConnection(schema, 1), schema, false);
   }
 
   // ------------------------------------------------------------------ helpers
@@ -442,8 +441,12 @@ class DatabaseIdentityEntryPointTest {
     }
   }
 
-  /** A connection whose fingerprint returns {@code rows} copies of {@code id}, not in recovery. */
-  private static Connection fakeConnection(DatabaseIdentity id, int rows) {
+  /**
+   * A connection whose fingerprint returns {@code rows} copies of the verified facts, not in
+   * recovery.
+   */
+  private static Connection fakeConnection(VerifiedSchema schema, int rows) {
+    DatabaseIdentity id = schema.identity();
     var left = new AtomicInteger(rows);
     Object[] columns = {
       false,
@@ -452,7 +455,8 @@ class DatabaseIdentityEntryPointTest {
       id.databaseName(),
       id.schemaOid(),
       id.sessionUser(),
-      id.currentUser()
+      id.currentUser(),
+      schema.loginMarker()
     };
     ResultSet rs =
         (ResultSet)

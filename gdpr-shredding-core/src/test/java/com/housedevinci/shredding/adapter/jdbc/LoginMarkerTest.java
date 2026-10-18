@@ -14,12 +14,16 @@ import com.housedevinci.shredding.domain.ShreddingException;
 import com.housedevinci.shredding.domain.SubjectId;
 import com.housedevinci.shredding.domain.TenantId;
 import com.zaxxer.hikari.HikariDataSource;
+import java.sql.Connection;
 import java.sql.SQLException;
 import java.time.Clock;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.TransactionAwareDataSourceProxy;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 /**
@@ -123,6 +127,157 @@ class LoginMarkerTest {
         catchThrowable(() -> keys.currentForWrite(TenantId.of("t"), subject())), "login role");
   }
 
+  // ------------------------------------------------------------------ P1, P2
+
+  @Test
+  void cold_backend_reads_the_login_once_and_sets_the_marker() throws SQLException {
+    try (var one = gateway()) {
+      VerifiedSchema schema = JdbcSupport.verifySchema(one).schema();
+      assertThat(marker(one))
+          .describedAs("verification changes no session state")
+          .isNotEqualTo(schema.loginMarker());
+
+      keys(schema).currentForWrite(TenantId.of("t"), subject());
+
+      assertThat(marker(one)).isEqualTo(schema.loginMarker());
+    }
+  }
+
+  @Test
+  void hot_backend_skips_the_activity_read() throws SQLException {
+    try (var one = gateway()) {
+      VerifiedSchema schema = JdbcSupport.verifySchema(one).schema();
+      keys(schema).currentForWrite(TenantId.of("t"), subject());
+
+      String plan = plan(one, schema);
+
+      assertThat(plan.lines().filter(l -> l.contains("pg_stat_get_activity")))
+          .describedAs(plan)
+          .singleElement()
+          .asString()
+          .contains("never executed");
+    }
+  }
+
+  @Test
+  void cold_backend_runs_the_activity_read() throws SQLException {
+    try (var one = gateway()) {
+      VerifiedSchema schema = JdbcSupport.verifySchema(one).schema();
+
+      String plan = plan(one, schema);
+
+      assertThat(plan.lines().filter(l -> l.contains("pg_stat_get_activity")))
+          .describedAs(plan)
+          .singleElement()
+          .asString()
+          .doesNotContain("never executed");
+    }
+  }
+
+  // ------------------------------------------------------------------ P5, P6, P7
+
+  @Test
+  void rolled_back_call_leaves_no_marker() throws SQLException {
+    try (var one = gateway()) {
+      VerifiedSchema schema = JdbcSupport.verifySchema(one).schema();
+      try (Connection c = one.getConnection()) {
+        c.setAutoCommit(false);
+        DatabaseIdentity.require(c, schema, false);
+        assertThat(setting(c)).describedAs("set inside the call").isEqualTo(schema.loginMarker());
+        c.rollback();
+        assertThat(setting(c)).isNotEqualTo(schema.loginMarker());
+        c.setAutoCommit(true);
+      }
+    }
+  }
+
+  @Test
+  void discard_all_makes_the_next_call_cold() throws SQLException {
+    // The documented setup: DISCARD ALL also resets a SET ROLE, which 1b would refuse.
+    try (var one = TwoRoleCluster.pool(PG, APP, PASSWORD, PG.getDatabaseName(), "SELECT 1")) {
+      VerifiedSchema schema = JdbcSupport.verifySchema(one).schema();
+      var keys = keys(schema);
+      keys.currentForWrite(TenantId.of("t"), subject());
+      assertThat(marker(one)).isEqualTo(schema.loginMarker());
+
+      exec(one, "DISCARD ALL");
+      assertThat(marker(one)).isEmpty();
+      assertThat(plan(one, schema)).doesNotContain("never executed");
+
+      keys.currentForWrite(TenantId.of("t"), subject());
+      assertThat(marker(one)).isEqualTo(schema.loginMarker());
+    }
+  }
+
+  @Test
+  void caller_rollback_removes_the_marker() throws SQLException {
+    try (var one = TwoRoleCluster.pool(PG, APP, PASSWORD, PG.getDatabaseName(), "SELECT 1")) {
+      var proxy = new TransactionAwareDataSourceProxy(one);
+      VerifiedSchema schema = JdbcSupport.verifySchema(proxy).schema();
+      var keys = keys(schema);
+      var tx = new TransactionTemplate(new DataSourceTransactionManager(one));
+
+      tx.executeWithoutResult(
+          status -> {
+            keys.forRead(TenantId.of("t"), SubjectId.of("nobody"), 1);
+            status.setRollbackOnly();
+          });
+
+      assertThat(marker(one)).isNotEqualTo(schema.loginMarker());
+    }
+  }
+
+  // ------------------------------------------------------------------ P8, C-PR1c-5, P9
+
+  @Test
+  void second_verification_draws_a_new_marker() {
+    String first = JdbcSupport.verifySchema(gatewayDs).schema().loginMarker();
+    String second = JdbcSupport.verifySchema(gatewayDs).schema().loginMarker();
+
+    assertThat(first).hasSize(32).isNotEqualTo(second);
+  }
+
+  @Test
+  void two_live_verifications_on_one_pool_cost_is_stated() throws SQLException {
+    // C-PR1c-5, stated in SECURITY-NOTES: two VerifiedSchema instances on one pool overwrite each
+    // other's marker, so every call alternates and reads the login (the cold cost).
+    try (var one = gateway()) {
+      VerifiedSchema a = JdbcSupport.verifySchema(one).schema();
+      VerifiedSchema b = JdbcSupport.verifySchema(one).schema();
+      assertThat(a.loginMarker()).isNotEqualTo(b.loginMarker());
+
+      keys(a).currentForWrite(TenantId.of("t"), subject());
+      assertThat(marker(one)).isEqualTo(a.loginMarker());
+      assertThat(plan(one, b)).doesNotContain("never executed");
+      keys(b).currentForWrite(TenantId.of("t"), subject());
+      assertThat(marker(one)).isEqualTo(b.loginMarker());
+      assertThat(plan(one, a)).doesNotContain("never executed");
+      keys(a).currentForWrite(TenantId.of("t"), subject());
+      assertThat(marker(one)).isEqualTo(a.loginMarker());
+    }
+  }
+
+  @Test
+  void marker_never_appears_in_messages_or_to_string() throws SQLException {
+    var moving = new Swappable(gatewayDs);
+    SchemaVerdict verdict = JdbcSupport.verifySchema(moving);
+    VerifiedSchema schema = verdict.schema();
+    var keys = keys(schema);
+    keys.currentForWrite(TenantId.of("t"), subject());
+    moving.target.set(superuser(RESTORE));
+
+    Throwable thrown = catchThrowable(() -> keys.currentForWrite(TenantId.of("t"), subject()));
+
+    String marker = schema.loginMarker();
+    assertThat(thrown).isInstanceOf(ShreddingException.class);
+    assertThat(thrown.getMessage()).doesNotContain(marker);
+    assertThat(String.valueOf(thrown.getCause())).doesNotContain(marker);
+    assertThat(schema.toString()).doesNotContain(marker);
+    assertThat(schema.identity().toString()).doesNotContain(marker);
+    assertThat(verdict.summary()).doesNotContain(marker);
+    assertThat(verdict.toString()).doesNotContain(marker);
+  }
+
   // ------------------------------------------------------------------ L13, L17
 
   @Test
@@ -161,6 +316,53 @@ class LoginMarkerTest {
   }
 
   // ------------------------------------------------------------------ helpers
+
+  /** The marker setting on the pool's one backend; empty when unset or reset. */
+  private static String marker(HikariDataSource one) throws SQLException {
+    try (Connection c = one.getConnection()) {
+      return setting(c);
+    }
+  }
+
+  private static String setting(Connection c) throws SQLException {
+    try (var s = c.createStatement();
+        var rs =
+            s.executeQuery(
+                "SELECT pg_catalog.current_setting('"
+                    + DatabaseIdentity.MARKER_SETTING
+                    + "', true)")) {
+      rs.next();
+      String value = rs.getString(1);
+      return value == null ? "" : value;
+    }
+  }
+
+  /** The per-call statement's plan on the pool's one backend, run and rolled back. */
+  private static String plan(HikariDataSource one, VerifiedSchema schema) throws SQLException {
+    try (Connection c = one.getConnection()) {
+      c.setAutoCommit(false);
+      try (var ps =
+          c.prepareStatement(
+              "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) "
+                  + DatabaseIdentity.FINGERPRINT_SQL)) {
+        ps.setString(1, schema.name());
+        ps.setString(2, schema.loginMarker());
+        ps.setString(3, schema.loginMarker());
+        ps.setLong(4, schema.identity().loginRoleOid());
+        ps.setString(5, schema.loginMarker());
+        var out = new StringBuilder();
+        try (var rs = ps.executeQuery()) {
+          while (rs.next()) {
+            out.append(rs.getString(1)).append('\n');
+          }
+        }
+        return out.toString();
+      } finally {
+        c.rollback();
+        c.setAutoCommit(true);
+      }
+    }
+  }
 
   private static HikariDataSource gateway() {
     return TwoRoleCluster.pool(PG, "gateway", PASSWORD, PG.getDatabaseName(), "SET ROLE " + APP);

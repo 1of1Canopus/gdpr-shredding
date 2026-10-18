@@ -376,6 +376,12 @@ class LoginRoleReachTest {
                 + predefined
                 + ", reachable from login role watcher, is a predefined role this module does not"
                 + " accept");
+    if (predefined.equals("pg_monitor")) {
+      // pg_monitor's members reach pg_read_all_settings, which is refused on its own (C-PR1c-7).
+      assertThat(refusal)
+          .hasMessageContaining(
+              "role pg_read_all_settings, reachable from login role watcher, is a predefined role");
+    }
   }
 
   @Test
@@ -451,7 +457,11 @@ class LoginRoleReachTest {
     login("doomed", "");
     exec(su, "GRANT " + APP + " TO doomed");
     try (Connection c = connect("doomed")) {
-      exec(su, "REVOKE " + APP + " FROM doomed", "DROP ROLE doomed");
+      try (var s = c.createStatement()) {
+        // The current role stays a live role, so the first failing read is the login's own.
+        s.execute("SET ROLE " + APP);
+      }
+      exec(su, "DROP ROLE doomed");
       created.remove("doomed");
 
       var single = new SingleConnectionDataSource(c, true);
