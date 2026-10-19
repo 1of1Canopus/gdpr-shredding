@@ -1282,8 +1282,9 @@ owner). A role in reach is `pg_execute_server_program`, `pg_write_server_files` 
 which can edit `pg_hba.conf`. A role in reach, or PUBLIC, holds any parameter grant (`GRANT SET`
 or `ALTER SYSTEM ON PARAMETER`): `ALTER SYSTEM` on `archive_command` is a shell after the next
 reload. A role in reach is a predefined role (name starting `pg_`) outside the accepted list. The
-login role is, or reaches, the owner of a table, an index, a guard function, the sequence or the
-database. A role in reach, or PUBLIC, holds any privilege on the four tables, the sequence, the
+login role is, or reaches, the owner of a table, an index, a guard function, the sequence, the
+schema or the database. (The owner of the schema can drop every object in it, even after it
+revokes `CREATE` from itself.) A role in reach, or PUBLIC, holds any privilege on the four tables, the sequence, the
 schema or the database beyond the documented grant set. That last leg reads the grants themselves,
 so a privilege type a later release adds (for example `MAINTAIN` on PostgreSQL 17, which can lock
 the erasure log) is refused without a version check.

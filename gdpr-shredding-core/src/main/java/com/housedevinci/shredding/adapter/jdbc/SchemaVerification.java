@@ -1416,10 +1416,15 @@ final class SchemaVerification {
                 + " pg_catalog.has_schema_privilege(current_user, ?::pg_catalog.oid, 'USAGE'),"
                 + " pg_catalog.pg_has_role(?::pg_catalog.oid,"
                 + "   (SELECT d.datdba FROM pg_catalog.pg_database d"
-                + "      WHERE (d.datname OPERATOR(pg_catalog.=) ?)), 'MEMBER')")) {
+                + "      WHERE (d.datname OPERATOR(pg_catalog.=) ?)), 'MEMBER'),"
+                + " pg_catalog.pg_has_role(?::pg_catalog.oid,"
+                + "   (SELECT n.nspowner FROM pg_catalog.pg_namespace n"
+                + "      WHERE (n.oid OPERATOR(pg_catalog.=) ?::pg_catalog.oid)), 'MEMBER')")) {
       ps.setLong(1, session.schemaOid());
       ps.setLong(2, reach.loginOid());
       ps.setString(3, session.database());
+      ps.setLong(4, reach.loginOid());
+      ps.setLong(5, session.schemaOid());
       try (ResultSet rs = ps.executeQuery()) {
         rs.next();
         if ("on".equalsIgnoreCase(rs.getString(1))) {
@@ -1431,6 +1436,17 @@ final class SchemaVerification {
         if (rs.getBoolean(3)) {
           excess.add(
               reach.owner() + "is, or is a member of, the owner of database " + session.database());
+        }
+        if (rs.getBoolean(4)) {
+          // C-PR45-1: the owner of a schema can DROP every object in it, whoever owns the object,
+          // and keeps that right after it revokes CREATE from itself. The grant list cannot show
+          // it.
+          excess.add(
+              (reach.owner().isEmpty()
+                      ? "owns "
+                      : reach.owner() + "owns, or is a member of the owner of, ")
+                  + "schema "
+                  + session.schema());
         }
       }
     }
@@ -1533,9 +1549,10 @@ final class SchemaVerification {
    * ({@code NULL}) is read as {@code acldefault}, which holds the owner's implicit rights. The
    * owner's own entries of a table, the sequence and the database are left out: a reachable owner
    * is already refused by its ownership leg, and its implicit rights would repeat it forty times.
-   * The schema has no ownership leg, so its owner's entries stay ({@code CREATE}). Any privilege
-   * type outside the object's list refuses, whatever its name, so a type a later release adds is
-   * refused without a version switch.
+   * The schema has an ownership leg too (C-PR45-1, in {@code checkRole}): its owner can drop every
+   * object in it even with {@code CREATE} revoked, so the owner's {@code CREATE} entry stays here
+   * only as a second message for the same finding. Any privilege type outside the object's list
+   * refuses, whatever its name, so a type a later release adds is refused without a version switch.
    */
   private static final String OBJECT_GRANTS_SQL =
       "SELECT c.relname, c.relkind, x.grantee, x.privilege_type"
@@ -1682,7 +1699,11 @@ final class SchemaVerification {
           String column = rs.getString(2);
           long grantee = rs.getLong(3);
           String privilege = rs.getString(4);
-          if (grantee != 0 && reach.name(grantee).equals(reach.current())) {
+          // C-PR45-2: only the UPDATE rows are left to checkColumnUpdate for the current role.
+          // Any other column privilege (REFERENCES, INSERT, SELECT) is judged for it too.
+          if ("UPDATE".equals(privilege)
+              && grantee != 0
+              && reach.name(grantee).equals(reach.current())) {
             continue;
           }
           TablePrivileges want =

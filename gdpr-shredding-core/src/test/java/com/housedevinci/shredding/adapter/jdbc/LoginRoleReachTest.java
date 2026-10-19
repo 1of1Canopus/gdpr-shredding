@@ -605,6 +605,96 @@ class LoginRoleReachTest {
     exec(su, "CREATE ROLE " + role + " LOGIN PASSWORD '" + PASSWORD + "' " + attributes);
   }
 
+  // ------------------------------------------------------------------ C-PR45-1, C-PR45-2
+
+  /**
+   * C-PR45-1. The owner of the verified schema can DROP every table in it, whoever owns the table,
+   * and keeps that right after it revokes CREATE from itself. Own database, so the shared one is
+   * not changed.
+   */
+  @Test
+  void schema_owner_with_its_own_create_revoked_refuses_naming_the_schema() throws SQLException {
+    String db = "p45_schema_owner";
+    TwoRoleCluster.install(PG, db);
+    try (var admin = TwoRoleCluster.superuser(PG, db);
+        var app = TwoRoleCluster.app(PG, db)) {
+      exec(
+          admin,
+          "ALTER SCHEMA public OWNER TO " + APP,
+          "REVOKE CREATE ON SCHEMA public FROM " + APP);
+      // Impact, shown first: the runtime role drops the erasure log (rolled back).
+      exec(app, "BEGIN", "DROP TABLE public.shredding_erasure CASCADE", "ROLLBACK");
+
+      var refusal = refusal(app);
+
+      assertThat(refusal.code()).isEqualTo(ErrorCodes.RUNTIME_ROLE_PRIVILEGED);
+      assertThat(refusal).hasMessageContaining("schema public");
+    }
+  }
+
+  /** C-PR45-1, reach: a NOINHERIT login that is a member of a schema-owning group refuses. */
+  @Test
+  void noinherit_member_of_a_schema_owning_group_refuses_naming_the_login_and_the_schema()
+      throws SQLException {
+    String db = "p45_schema_group";
+    TwoRoleCluster.install(PG, db);
+    try (var admin = TwoRoleCluster.superuser(PG, db)) {
+      exec(
+          admin,
+          "CREATE ROLE p45_sgroup NOLOGIN",
+          "ALTER SCHEMA public OWNER TO p45_sgroup",
+          "CREATE ROLE p45_slogin LOGIN NOINHERIT PASSWORD '" + PASSWORD + "'",
+          "GRANT " + APP + " TO p45_slogin",
+          "GRANT p45_sgroup TO p45_slogin");
+      try (var login = TwoRoleCluster.pool(PG, "p45_slogin", PASSWORD, db, "SET ROLE " + APP)) {
+        var refusal = refusal(login);
+
+        assertThat(refusal.code()).isEqualTo(ErrorCodes.RUNTIME_ROLE_PRIVILEGED);
+        assertThat(refusal)
+            .hasMessageContaining(
+                "login role p45_slogin owns, or is a member of the owner of, schema public");
+      }
+    }
+  }
+
+  /**
+   * C-PR45-2. A column-level REFERENCES grant to the runtime role itself refuses. Before the fix a
+   * foreign key from a table the role owns pinned a data key and the crypto-shredding DELETE failed
+   * with 23503.
+   */
+  @Test
+  void column_references_grant_to_the_runtime_role_refuses_and_would_block_key_destruction()
+      throws SQLException {
+    String db = "p45_col_refs";
+    TwoRoleCluster.install(PG, db);
+    try (var admin = TwoRoleCluster.superuser(PG, db);
+        var app = TwoRoleCluster.app(PG, db)) {
+      exec(
+          admin,
+          "GRANT REFERENCES (tenant, subject, version) ON shredding_data_key TO " + APP,
+          "CREATE SCHEMA mine AUTHORIZATION " + APP,
+          "INSERT INTO shredding_data_key (tenant, subject, version, wrapped_key, state,"
+              + " created_at) VALUES ('t', 's', 1, '\\x00', 'ACTIVE', now())");
+      exec(
+          app,
+          "CREATE TABLE mine.pin (tenant varchar(255), subject varchar(255), version integer,"
+              + " FOREIGN KEY (tenant, subject, version)"
+              + " REFERENCES public.shredding_data_key (tenant, subject, version))",
+          "INSERT INTO mine.pin VALUES ('t', 's', 1)");
+      Throwable delete =
+          catchThrowable(
+              () -> exec(app, "DELETE FROM public.shredding_data_key WHERE tenant = 't'"));
+      assertThat(delete).isInstanceOf(SQLException.class);
+      assertThat(((SQLException) delete).getSQLState()).isEqualTo("23503");
+      exec(app, "DROP TABLE mine.pin");
+
+      var refusal = refusal(app);
+
+      assertThat(refusal.code()).isEqualTo(ErrorCodes.RUNTIME_ROLE_PRIVILEGED);
+      assertThat(refusal).hasMessageContaining("REFERENCES on shredding_data_key");
+    }
+  }
+
   private HikariDataSource pool(String user, String initSql) {
     return pool(user, PASSWORD, initSql);
   }

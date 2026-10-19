@@ -65,6 +65,18 @@ All notable changes to this project. The format follows
   refusal now says "session role" for `session_user`. `SchemaVerdict` gains `loginRole()`. See
   [docs/upgrading-0.2.1.md](docs/upgrading-0.2.1.md).
 
+- **C-PR45-1 (MEDIUM): the owner of the verified schema passed after it revoked `CREATE` from
+  itself.** The owner of a schema can drop every object in it, whoever owns the object, and keeps
+  that right with `CREATE` revoked. The check only read the schema's grant list, so a runtime role
+  that owned the schema could pass and then run `DROP TABLE shredding_erasure CASCADE`. The check
+  now refuses a login role, or any role in its reach, that owns the schema (`SHRED-SCHEMA-004`,
+  "owns, or is a member of the owner of, schema ...").
+- **C-PR45-2 (LOW): a column-level `REFERENCES` grant to the runtime role itself passed.** The
+  column check skipped the current role for every privilege, not only for `UPDATE`. A foreign key
+  from a table the role owned could then pin a data key and make the key-destroying `DELETE`
+  fail. The current role is now skipped only for `UPDATE` (judged by its own check); any other
+  column privilege beyond the allow list refuses.
+
 ### Changed
 - The core jar now seals the package `com.housedevinci.shredding.adapter.jdbc` (manifest entry
   `Sealed: true`). A class of yours in that package fails to load with `sealing violation` on a
