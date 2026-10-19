@@ -189,39 +189,61 @@ final class SchemaExpectations {
               34));
 
   /**
-   * The per-table privilege matrix of §4.6.6, measured against the corrected grant block. "No
-   * DELETE or TRUNCATE anywhere" was both too wide and too narrow: {@code UPDATE} on the erasure
-   * log, {@code TRIGGER} and {@code REFERENCES} all passed it, and {@code TRIGGER} on a table is
-   * enough for a non-owner to add a trigger of their own to the erasure log.
+   * The per-table privilege matrix of §4.6.6, measured against the corrected grant block.
    *
-   * @param required table-level privileges the adapters cannot work without ({@code 007} if
-   *     missing)
-   * @param refused table-level privileges nothing on the path needs ({@code 004} if held)
+   * <p><b>An allow list</b> (C-PR-1c, finding C-PR1c-4). Version 1 listed the refused privileges
+   * ({@code UPDATE}, {@code DELETE}, {@code TRUNCATE}, {@code TRIGGER}, {@code REFERENCES}). A
+   * privilege type added by a later PostgreSQL release passed it: on 17, {@code MAINTAIN} takes
+   * {@code LOCK TABLE ... ACCESS EXCLUSIVE} on the erasure log and blocks every erasure. The leg
+   * now reads every grant on the table ({@code aclexplode}) for every role the login reaches and
+   * for PUBLIC, and refuses any privilege type outside {@code required}. It names no privilege it
+   * refuses, so it needs no version switch.
+   *
+   * @param required the table-level privileges the adapters cannot work without ({@code 007} if
+   *     missing), and the only ones a reachable role may hold ({@code 004} for any other)
    * @param updatableColumn the one column the module updates, or {@code null} for none
    */
-  record TablePrivileges(
-      String table, List<String> required, List<String> refused, String updatableColumn) {}
+  record TablePrivileges(String table, List<String> required, String updatableColumn) {}
 
   static final List<TablePrivileges> PRIVILEGES =
       List.of(
-          new TablePrivileges(
-              DATA_KEY,
-              List.of("SELECT", "INSERT", "DELETE"),
-              List.of("UPDATE", "TRUNCATE", "TRIGGER", "REFERENCES"),
-              "encryption_count"),
-          new TablePrivileges(
-              ERASED_SUBJECT,
-              List.of("SELECT", "INSERT"),
-              List.of("UPDATE", "DELETE", "TRUNCATE", "TRIGGER", "REFERENCES"),
-              "erased_at"),
-          new TablePrivileges(
-              ERASURE,
-              List.of("SELECT", "INSERT"),
-              List.of("UPDATE", "DELETE", "TRUNCATE", "TRIGGER", "REFERENCES"),
-              null),
-          new TablePrivileges(
-              ANCHOR,
-              List.of("SELECT", "INSERT", "UPDATE"),
-              List.of("DELETE", "TRUNCATE", "TRIGGER", "REFERENCES"),
-              null));
+          new TablePrivileges(DATA_KEY, List.of("SELECT", "INSERT", "DELETE"), "encryption_count"),
+          new TablePrivileges(ERASED_SUBJECT, List.of("SELECT", "INSERT"), "erased_at"),
+          new TablePrivileges(ERASURE, List.of("SELECT", "INSERT"), null),
+          new TablePrivileges(ANCHOR, List.of("SELECT", "INSERT", "UPDATE"), null));
+
+  /** The only privilege a reachable role may hold on the erasure log's sequence. */
+  static final List<String> SEQUENCE_ALLOWED = List.of("USAGE");
+
+  /** The only privilege a reachable role may hold on the verified schema. */
+  static final List<String> SCHEMA_ALLOWED = List.of("USAGE");
+
+  /** The only privilege a reachable role may hold on the database. */
+  static final List<String> DATABASE_ALLOWED = List.of("CONNECT");
+
+  /**
+   * The predefined roles that read or write files on the server, or run programs, as the server's
+   * operating-system user (C-PR1c-1). The PostgreSQL documentation calls all three equivalent to a
+   * superuser. Each has its own leg and message.
+   */
+  static final List<String> SERVER_ROLES =
+      List.of("pg_execute_server_program", "pg_write_server_files", "pg_read_server_files");
+
+  /**
+   * The predefined roles a reachable role may be a member of (C-PR1c-7). PostgreSQL reserves the
+   * {@code pg_} prefix for predefined roles, so every other role whose name starts with it is
+   * refused, including any role a later release adds. Rule: a role is accepted only if it gives no
+   * path to a write on the module's tables, to a lock that blocks erasure, or to another login's
+   * password. Refused for that last reason: {@code pg_read_all_data} (it reads {@code
+   * pg_authid.rolpassword}, measured on 16), {@code pg_read_all_settings} and {@code pg_monitor}
+   * (settings such as {@code primary_conninfo} can hold a password), {@code pg_read_all_stats}
+   * (other backends' query text can hold one).
+   */
+  static final List<String> ACCEPTED_PREDEFINED_ROLES =
+      List.of(
+          "pg_signal_backend",
+          "pg_create_subscription",
+          "pg_checkpoint",
+          "pg_use_reserved_connections",
+          "pg_stat_scan_tables");
 }

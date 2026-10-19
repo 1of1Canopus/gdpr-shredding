@@ -1,5 +1,6 @@
 package com.housedevinci.shredding.adapter.jdbc;
 
+import com.housedevinci.shredding.application.LogText;
 import com.housedevinci.shredding.domain.ErrorCodes;
 import com.housedevinci.shredding.domain.KeyUnavailableException;
 import com.housedevinci.shredding.domain.ShreddingException;
@@ -715,10 +716,15 @@ public final class JdbcSupport {
               + " The append-only controls are advisory in this configuration: nothing stops this"
               + " application from disabling or replacing its own guards. Record this in your"
               + " processing documentation, or move the application to a non-privileged role (see"
-              + " docs/upgrading-0.2.0.md). {}",
+              + " docs/upgrading-0.2.0.md).{} {}",
           verdict.role(),
           verdict.schema().name(),
           String.join("; ", verdict.privilegeLegs()),
+          verdict.loginRole().equals(verdict.role())
+              ? ""
+              : " The pool logs in as "
+                  + LogText.escape(verdict.loginRole())
+                  + ": any statement on this pool can RESET ROLE back to that login role.",
           verdict.summary());
     }
     return verdict;

@@ -22,10 +22,25 @@ import org.junit.jupiter.api.Test;
 class VerifiedSchemaCapabilityTest {
 
   private static final DatabaseIdentity ID =
-      new DatabaseIdentity(7_000_000_000_000_000_001L, 16384, "app", 2200, "app_role", "app_role");
+      new DatabaseIdentity(
+          7_000_000_000_000_000_001L,
+          16384,
+          "app",
+          2200,
+          "app_role",
+          "app_role",
+          16400,
+          "app_role");
   private static final DatabaseIdentity OTHER_DATABASE =
       new DatabaseIdentity(
-          7_000_000_000_000_000_001L, 16385, "other", 2200, "app_role", "app_role");
+          7_000_000_000_000_000_001L,
+          16385,
+          "other",
+          2200,
+          "app_role",
+          "app_role",
+          16400,
+          "app_role");
 
   @Test
   void verified_schema_has_no_public_constructor_or_factory() {

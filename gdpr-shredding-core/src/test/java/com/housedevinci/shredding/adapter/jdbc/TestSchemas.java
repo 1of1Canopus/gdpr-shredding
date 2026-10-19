@@ -41,9 +41,21 @@ final class TestSchemas {
    */
   static VerifiedSchema reboundAs(VerifiedSchema verified, DataSource dataSource) {
     try (var c = dataSource.getConnection()) {
-      DatabaseIdentity identity =
-          DatabaseIdentity.read(c, verified.name(), false).identity().orElseThrow();
-      return new VerifiedSchema(verified.name(), dataSource, identity);
+      DatabaseIdentity.Facts facts =
+          DatabaseIdentity.read(c, verified.name(), false).facts().orElseThrow();
+      long login;
+      String loginName;
+      try (var s = c.createStatement();
+          var rs =
+              s.executeQuery(
+                  "SELECT a.usesysid, pg_catalog.pg_get_userbyid(a.usesysid)"
+                      + " FROM pg_catalog.pg_stat_get_activity("
+                      + "pg_catalog.pg_backend_pid()) a")) {
+        rs.next();
+        login = rs.getLong(1);
+        loginName = rs.getString(2);
+      }
+      return new VerifiedSchema(verified.name(), dataSource, facts.withLogin(login, loginName));
     } catch (SQLException e) {
       throw new IllegalStateException("could not read the database identity", e);
     }

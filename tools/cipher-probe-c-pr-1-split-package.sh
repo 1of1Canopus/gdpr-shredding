@@ -45,14 +45,15 @@ public final class Forge {
       public boolean isWrapperFor(Class<?> iface) { return false; }
     };
     // C-PR-1b: the one constructor also takes the database identity; forged as well.
-    DatabaseIdentity identity = new DatabaseIdentity(0L, 0L, "app", 2200L, "app", "app");
+    DatabaseIdentity identity = new DatabaseIdentity(0L, 0L, "app", 2200L, "app", "app", 0L, "app");
     VerifiedSchema forged = new VerifiedSchema("public", unverified, identity);
     System.out.println("MINTED " + forged.name() + " bound to "
         + (forged.dataSource() == unverified ? "the unverified DataSource" : "something else"));
   }
 }
 JAVA
-javac -cp "$JAR" -d "$WORK/out" "$WORK/src/$PKG/Forge.java"
+javac -cp "$JAR" -d "$WORK/out" "$WORK/src/$PKG/Forge.java" \
+  || { echo "UNVERIFIABLE: the planted class did not compile"; exit 2; }
 set +e
 OUT=$(java -cp "$JAR:$WORK/out" com.housedevinci.shredding.adapter.jdbc.Forge 2>&1)
 set -e

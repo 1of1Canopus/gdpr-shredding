@@ -104,6 +104,22 @@ final class TwoRoleCluster {
     return new HikariDataSource(config);
   }
 
+  /**
+   * C-PR-1c: a pool whose every new connection runs {@code initSql} first, as HikariCP's {@code
+   * connectionInitSql} does. Statements are separated by semicolons and run in one simple query.
+   */
+  static HikariDataSource pool(
+      PostgreSQLContainer<?> pg, String user, String password, String database, String initSql) {
+    var config = new HikariConfig();
+    config.setJdbcUrl(url(pg, database));
+    config.setUsername(user);
+    config.setPassword(password);
+    config.setMaximumPoolSize(1);
+    config.setMinimumIdle(0);
+    config.setConnectionInitSql(initSql);
+    return new HikariDataSource(config);
+  }
+
   static HikariDataSource app(PostgreSQLContainer<?> pg, String database) {
     return pool(pg, APP, PASSWORD, database);
   }

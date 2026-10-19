@@ -31,6 +31,14 @@ public record SchemaVerdict(
     indexWarnings = List.copyOf(indexWarnings);
   }
 
+  /**
+   * The role the verified connection logged in as (C-PR-1c). Equal to {@link #role()} unless the
+   * pool moved with {@code SET ROLE} in its init SQL, to a role the login is a member of.
+   */
+  public String loginRole() {
+    return schema.identity().loginRole();
+  }
+
   /** True when no {@code 004} leg fired, so the role clause of {@link #summary()} is earned. */
   public boolean runtimeRoleIsUnprivileged() {
     return privilegeLegs.isEmpty();
@@ -44,6 +52,7 @@ public record SchemaVerdict(
         + database
         + " as role "
         + role
+        + (loginRole().equals(role) ? "" : " (login role " + loginRole() + ")")
         + " ("
         + SchemaExpectations.TABLES.size()
         + " tables, "
@@ -56,8 +65,11 @@ public record SchemaVerdict(
         + SchemaExpectations.TRIGGERS.size()
         + " triggers ENABLE ALWAYS, no rules, no RLS, no policies"
         + (runtimeRoleIsUnprivileged()
-            ? "; the role owns none of the 9 objects, holds no privilege on them beyond the"
-                + " documented grant set, and holds no CREATE or TEMPORARY in this database"
+            ? "; neither the login role nor any role it can become is a superuser, has"
+                + " CREATEROLE, is a server-file, server-program or unaccepted predefined role, or"
+                + " holds a parameter grant; the role owns none of the 9 objects, holds no"
+                + " privilege on them beyond the documented grant set, and holds no CREATE or"
+                + " TEMPORARY in this database"
             : "")
         + "; every statement this module issues is qualified to schema "
         + schema.name()

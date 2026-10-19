@@ -174,6 +174,14 @@ class MovingTargetStarterTest {
     try (var ctx = builder(HikariApp.class).run()) {
       KeyProvider keys = ctx.getBean(KeyProvider.class);
       var hikari = ctx.getBean(HikariDataSource.class);
+      // Let the pool finish its first fill: a connection whose creation began before the
+      // credentials change logs in with the old ones, and under a loaded suite it can arrive
+      // after the eviction below (seen once in a full verify, C-PR-1c build).
+      long deadline = System.nanoTime() + java.time.Duration.ofSeconds(20).toNanos();
+      while (hikari.getHikariPoolMXBean().getTotalConnections() < hikari.getMinimumIdle()
+          && System.nanoTime() < deadline) {
+        java.util.concurrent.locks.LockSupport.parkNanos(20_000_000L);
+      }
       hikari.getHikariConfigMXBean().setUsername("intruder");
       hikari.getHikariConfigMXBean().setPassword("intruder-pw");
       // Precondition: the path is reachable and the pool holds only new-login connections.

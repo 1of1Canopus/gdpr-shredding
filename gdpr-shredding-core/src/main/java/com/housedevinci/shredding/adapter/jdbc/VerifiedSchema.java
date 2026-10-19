@@ -2,6 +2,8 @@ package com.housedevinci.shredding.adapter.jdbc;
 
 import com.housedevinci.shredding.domain.ErrorCodes;
 import com.housedevinci.shredding.domain.ShreddingException;
+import java.security.SecureRandom;
+import java.util.HexFormat;
 import java.util.Objects;
 import javax.sql.DataSource;
 
@@ -44,12 +46,21 @@ import javax.sql.DataSource;
  * capability therefore also carries the {@link DatabaseIdentity} verification read - cluster,
  * database, schema, login role, current role - and every store connection is compared with it
  * before its work ({@code SHRED-SCHEMA-012}).
+ *
+ * <p><b>The login marker</b> (finding C-PR-1c). Each verification draws a random 128-bit value. The
+ * per-call check stores it in a backend once that backend's login role is found to be the verified
+ * one, so later calls on the backend skip the costly read ({@link DatabaseIdentity}). It is a check
+ * value, not a credential: knowing it helps only a superuser login, which can already forge every
+ * fact of the check. It is never part of {@link #toString}, {@link #equals} or any message.
  */
 public final class VerifiedSchema {
+
+  private static final SecureRandom MARKERS = new SecureRandom();
 
   private final String name;
   private final DataSource dataSource;
   private final DatabaseIdentity identity;
+  private final String loginMarker;
 
   VerifiedSchema(String name, DataSource dataSource, DatabaseIdentity identity) {
     Objects.requireNonNull(name, "name");
@@ -61,6 +72,18 @@ public final class VerifiedSchema {
     this.name = name;
     this.dataSource = dataSource;
     this.identity = identity;
+    this.loginMarker = newMarker();
+  }
+
+  private static String newMarker() {
+    byte[] bytes = new byte[16];
+    MARKERS.nextBytes(bytes);
+    return HexFormat.of().formatHex(bytes);
+  }
+
+  /** This verification's login marker (C-PR-1c). Package-private, like the pool. */
+  String loginMarker() {
+    return loginMarker;
   }
 
   /** What verification's connection reached (C-PR-1b). Package-private, like the pool. */

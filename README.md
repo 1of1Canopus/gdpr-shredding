@@ -23,7 +23,7 @@ Fair source (FSL-1.1-ALv2): free to use for any purpose except a Competing Use -
 commercial product or service that substitutes for this one, substitutes for anything we offer
 using it, or has the same or substantially similar functionality - becomes
 Apache-2.0 two years after each release. A paid edition, if released, would be under a separate commercial licence.
-Java 21, Spring Boot 4.1, PostgreSQL. **Zero crypto dependencies**: AES-256-GCM,
+Java 21, Spring Boot 4.1, PostgreSQL (tested on 16 and 17). **Zero crypto dependencies**: AES-256-GCM,
 HMAC-SHA-256 and a hand-written HKDF checked against the RFC 5869 vectors, all from the JDK.
 
 ```xml
@@ -134,6 +134,14 @@ what was destroyed, when, by whom, and the date the erasure is also complete in 
   directly; `enterRegion`, `recordDecoded`, `drain` and `pendingKeysFor` are this module's internal
   SPI for its own converters and listeners, not application API, and may change without a major
   version.
+- **The pool must log in as the runtime role.** The schema check judges the role a connection
+  logged in as, and every role that login can become, not the role it switched to. A pool that
+  logs in as the owner or a superuser and runs `SET ROLE shredding_app` in its init SQL refuses to
+  start (`SHRED-SCHEMA-004`): any statement on it can `RESET ROLE` and disable the guards. Log in
+  as `shredding_app` itself, or as a login whose only membership is `shredding_app`. Behind
+  PgBouncer, the check judges the role PgBouncer logs in to the server as: a `[databases]` entry
+  with a forced `user=shred_owner` refuses at startup even when the application logs in to
+  PgBouncer as `shredding_app`. Details: SECURITY-NOTES "The role a pool logs in as".
 - **Every stored value is bound to its row.** Tenant, subject *and* the row's own identifier go into
   the header and the AAD, so a ciphertext copied between two rows of the same person is
   `SHRED-ROW-MISMATCH` rather than displayed as the second row's own value.

@@ -27,7 +27,7 @@ public final class StarterMint {
 
   public static VerifiedSchema mint(String n, javax.sql.DataSource d) {
     // C-PR-1b: the one constructor also takes the database identity; forged as well.
-    return new VerifiedSchema(n, d, new DatabaseIdentity(0L, 0L, "app", 2200L, "app", "app"));
+    return new VerifiedSchema(n, d, new DatabaseIdentity(0L, 0L, "app", 2200L, "app", "app", 0L, "app"));
   }
 }
 JAVA

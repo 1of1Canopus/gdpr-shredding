@@ -156,11 +156,22 @@ final class SchemaVerification {
     SessionFacts facts = sessionFacts(c);
     pinSearchPath(c);
     long schemaOid = namespaceOid(c, facts);
-    Session session = new Session(facts, dataSource, schemaOid, identity(c, facts, schemaOid));
+    // C-PR-1c: the login and its reach first, so a login that cannot be judged (revoked
+    // function, a login role dropped while connected) is reported as such before anything else.
+    Reach reach = reach(c, facts, loginOid(c, facts));
+    DatabaseIdentity.Facts reached = identity(c, facts, schemaOid);
+    Session session =
+        new Session(
+            facts,
+            dataSource,
+            schemaOid,
+            reached.withLogin(reach.loginOid(), reach.login()),
+            reach);
     VerifiedSchema schema = session.schema();
     long ns = session.schemaOid();
 
-    Map<String, Relation> relations = relations(c, ns);
+    long login = session.reach().loginOid();
+    Map<String, Relation> relations = relations(c, ns, login);
     List<String> missing =
         SchemaExpectations.TABLES.stream().filter(t -> !relations.containsKey(t)).toList();
     if (missing.size() == SchemaExpectations.TABLES.size()) {
@@ -176,14 +187,14 @@ final class SchemaVerification {
     checkSequence(c, ns, relations, shape);
     checkConstraints(c, ns, relations, shape);
 
-    Map<String, Function> functions = functions(c, ns);
+    Map<String, Function> functions = functions(c, ns, login);
     checkGuardFunctions(functions, guards);
     checkTriggers(c, ns, relations, functions, guards);
     checkRulesAndPolicies(c, ns, relations, guards);
     checkInheritance(c, ns, relations, guards);
 
     List<String> indexWarnings = new ArrayList<>();
-    Map<String, Relation> indexes = indexes(c, ns);
+    Map<String, Relation> indexes = indexes(c, ns, login);
     SchemaExpectations.INDEXES.stream()
         .filter(i -> !indexes.containsKey(i))
         .forEach(
@@ -194,6 +205,9 @@ final class SchemaVerification {
     var excess = new ArrayList<String>();
     var underprivileged = new ArrayList<String>();
     checkRole(c, session, relations, indexes, functions, excess, underprivileged);
+    var legs = List.copyOf(new LinkedHashSet<>(excess));
+    excess.clear();
+    excess.addAll(legs);
 
     // §4.7: every leg has run, and one refusal lists everything that is wrong, so an operator
     // fixes the database in one round rather than restarting N times to discover the next object.
@@ -244,13 +258,25 @@ final class SchemaVerification {
 
   private record SessionFacts(String schema, String role, String database) {}
 
-  private record Session(VerifiedSchema schema, long schemaOid, String role, String database) {
-    Session(SessionFacts facts, DataSource dataSource, long schemaOid, DatabaseIdentity identity) {
+  private record Session(
+      VerifiedSchema schema, long schemaOid, String role, String database, Reach reach) {
+    Session(
+        SessionFacts facts,
+        DataSource dataSource,
+        long schemaOid,
+        DatabaseIdentity identity,
+        Reach reach) {
       this(
           new VerifiedSchema(facts.schema(), dataSource, identity),
           schemaOid,
           facts.role(),
-          facts.database());
+          facts.database(),
+          reach);
+    }
+
+    /** "shredding_app", or "shredding_app (login role gateway)" when the two differ. */
+    String described() {
+      return reach.login().equals(role) ? role : role + " (login role " + reach.login() + ")";
     }
   }
 
@@ -261,7 +287,7 @@ final class SchemaVerification {
    * fallback, round 2, item 6); a server in recovery, which can pass every catalogue leg while
    * every store call would be refused; and a fingerprint that does not return exactly one row.
    */
-  private static DatabaseIdentity identity(Connection c, SessionFacts facts, long schemaOid)
+  private static DatabaseIdentity.Facts identity(Connection c, SessionFacts facts, long schemaOid)
       throws SQLException {
     DatabaseIdentity.Observed observed;
     try {
@@ -289,7 +315,7 @@ final class SchemaVerification {
               + " destroyed, and it cannot be written to, so the module does not verify it. Point"
               + " the module's DataSource at the primary.");
     }
-    if (observed.rows() != 1 || observed.identity().orElseThrow().schemaOid() != schemaOid) {
+    if (observed.rows() != 1 || observed.facts().orElseThrow().schemaOid() != schemaOid) {
       throw new ShreddingException(
           ErrorCodes.SCHEMA_UNVERIFIABLE,
           "shredding: the database this connection reaches could not be identified: the"
@@ -298,7 +324,158 @@ final class SchemaVerification {
               + " rows where exactly one is required, or another schema than the one just"
               + " verified. Unverifiable is not clean.");
     }
-    return observed.identity().orElseThrow();
+    return observed.facts().orElseThrow();
+  }
+
+  // ---------------------------------------------------------------- the login role and its reach
+
+  /**
+   * A role the login role can become (C-PR-1c): the login role itself, and every role it is a
+   * member of, directly or through other roles, with or without INHERIT, SET or ADMIN. {@code
+   * 'MEMBER'} is required, not only tolerated: a grant {@code WITH ADMIN TRUE, INHERIT FALSE, SET
+   * FALSE} passes {@code 'SET'} and {@code 'USAGE'}, and its holder can grant itself SET (design
+   * round 2, item 2).
+   *
+   * @param serverRole one of {@link SchemaExpectations#SERVER_ROLES}, resolved to oids in SQL
+   */
+  record ReachRole(
+      long oid, String name, boolean superuser, boolean createRole, boolean serverRole) {}
+
+  /**
+   * The login role and its reach. {@code current} is the role statements run as; it is always in
+   * the reach of a login that is not a superuser.
+   */
+  record Reach(long loginOid, String login, String current, List<ReachRole> roles) {
+
+    long[] oids() {
+      return roles.stream().mapToLong(ReachRole::oid).toArray();
+    }
+
+    /**
+     * Who a leg fired for, for a message that already names the role: "login role X" or "role R,
+     * reachable from login role X,". {@code 0} is PUBLIC.
+     */
+    String named(long oid) {
+      if (oid == 0) {
+        return "PUBLIC";
+      }
+      String name = name(oid);
+      return name.equals(login)
+          ? "login role " + login
+          : "role " + name + ", reachable from login role " + login + ",";
+    }
+
+    /**
+     * As {@link #named}, but empty for the current role, so a grant to the runtime role itself
+     * keeps the text it always had ("holds UPDATE on shredding_erasure").
+     */
+    String holder(long oid) {
+      if (oid != 0 && name(oid).equals(current)) {
+        return "";
+      }
+      return named(oid) + " ";
+    }
+
+    String name(long oid) {
+      return roles.stream()
+          .filter(r -> r.oid() == oid)
+          .map(ReachRole::name)
+          .findFirst()
+          .orElse("oid " + oid);
+    }
+
+    /** The prefix of an ownership leg: empty when the login is the current role. */
+    String owner() {
+      return login.equals(current) ? "" : "login role " + login + " ";
+    }
+  }
+
+  /**
+   * C-PR-1c: the role this connection authenticated as, read from the backend's own activity entry.
+   * Zero rows, a NULL, or any {@link SQLException} is {@code SHRED-SCHEMA-005}: a check that cannot
+   * see the login cannot judge it, and there is no fallback to {@code session_user}, which a
+   * superuser login moves (design section 4, R2.2 item 1).
+   */
+  private static long loginOid(Connection c, SessionFacts facts) {
+    try (PreparedStatement ps = c.prepareStatement(LOGIN_SQL);
+        ResultSet rs = ps.executeQuery()) {
+      long oid = rs.next() ? rs.getLong(1) : 0L;
+      if (oid == 0) {
+        throw loginUnreadable(facts, "the backend's activity entry returned no login role", null);
+      }
+      return oid;
+    } catch (SQLException e) {
+      throw loginUnreadable(facts, "SQLState " + e.getSQLState(), e);
+    }
+  }
+
+  /**
+   * The login role: the backend's own activity entry, written once when the connection
+   * authenticated. {@code SET ROLE}, {@code SET SESSION AUTHORIZATION} and {@code track_activities
+   * = off} leave {@code usesysid} as it was (design section 2).
+   */
+  private static final String LOGIN_SQL =
+      "SELECT a.usesysid FROM pg_catalog.pg_stat_get_activity(pg_catalog.pg_backend_pid()) a";
+
+  private static final String REACH_SQL =
+      "SELECT r.oid, r.rolname, r.rolsuper, r.rolcreaterole,"
+          + " ((r.oid OPERATOR(pg_catalog.=)"
+          + " 'pg_execute_server_program'::pg_catalog.regrole::pg_catalog.oid)"
+          + " OR (r.oid OPERATOR(pg_catalog.=)"
+          + " 'pg_write_server_files'::pg_catalog.regrole::pg_catalog.oid)"
+          + " OR (r.oid OPERATOR(pg_catalog.=)"
+          + " 'pg_read_server_files'::pg_catalog.regrole::pg_catalog.oid))"
+          + " FROM pg_catalog.pg_roles r"
+          + " WHERE pg_catalog.pg_has_role(?::pg_catalog.oid, r.oid, 'MEMBER')"
+          + " ORDER BY r.rolname";
+
+  /** One statement, bound to the login oid. The login role is in its own result. */
+  private static Reach reach(Connection c, SessionFacts facts, long loginOid) {
+    var roles = new ArrayList<ReachRole>();
+    try (PreparedStatement ps = c.prepareStatement(REACH_SQL)) {
+      ps.setLong(1, loginOid);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          roles.add(
+              new ReachRole(
+                  rs.getLong(1),
+                  rs.getString(2),
+                  rs.getBoolean(3),
+                  rs.getBoolean(4),
+                  rs.getBoolean(5)));
+        }
+      }
+    } catch (SQLException e) {
+      throw loginUnreadable(facts, "SQLState " + e.getSQLState(), e);
+    }
+    ReachRole login =
+        roles.stream()
+            .filter(r -> r.oid() == loginOid)
+            .findFirst()
+            .orElseThrow(
+                () -> loginUnreadable(facts, "the login role is not in the role catalogue", null));
+    // A superuser login reaches every role (SET SESSION AUTHORIZATION), and "login role X is a
+    // superuser" says all there is to say: the other legs would list every role of the cluster.
+    var judged = login.superuser() ? List.of(login) : List.copyOf(roles);
+    return new Reach(loginOid, login.name(), facts.role(), judged);
+  }
+
+  private static ShreddingException loginUnreadable(
+      SessionFacts facts, String why, SQLException cause) {
+    String message =
+        "shredding: the login role of this connection could not be read ("
+            + why
+            + "). The schema check judges the role the connection logged in as, and every role"
+            + " that login can become, read from pg_catalog.pg_stat_get_activity(pg_backend_pid())"
+            + " and pg_catalog.pg_roles (C-PR-1c). Unverifiable is not clean, so this is a"
+            + " refusal. PostgreSQL grants EXECUTE on that function to PUBLIC by default; if it was"
+            + " revoked, run as a superuser: GRANT EXECUTE ON FUNCTION"
+            + " pg_catalog.pg_stat_get_activity(integer) TO "
+            + roleIdentifier(facts.role())
+            + ". If the login role was dropped while this connection was open, reconnect.";
+    return cause == null
+        ? new ShreddingException(ErrorCodes.SCHEMA_UNVERIFIABLE, message)
+        : new ShreddingException(ErrorCodes.SCHEMA_UNVERIFIABLE, message, cause);
   }
 
   /** The role as an SQL identifier for a printed statement: bare when it is plain lower case. */
@@ -439,36 +616,47 @@ final class SchemaVerification {
    */
   private static final String RELATIONS_SQL =
       "SELECT c.oid, c.relname, c.relkind, c.relpersistence, c.relhasrules, c.relrowsecurity,"
-          + " c.relforcerowsecurity, pg_catalog.pg_has_role(current_user, c.relowner, 'MEMBER')"
+          + " c.relforcerowsecurity,"
+          + " pg_catalog.pg_has_role(?::pg_catalog.oid, c.relowner, 'MEMBER')"
           + " FROM pg_catalog.pg_class c"
           + " WHERE (c.relnamespace OPERATOR(pg_catalog.=) ?)"
           + " AND (c.relname OPERATOR(pg_catalog.=) ANY(?))";
 
   private static final String INDEXES_SQL =
       "SELECT c.oid, c.relname, c.relkind, c.relpersistence, c.relhasrules, c.relrowsecurity,"
-          + " c.relforcerowsecurity, pg_catalog.pg_has_role(current_user, c.relowner, 'MEMBER')"
+          + " c.relforcerowsecurity,"
+          + " pg_catalog.pg_has_role(?::pg_catalog.oid, c.relowner, 'MEMBER')"
           + " FROM pg_catalog.pg_class c"
           + " WHERE (c.relnamespace OPERATOR(pg_catalog.=) ?)"
           + " AND (c.relkind OPERATOR(pg_catalog.=) 'i')"
           + " AND (c.relname OPERATOR(pg_catalog.=) ANY(?))";
 
-  private static Map<String, Relation> relations(Connection c, long ns) throws SQLException {
+  /**
+   * {@code ownedByRole} asks about the <b>login role</b>, bound as an oid (C-PR-1c). {@code
+   * pg_has_role(.., 'MEMBER')} is transitive and the current role is always in the login's reach,
+   * so one check on the login covers every role the connection can become.
+   */
+  private static Map<String, Relation> relations(Connection c, long ns, long login)
+      throws SQLException {
     try (PreparedStatement ps = c.prepareStatement(RELATIONS_SQL)) {
-      return relations(c, ps, ns, SchemaExpectations.TABLES);
+      return relations(c, ps, ns, login, SchemaExpectations.TABLES);
     }
   }
 
-  private static Map<String, Relation> indexes(Connection c, long ns) throws SQLException {
+  private static Map<String, Relation> indexes(Connection c, long ns, long login)
+      throws SQLException {
     try (PreparedStatement ps = c.prepareStatement(INDEXES_SQL)) {
-      return relations(c, ps, ns, SchemaExpectations.INDEXES);
+      return relations(c, ps, ns, login, SchemaExpectations.INDEXES);
     }
   }
 
   private static Map<String, Relation> relations(
-      Connection c, PreparedStatement ps, long ns, List<String> names) throws SQLException {
+      Connection c, PreparedStatement ps, long ns, long login, List<String> names)
+      throws SQLException {
     var found = new LinkedHashMap<String, Relation>();
-    ps.setLong(1, ns);
-    ps.setArray(2, c.createArrayOf("text", names.toArray()));
+    ps.setLong(1, login);
+    ps.setLong(2, ns);
+    ps.setArray(3, c.createArrayOf("text", names.toArray()));
     try (ResultSet rs = ps.executeQuery()) {
       while (rs.next()) {
         found.put(
@@ -734,21 +922,23 @@ final class SchemaVerification {
       String returns,
       boolean ownedByRole) {}
 
-  private static Map<String, Function> functions(Connection c, long ns) throws SQLException {
+  private static Map<String, Function> functions(Connection c, long ns, long login)
+      throws SQLException {
     var found = new LinkedHashMap<String, Function>();
     try (PreparedStatement ps =
         c.prepareStatement(
             "SELECT p.oid, p.proname, p.prosrc, p.prokind, p.pronargs, p.prosecdef,"
                 + " p.proconfig, l.lanname,"
                 + " pg_catalog.pg_get_function_result(p.oid),"
-                + " pg_catalog.pg_has_role(current_user, p.proowner, 'MEMBER')"
+                + " pg_catalog.pg_has_role(?::pg_catalog.oid, p.proowner, 'MEMBER')"
                 + " FROM pg_catalog.pg_proc p"
                 + " JOIN pg_catalog.pg_language l"
                 + "   ON (l.oid OPERATOR(pg_catalog.=) p.prolang)"
                 + " WHERE (p.pronamespace OPERATOR(pg_catalog.=) ?)"
                 + " AND (p.proname OPERATOR(pg_catalog.=) ANY(?))")) {
-      ps.setLong(1, ns);
-      ps.setArray(2, c.createArrayOf("text", SchemaExpectations.GUARD_FUNCTIONS.toArray()));
+      ps.setLong(1, login);
+      ps.setLong(2, ns);
+      ps.setArray(3, c.createArrayOf("text", SchemaExpectations.GUARD_FUNCTIONS.toArray()));
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           found.put(
@@ -1202,6 +1392,14 @@ final class SchemaVerification {
 
   // ---------------------------------------------------------------- the role
 
+  /**
+   * The privilege legs. Since C-PR-1c they judge the <b>login role and every role in its reach</b>,
+   * not only {@code current_user}: a pool can log in as the owner or a superuser and move in its
+   * init SQL ({@code SET ROLE}, {@code SET SESSION AUTHORIZATION}), and any statement on it can
+   * move back. Required privileges ("can the work run") stay on {@code current_user}, the role the
+   * work runs as. The module never runs {@code SET ROLE}, {@code RESET ROLE} or {@code SET SESSION
+   * AUTHORIZATION} itself.
+   */
   private static void checkRole(
       Connection c,
       Session session,
@@ -1211,92 +1409,123 @@ final class SchemaVerification {
       List<String> excess,
       List<String> missing)
       throws SQLException {
+    Reach reach = session.reach();
     try (PreparedStatement ps =
         c.prepareStatement(
             "SELECT pg_catalog.current_setting('is_superuser'),"
-                + " pg_catalog.has_schema_privilege(current_user, ?::pg_catalog.oid, 'CREATE'),"
                 + " pg_catalog.has_schema_privilege(current_user, ?::pg_catalog.oid, 'USAGE'),"
-                + " pg_catalog.has_database_privilege(current_user, ?, 'TEMP'),"
-                + " pg_catalog.has_database_privilege(current_user, ?, 'CREATE'),"
-                + " pg_catalog.pg_has_role(current_user,"
+                + " pg_catalog.pg_has_role(?::pg_catalog.oid,"
                 + "   (SELECT d.datdba FROM pg_catalog.pg_database d"
-                + "      WHERE (d.datname OPERATOR(pg_catalog.=) ?)), 'MEMBER')")) {
+                + "      WHERE (d.datname OPERATOR(pg_catalog.=) ?)), 'MEMBER'),"
+                + " pg_catalog.pg_has_role(?::pg_catalog.oid,"
+                + "   (SELECT n.nspowner FROM pg_catalog.pg_namespace n"
+                + "      WHERE (n.oid OPERATOR(pg_catalog.=) ?::pg_catalog.oid)), 'MEMBER')")) {
       ps.setLong(1, session.schemaOid());
-      ps.setLong(2, session.schemaOid());
+      ps.setLong(2, reach.loginOid());
       ps.setString(3, session.database());
-      ps.setString(4, session.database());
-      ps.setString(5, session.database());
+      ps.setLong(4, reach.loginOid());
+      ps.setLong(5, session.schemaOid());
       try (ResultSet rs = ps.executeQuery()) {
         rs.next();
         if ("on".equalsIgnoreCase(rs.getString(1))) {
           excess.add("is a superuser");
         }
-        if (rs.getBoolean(2)) {
-          excess.add("holds CREATE on schema " + session.schema());
-        }
-        if (!rs.getBoolean(3)) {
+        if (!rs.getBoolean(2)) {
           missing.add("USAGE on schema " + session.schema());
         }
+        if (rs.getBoolean(3)) {
+          excess.add(
+              reach.owner() + "is, or is a member of, the owner of database " + session.database());
+        }
         if (rs.getBoolean(4)) {
-          excess.add("holds TEMPORARY on database " + session.database());
-        }
-        if (rs.getBoolean(5)) {
-          excess.add("holds CREATE on database " + session.database());
-        }
-        if (rs.getBoolean(6)) {
-          excess.add("is, or is a member of, the owner of database " + session.database());
+          // C-PR45-1: the owner of a schema can DROP every object in it, whoever owns the object,
+          // and keeps that right after it revokes CREATE from itself. The grant list cannot show
+          // it.
+          excess.add(
+              (reach.owner().isEmpty()
+                      ? "owns "
+                      : reach.owner() + "owns, or is a member of the owner of, ")
+                  + "schema "
+                  + session.schema());
         }
       }
     }
+    checkReach(reach, excess);
+    String owns =
+        reach.owner().isEmpty()
+            ? "owns "
+            : reach.owner() + "owns, or is a member of the owner of, ";
     relations.values().stream()
         .filter(Relation::ownedByRole)
-        .forEach(r -> excess.add("owns table " + r.name()));
+        .forEach(r -> excess.add(owns + "table " + r.name()));
     indexes.values().stream()
         .filter(Relation::ownedByRole)
-        .forEach(r -> excess.add("owns index " + r.name()));
+        .forEach(r -> excess.add(owns + "index " + r.name()));
     functions.values().stream()
         .filter(Function::ownedByRole)
-        .forEach(f -> excess.add("owns guard function " + f.name()));
-    checkSequenceOwnerAndPrivileges(c, session.schemaOid(), excess, missing);
+        .forEach(f -> excess.add(owns + "guard function " + f.name()));
+    checkSequenceOwnerAndPrivileges(c, session.schemaOid(), reach, owns, excess, missing);
     checkTablePrivileges(c, relations, excess, missing);
+    checkObjectGrants(c, session, reach, excess);
+    checkColumnGrants(c, session.schemaOid(), relations, reach, excess);
+    checkParameterGrants(c, reach, excess);
+  }
+
+  /**
+   * The legs on the reach set itself (C-PR-1c, C-PR1c-1, C-PR1c-7). A superuser login reaches every
+   * role through {@code SET SESSION AUTHORIZATION}; a superuser or CREATEROLE role in reach is one
+   * {@code SET ROLE} away; the server-file and server-program roles run programs as the server's
+   * operating-system user; any other predefined role is refused unless it is on the accepted list.
+   */
+  private static void checkReach(Reach reach, List<String> excess) {
+    for (ReachRole role : reach.roles()) {
+      String who = reach.named(role.oid());
+      if (role.superuser()) {
+        excess.add(who + " is a superuser");
+      }
+      if (role.createRole()) {
+        excess.add(who + " has CREATEROLE");
+      }
+      if (role.serverRole()) {
+        excess.add(
+            who
+                + " is a server-file or server-program role (it reads or writes files, or runs"
+                + " programs, as the server's operating-system user)");
+      } else if (role.name().startsWith("pg_")
+          && !SchemaExpectations.ACCEPTED_PREDEFINED_ROLES.contains(role.name())) {
+        excess.add(who + " is a predefined role this module does not accept");
+      }
+    }
   }
 
   private static void checkSequenceOwnerAndPrivileges(
-      Connection c, long ns, List<String> excess, List<String> missing) throws SQLException {
+      Connection c, long ns, Reach reach, String owns, List<String> excess, List<String> missing)
+      throws SQLException {
     try (PreparedStatement ps =
         c.prepareStatement(
-            "SELECT pg_catalog.pg_has_role(current_user, s.relowner, 'MEMBER'),"
-                + " pg_catalog.has_sequence_privilege(current_user, s.oid, 'USAGE'),"
-                + " pg_catalog.has_sequence_privilege(current_user, s.oid, 'SELECT'),"
-                + " pg_catalog.has_sequence_privilege(current_user, s.oid, 'UPDATE')"
+            "SELECT pg_catalog.pg_has_role(?::pg_catalog.oid, s.relowner, 'MEMBER'),"
+                + " pg_catalog.has_sequence_privilege(current_user, s.oid, 'USAGE')"
                 + " FROM pg_catalog.pg_class s"
                 + " WHERE (s.relnamespace OPERATOR(pg_catalog.=) ?)"
                 + " AND (s.relname OPERATOR(pg_catalog.=) ?)")) {
-      ps.setLong(1, ns);
-      ps.setString(2, SchemaExpectations.SEQUENCE);
+      ps.setLong(1, reach.loginOid());
+      ps.setLong(2, ns);
+      ps.setString(3, SchemaExpectations.SEQUENCE);
       try (ResultSet rs = ps.executeQuery()) {
         if (!rs.next()) {
           return;
         }
         if (rs.getBoolean(1)) {
-          excess.add("owns sequence " + SchemaExpectations.SEQUENCE);
+          excess.add(owns + "sequence " + SchemaExpectations.SEQUENCE);
         }
         if (!rs.getBoolean(2)) {
           missing.add("USAGE on sequence " + SchemaExpectations.SEQUENCE);
-        }
-        if (rs.getBoolean(3)) {
-          excess.add("holds SELECT on sequence " + SchemaExpectations.SEQUENCE);
-        }
-        if (rs.getBoolean(4)) {
-          excess.add(
-              "holds UPDATE on sequence "
-                  + SchemaExpectations.SEQUENCE
-                  + " (setval can rewind the erasure log's seq)");
         }
       }
     }
   }
 
+  /** The required table privileges, on {@code current_user}: can the work run. */
   private static void checkTablePrivileges(
       Connection c, Map<String, Relation> relations, List<String> excess, List<String> missing)
       throws SQLException {
@@ -1310,12 +1539,229 @@ final class SchemaVerification {
           missing.add(privilege + " on " + want.table());
         }
       }
-      for (String privilege : want.refused()) {
-        if (hasTablePrivilege(c, relation.oid(), privilege)) {
-          excess.add("holds " + privilege + " on " + want.table());
+      checkColumnUpdate(c, relation, want, excess, missing);
+    }
+  }
+
+  /**
+   * The allow list over explicit grants (C-PR1c-4): every ACL entry of the four tables, the
+   * sequence, the schema and the database whose grantee is in reach or is PUBLIC. A default ACL
+   * ({@code NULL}) is read as {@code acldefault}, which holds the owner's implicit rights. The
+   * owner's own entries of a table, the sequence and the database are left out: a reachable owner
+   * is already refused by its ownership leg, and its implicit rights would repeat it forty times.
+   * The schema has an ownership leg too (C-PR45-1, in {@code checkRole}): its owner can drop every
+   * object in it even with {@code CREATE} revoked, so the owner's {@code CREATE} entry stays here
+   * only as a second message for the same finding. Any privilege type outside the object's list
+   * refuses, whatever its name, so a type a later release adds is refused without a version switch.
+   */
+  private static final String OBJECT_GRANTS_SQL =
+      "SELECT c.relname, c.relkind, x.grantee, x.privilege_type"
+          + " FROM pg_catalog.pg_class c,"
+          + " pg_catalog.aclexplode(CASE WHEN c.relacl IS NOT NULL THEN c.relacl"
+          + " ELSE pg_catalog.acldefault("
+          + "CASE WHEN (c.relkind OPERATOR(pg_catalog.=) 'S') THEN 's'::pg_catalog.\"char\""
+          + " ELSE 'r'::pg_catalog.\"char\" END, c.relowner) END) x"
+          + " WHERE (c.relnamespace OPERATOR(pg_catalog.=) ?)"
+          + " AND (c.relname OPERATOR(pg_catalog.=) ANY(?))"
+          + " AND (x.grantee OPERATOR(pg_catalog.<>) c.relowner)"
+          + " AND ((x.grantee OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))"
+          + " OR (x.grantee OPERATOR(pg_catalog.=) '0'::pg_catalog.oid))"
+          + " UNION ALL"
+          + " SELECT n.nspname, 'n', x.grantee, x.privilege_type"
+          + " FROM pg_catalog.pg_namespace n,"
+          + " pg_catalog.aclexplode(CASE WHEN n.nspacl IS NOT NULL THEN n.nspacl"
+          + " ELSE pg_catalog.acldefault('n'::pg_catalog.\"char\", n.nspowner) END) x"
+          + " WHERE (n.oid OPERATOR(pg_catalog.=) ?)"
+          + " AND ((x.grantee OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))"
+          + " OR (x.grantee OPERATOR(pg_catalog.=) '0'::pg_catalog.oid))"
+          + " UNION ALL"
+          + " SELECT d.datname, 'd', x.grantee, x.privilege_type"
+          + " FROM pg_catalog.pg_database d,"
+          + " pg_catalog.aclexplode(CASE WHEN d.datacl IS NOT NULL THEN d.datacl"
+          + " ELSE pg_catalog.acldefault('d'::pg_catalog.\"char\", d.datdba) END) x"
+          + " WHERE (d.datname OPERATOR(pg_catalog.=) ?)"
+          + " AND (x.grantee OPERATOR(pg_catalog.<>) d.datdba)"
+          + " AND ((x.grantee OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))"
+          + " OR (x.grantee OPERATOR(pg_catalog.=) '0'::pg_catalog.oid))";
+
+  private static void checkObjectGrants(
+      Connection c, Session session, Reach reach, List<String> excess) throws SQLException {
+    var names = new ArrayList<String>(SchemaExpectations.TABLES);
+    names.add(SchemaExpectations.SEQUENCE);
+    try (PreparedStatement ps = c.prepareStatement(OBJECT_GRANTS_SQL)) {
+      var oids = c.createArrayOf("oid", boxed(reach.oids()));
+      ps.setLong(1, session.schemaOid());
+      ps.setArray(2, c.createArrayOf("text", names.toArray()));
+      ps.setArray(3, oids);
+      ps.setLong(4, session.schemaOid());
+      ps.setArray(5, oids);
+      ps.setString(6, session.database());
+      ps.setArray(7, oids);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          String object = rs.getString(1);
+          String kind = rs.getString(2);
+          long grantee = rs.getLong(3);
+          String privilege = rs.getString(4);
+          String held = reach.holder(grantee) + "holds " + privilege + " on ";
+          switch (kind) {
+            case "n" -> {
+              if (!SchemaExpectations.SCHEMA_ALLOWED.contains(privilege)) {
+                excess.add(held + "schema " + object);
+              }
+            }
+            case "d" -> {
+              if (!SchemaExpectations.DATABASE_ALLOWED.contains(privilege)) {
+                excess.add(held + "database " + object);
+              }
+            }
+            case "S" -> {
+              if (!SchemaExpectations.SEQUENCE_ALLOWED.contains(privilege)) {
+                excess.add(
+                    held
+                        + "sequence "
+                        + object
+                        + ("UPDATE".equals(privilege)
+                            ? " (setval can rewind the erasure log's seq)"
+                            : ""));
+              }
+            }
+            default -> {
+              if (!allowedOn(object).contains(privilege)) {
+                excess.add(held + object);
+              }
+            }
+          }
         }
       }
-      checkColumnUpdate(c, relation, want, excess, missing);
+    }
+  }
+
+  private static List<String> allowedOn(String table) {
+    return SchemaExpectations.PRIVILEGES.stream()
+        .filter(p -> p.table().equals(table))
+        .map(TablePrivileges::required)
+        .findFirst()
+        .orElse(List.of());
+  }
+
+  private static Long[] boxed(long[] values) {
+    var out = new Long[values.length];
+    for (int i = 0; i < values.length; i++) {
+      out[i] = values[i];
+    }
+    return out;
+  }
+
+  /**
+   * Column grants over reach (C-PR-1c). {@code UPDATE} on a column other than the one the module
+   * updates refuses for any role in reach, held by a column grant or by a table-wide one; any other
+   * column grant must be a privilege the table allows. The current role's own column legs are in
+   * {@link #checkColumnUpdate}.
+   */
+  private static void checkColumnGrants(
+      Connection c, long ns, Map<String, Relation> relations, Reach reach, List<String> excess)
+      throws SQLException {
+    if (relations.isEmpty()) {
+      return;
+    }
+    Long[] tables = relations.values().stream().map(Relation::oid).toArray(Long[]::new);
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT c.relname, a.attname, reached, 'UPDATE'"
+                + " FROM pg_catalog.pg_class c"
+                + " JOIN pg_catalog.pg_attribute a ON (a.attrelid OPERATOR(pg_catalog.=) c.oid),"
+                + " pg_catalog.unnest(?::pg_catalog._oid) AS reached"
+                + " WHERE (c.oid OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))"
+                + " AND (a.attnum OPERATOR(pg_catalog.>) 0) AND NOT a.attisdropped"
+                + " AND pg_catalog.has_column_privilege(reached, c.oid, a.attnum, 'UPDATE')"
+                + " AND NOT pg_catalog.pg_has_role(reached, c.relowner, 'MEMBER')"
+                + " UNION ALL"
+                + " SELECT c.relname, a.attname, x.grantee, x.privilege_type"
+                + " FROM pg_catalog.pg_class c"
+                + " JOIN pg_catalog.pg_attribute a ON (a.attrelid OPERATOR(pg_catalog.=) c.oid),"
+                + " pg_catalog.aclexplode(a.attacl) x"
+                + " WHERE ((c.oid OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))"
+                + " OR ((c.relnamespace OPERATOR(pg_catalog.=) ?)"
+                + " AND (c.relname OPERATOR(pg_catalog.=) ?)))"
+                + " AND (a.attnum OPERATOR(pg_catalog.>) 0) AND NOT a.attisdropped"
+                + " AND (x.privilege_type OPERATOR(pg_catalog.<>) 'UPDATE')"
+                + " AND (x.grantee OPERATOR(pg_catalog.<>) c.relowner)"
+                + " AND ((x.grantee OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))"
+                + " OR (x.grantee OPERATOR(pg_catalog.=) '0'::pg_catalog.oid))")) {
+      var oids = c.createArrayOf("oid", boxed(reach.oids()));
+      var tableOids = c.createArrayOf("oid", tables);
+      ps.setArray(1, oids);
+      ps.setArray(2, tableOids);
+      ps.setArray(3, tableOids);
+      ps.setLong(4, ns);
+      ps.setString(5, SchemaExpectations.SEQUENCE);
+      ps.setArray(6, oids);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          String table = rs.getString(1);
+          String column = rs.getString(2);
+          long grantee = rs.getLong(3);
+          String privilege = rs.getString(4);
+          // C-PR45-2: only the UPDATE rows are left to checkColumnUpdate for the current role.
+          // Any other column privilege (REFERENCES, INSERT, SELECT) is judged for it too.
+          if ("UPDATE".equals(privilege)
+              && grantee != 0
+              && reach.name(grantee).equals(reach.current())) {
+            continue;
+          }
+          boolean allowed;
+          if (table.equals(SchemaExpectations.SEQUENCE)) {
+            // C-PR45-6: a column grant on the sequence is judged against the sequence allow list,
+            // like a whole-sequence grant.
+            allowed = SchemaExpectations.SEQUENCE_ALLOWED.contains(privilege);
+          } else {
+            TablePrivileges want =
+                SchemaExpectations.PRIVILEGES.stream()
+                    .filter(p -> p.table().equals(table))
+                    .findFirst()
+                    .orElseThrow();
+            allowed =
+                "UPDATE".equals(privilege)
+                    ? want.required().contains("UPDATE") || column.equals(want.updatableColumn())
+                    : want.required().contains(privilege);
+          }
+          if (!allowed) {
+            excess.add(
+                reach.holder(grantee) + "holds " + privilege + " on " + table + "." + column);
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * C-PR1c-2: a parameter grant ({@code GRANT SET} or {@code ALTER SYSTEM ON PARAMETER}, PostgreSQL
+   * 15 and later) to any role in reach or to PUBLIC refuses. {@code ALTER SYSTEM} on {@code
+   * archive_command} is a shell as the server's operating-system user after the next reload, and no
+   * runtime role needs any parameter grant. On PostgreSQL 14 the catalogue does not exist and the
+   * read fails as {@code 005}: fail closed.
+   */
+  private static void checkParameterGrants(Connection c, Reach reach, List<String> excess)
+      throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT p.parname, x.grantee, x.privilege_type"
+                + " FROM pg_catalog.pg_parameter_acl p, pg_catalog.aclexplode(p.paracl) x"
+                + " WHERE (x.grantee OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))"
+                + " OR (x.grantee OPERATOR(pg_catalog.=) '0'::pg_catalog.oid)"
+                + " ORDER BY p.parname")) {
+      ps.setArray(1, c.createArrayOf("oid", boxed(reach.oids())));
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          excess.add(
+              reach.named(rs.getLong(2))
+                  + " holds "
+                  + rs.getString(3)
+                  + " on parameter "
+                  + rs.getString(1));
+        }
+      }
     }
   }
 
@@ -1388,7 +1834,7 @@ final class SchemaVerification {
             + " of database "
             + session.database()
             + ", as role "
-            + session.role()
+            + session.described()
             + ", is not one this module will write to. "
             + unique.size()
             + " problem(s), all of them listed so they can be fixed in one round:"
@@ -1405,7 +1851,7 @@ final class SchemaVerification {
             + " of database "
             + session.database()
             + " (as role "
-            + session.role()
+            + session.described()
             + "), and this module does not create them with the application's own credentials."
             + " A role that can run this DDL owns the erasure tables and the guard functions, and"
             + " an owner can ALTER TABLE ... DISABLE TRIGGER or CREATE OR REPLACE a guard into a"
@@ -1444,7 +1890,12 @@ final class SchemaVerification {
         + " are advisory in this configuration, set"
         + " shredding.jdbc.allow-privileged-runtime-role=true (starter), or call"
         + " JdbcSupport.verifySchema(ds, true) / initializeAndVerifySchema(ds, true) (core"
-        + " without the starter, which never reads the property). Both warn at every call.";
+        + " without the starter, which never reads the property). Both warn at every call."
+        + " The check judges the role the pool logs in as and every role that login can become"
+        + " (C-PR-1c). Log in as the runtime role itself, or as a role whose only membership is"
+        + " the runtime role. A SET ROLE in the pool's init SQL does not lower privilege: any"
+        + " statement can RESET ROLE. A membership that leads to a privileged role is removed with"
+        + " REVOKE <role> FROM <member>.";
   }
 
   private static String underprivilegedRemedy() {

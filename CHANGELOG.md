@@ -47,6 +47,43 @@ All notable changes to this project. The format follows
   a standby still in recovery is refused, for reads too. Verification refuses a server in recovery,
   and a runtime role that cannot execute `pg_control_system()`, with `SHRED-SCHEMA-005`. No
   property weakens this. The starter's boot-time mapping check reads through the same check.
+- **C-PR-1c (MEDIUM): the schema check judged only the role a connection switched to.** A pool
+  that logged in as the owner and ran `SET ROLE shredding_app` in its init SQL, or as a superuser
+  with `SET SESSION AUTHORIZATION shredding_app`, passed as an unprivileged runtime role, and any
+  statement on it could switch back and disable the guards. A login that reached a privileged role
+  through a NOINHERIT membership passed too. The check now reads the login role from the backend's
+  own activity entry (`pg_stat_get_activity(pg_backend_pid())`), which no `SET` moves, and judges
+  it and every role it is a member of (`pg_has_role(.., 'MEMBER')`, including ADMIN-only grants).
+  New refusals with `SHRED-SCHEMA-004`: a superuser or CREATEROLE role in reach; the server-file
+  and server-program roles in reach (C-PR1c-1); a parameter grant to a role in reach or to PUBLIC
+  (C-PR1c-2); any predefined role outside an accepted list (C-PR1c-7). The refused-privilege legs
+  are now an allow list read from the grants themselves, so a privilege type added by a later
+  release, such as PostgreSQL 17's `MAINTAIN`, is refused without a version switch (C-PR1c-4).
+  A login role that cannot be read is `SHRED-SCHEMA-005`. Every store connection also checks its
+  login role (`SHRED-SCHEMA-012`): it reads it once per server backend and then remembers the
+  result in a session setting of that backend, `shredding.login_checked` (C-PR1c-3). The 1b
+  refusal now says "session role" for `session_user`. `SchemaVerdict` gains `loginRole()`. See
+  [docs/upgrading-0.2.1.md](docs/upgrading-0.2.1.md).
+
+- **C-PR45-1 (MEDIUM): the owner of the verified schema passed after it revoked `CREATE` from
+  itself.** The owner of a schema can drop every object in it, whoever owns the object, and keeps
+  that right with `CREATE` revoked. The check only read the schema's grant list, so a runtime role
+  that owned the schema could pass and then run `DROP TABLE shredding_erasure CASCADE`. The check
+  now refuses a login role, or any role in its reach, that owns the schema (`SHRED-SCHEMA-004`,
+  "owns, or is a member of the owner of, schema ...").
+- **C-PR45-2 (LOW): a column-level `REFERENCES` grant to the runtime role itself passed.** The
+  column check skipped the current role for every privilege, not only for `UPDATE`. A foreign key
+  from a table the role owned could then pin a data key and make the key-destroying `DELETE`
+  fail. The current role is now skipped only for `UPDATE` (judged by its own check); any other
+  column privilege beyond the allow list refuses.
+- **C-PR45-6 (INFO): a column-level `SELECT` grant on the erasure log's sequence passed.** The
+  column check scanned the four tables only. `GRANT SELECT (last_value) ON
+  shredding_erasure_seq_seq TO shredding_app` passed, while the same grant on the whole sequence
+  refused. The column scan now includes the sequence and judges its column grants against the
+  sequence allow list (`USAGE` only), so every column grant on it refuses.
+- **C-PR45-7 (INFO): the split-package release probe gave the wrong verdict for a non-compiling
+  planted class.** `tools/cipher-probe-c-pr-1-split-package.sh` stopped with exit 1 (its RED code)
+  and no verdict line. It now prints `UNVERIFIABLE: the planted class did not compile` and exits 2.
 
 ### Changed
 - The core jar now seals the package `com.housedevinci.shredding.adapter.jdbc` (manifest entry

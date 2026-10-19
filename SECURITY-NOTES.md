@@ -1037,7 +1037,13 @@ the names qualified). The runtime role must also be able to execute
 `pg_catalog.pg_control_system()`, which PostgreSQL grants to `PUBLIC` by default; startup refuses
 with `SHRED-SCHEMA-005` otherwise (C-PR-1b). If your service denies the call, the master user
 fixes it with one statement: `GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO
-shredding_app;`.
+shredding_app;`. The same holds for `pg_catalog.pg_stat_get_activity(integer)`, which the check
+uses to read the login role (C-PR-1c). The module is tested on PostgreSQL 16 and 17.
+
+**Log in as the runtime role.** The pool must log in as `shredding_app` itself, or as a login whose
+only membership is `shredding_app` (then `SET ROLE shredding_app` in the init SQL is fine). A pool
+that logs in as the owner or a superuser and switches in its init SQL is refused: see "The role a
+pool logs in as" below.
 
 ```sql
 GRANT USAGE                  ON SCHEMA <schema>                     TO shredding_app;
@@ -1054,7 +1060,7 @@ And take these away, which `GRANT` alone does not do:
 
 ```sql
 REVOKE CREATE    ON SCHEMA   <schema> FROM shredding_app;
-REVOKE CREATE    ON SCHEMA   public   FROM PUBLIC;   -- PostgreSQL 14 and earlier
+REVOKE CREATE    ON SCHEMA   public   FROM PUBLIC;   -- the default of older clusters
 REVOKE TEMPORARY ON DATABASE <db>     FROM shredding_app, PUBLIC;
 REVOKE CREATE    ON DATABASE <db>     FROM shredding_app, PUBLIC;
 ```
@@ -1095,8 +1101,9 @@ can add a trigger of its own to the erasure log.
 
 A privilege can be held **directly, through a group role, through a predefined role such as
 `pg_write_all_data`, or through `PUBLIC`**. An empty grep of your grant scripts therefore proves
-nothing; check with `has_table_privilege('<role>', '<table>', '<privilege>')`, which is what the
-startup verification uses.
+nothing; check with `has_table_privilege('<role>', '<table>', '<privilege>')`. Since C-PR-1c the
+startup verification reads the grants themselves (`aclexplode`) for the login role, every role it
+is a member of, and PUBLIC, and refuses any privilege outside the lists above.
 
 ### What startup verification does and does not prove
 
@@ -1228,7 +1235,7 @@ connection taken by reflection or through an ORM API. The starter's boot-time ma
 | M12 | A pooler (PgBouncer) in transaction mode | covered: check and work run in one transaction |
 | M13 | Spring's `LazyConnectionDataSourceProxy` or `TransactionAwareDataSourceProxy` as the context `DataSource` | accepted: they reach the verified database |
 | M14 | The starter's own boot reads after the gate | refused if the target moved: they go through the same check |
-| M15 | `SET ROLE` or `SET SESSION AUTHORIZATION` inside the connection | `current_user` and `session_user` are compared; the judgement of an authenticated role that differs from the session one is a separate finding (C-PR-1c) |
+| M15 | `SET ROLE` or `SET SESSION AUTHORIZATION` inside the connection | `current_user` and `session_user` are compared, and the login role too (C-PR-1c, next section) |
 | M16 | A physical copy of the verified cluster (backup restore, snapshot, PITR, staging clone) | not distinguishable at runtime: same facts by construction. See "Backups" above |
 | M17 | `pg_control_system()` not executable by the runtime role | refused at startup with `SHRED-SCHEMA-005`, naming the `GRANT`. No fallback |
 | M18 | A read replica or hot standby still replaying | refused for reads and writes: it can serve a key the primary already destroyed. Refused at startup too (`SHRED-SCHEMA-005`) |
@@ -1246,6 +1253,121 @@ deployment boundary as code in your JVM that can reflect into the module.
 `COMMIT`, because it now runs in a short read-only transaction of its own. A decrypt calls the key
 store on every read, a cache hit included (the key row, not the cache, decides whether the key may
 be used), so the read cost applies to every decrypt.
+
+### The role a pool logs in as, and every role it can become (C-PR-1c)
+
+Until 0.2.1 every privilege leg asked about `current_user`. A pool can log in as one role and move
+to another in its init SQL. Example: HikariCP logs in as `shred_owner` and runs `SET ROLE
+shredding_app` on each new connection. The check saw `shredding_app` and said "unprivileged".
+Any statement on that pool could run `RESET ROLE; ALTER TABLE shredding_erasure DISABLE TRIGGER
+ALL`. A superuser login with `SET SESSION AUTHORIZATION shredding_app` moves `session_user` too,
+so checking `session_user` instead is not a fix.
+
+**Where the login role comes from.** The server writes the role id into the backend's status entry
+once, when the connection authenticates. The check reads it with
+`pg_catalog.pg_stat_get_activity(pg_catalog.pg_backend_pid())`. `SET ROLE`, `SET SESSION
+AUTHORIZATION`, `set_config('session_authorization', ...)` and `track_activities = off` leave it
+as it was. A non-superuser cannot change it. If the read fails for any reason (the function was
+revoked, the login role was dropped while connected), startup refuses with `SHRED-SCHEMA-005`.
+
+**Reach.** The login role and every role it is a member of, directly or through other roles, with
+or without INHERIT, SET or ADMIN (`pg_has_role(.., 'MEMBER')`). ADMIN-only membership counts: a role
+with ADMIN on the owner can grant itself SET and become the owner. A grant with INHERIT, SET and
+ADMIN all false gives nothing and is still refused; the message says which membership to revoke.
+
+**What startup refuses, with `SHRED-SCHEMA-004`.** The login role is a superuser. A role in reach
+is a superuser or has CREATEROLE (on PostgreSQL 15 and earlier CREATEROLE can grant itself the
+owner). A role in reach is `pg_execute_server_program`, `pg_write_server_files` or
+`pg_read_server_files`: they run programs or touch files as the server's operating-system user,
+which can edit `pg_hba.conf`. A role in reach, or PUBLIC, holds any parameter grant (`GRANT SET`
+or `ALTER SYSTEM ON PARAMETER`): `ALTER SYSTEM` on `archive_command` is a shell after the next
+reload. A role in reach is a predefined role (name starting `pg_`) outside the accepted list. The
+login role is, or reaches, the owner of a table, an index, a guard function, the sequence, the
+schema or the database. (The owner of the schema can drop every object in it, even after it
+revokes `CREATE` from itself.) A role in reach, or PUBLIC, holds any privilege on the four tables, the sequence, the
+schema or the database beyond the documented grant set. That last leg reads the grants themselves,
+so a privilege type a later release adds (for example `MAINTAIN` on PostgreSQL 17, which can lock
+the erasure log) is refused without a version check.
+
+**Accepted predefined roles.** A role is accepted only if it gives no path to a write on the
+module's tables, to a lock that blocks erasure, or to another login's password:
+`pg_signal_backend` (it can cancel other non-superuser backends; an interrupted erasure rolls
+back), `pg_create_subscription` (it also needs `CREATE` on the database, which is refused),
+`pg_checkpoint` (I/O load only), `pg_use_reserved_connections` (availability only),
+`pg_stat_scan_tables` (its `ACCESS SHARE` locks do not block erasure writes). Not accepted:
+`pg_read_all_data` (it reads `pg_authid.rolpassword`, measured), `pg_read_all_settings` and
+`pg_monitor` (settings such as `primary_conninfo` can hold a password), `pg_read_all_stats`
+(other backends' query text can hold one), and every predefined role a later release adds. The
+`REPLICATION` and `BYPASSRLS` attributes are accepted: the first is read-only, and the module's
+tables carry no row-level security for the second to bypass.
+
+**Per call.** Every store connection compares its login role with the verified one, in the same
+statement as the 1b facts. This catches one case the 1b columns cannot: a pool whose connections
+later log in as a superuser and restore the verified session and current roles in their init SQL
+(a non-superuser login cannot move `session_user`, so 1b already sees any other change). Reading
+the activity entry copies every live backend's entry, which is too slow for every call (about
+2 ms with 400 backends and 32 kB query text). A backend's login never changes, so the check reads
+it once per backend. When it matches, the same statement stores a random per-verification value in
+a session setting of that backend, `shredding.login_checked`, and later calls on that backend
+compare the value and skip the read.
+
+| Path | Outcome |
+|---|---|
+| Owner login, `SET ROLE shredding_app` in init SQL | refused at startup: the login role owns the tables |
+| NOINHERIT member of the owner, or ADMIN-only member, with or without `SET ROLE` | refused at startup |
+| Superuser login, `SET SESSION AUTHORIZATION` (then `SET ROLE NONE`, or with `track_activities = off` first), or `set_config('session_authorization', ...)` | refused at startup: the login role is a superuser |
+| `track_activities = off` by `ALTER SYSTEM` or at server start | covered: the login is still read |
+| Login that reaches a superuser, CREATEROLE, server-file or server-program role, an unaccepted predefined role, or a role holding a refused privilege, INHERIT or not | refused at startup, naming the role and the login |
+| Parameter grant to a role in reach or to PUBLIC | refused at startup |
+| NOINHERIT login whose only membership is `shredding_app`, `SET ROLE shredding_app` in init SQL | accepted |
+| Login = `shredding_app`, no init SQL (the documented setup) | accepted, no change |
+| `pg_stat_get_activity` revoked, or the login role dropped while connected | refused at startup (`005`); per call `012` |
+| Connections that later log in as a superuser and restore the verified roles | refused per call (`012`, "login role") |
+| A wrong or empty `shredding.login_checked` set by the init SQL or by `RESET` | read as "not checked": the login is read |
+| `DISCARD ALL`, `RESET ALL`, or a rolled-back marking transaction | the next call reads the login again |
+| Login role renamed after startup | refused per call by 1b's session-role name; the login itself is compared by oid |
+| The application's own `SET LOCAL ROLE` before a module call | refused per call by 1b's current-role column |
+| `allow-privileged-runtime-role=true` | starts; the WARN names every leg, and says the pool can `RESET ROLE` back to its login when they differ |
+| PgBouncer in transaction or session mode | the check and the work run on one server backend in one transaction (1b M12); the marker belongs to that backend |
+| PgBouncer `[databases]` entry with a forced `user=` | the check judges the server login PgBouncer uses. Example: the application logs in to PgBouncer as `shredding_app`, PgBouncer connects as `shred_owner`, startup refuses naming `shred_owner` |
+
+**Cost, measured** (pinned 16 and 17 images, 406 live backends, every backend holding a query
+text of full length, 100 calls per cell, times p50 / p95 / max in ms). Hot = the backend already
+carries the marker. Cold = the first call on a backend.
+
+| pin | query text | hot, server | hot, round trip | cold, running backend, round trip | cold, new session, server |
+|---|---|---|---|---|---|
+| 16 | 1 kB | 0.043 / 0.069 / 0.082 | 0.252 / 0.343 / 0.407 | 0.530 / 0.677 / 1.445 | 0.496 / 0.615 / 0.691 |
+| 16 | 32 kB | 0.053 / 0.080 / 0.100 | 0.308 / 0.478 / 1.073 | 2.023 / 2.261 / 3.461 | 2.391 / 2.711 / 3.664 |
+| 17 | 1 kB | 0.045 / 0.066 / 0.083 | 0.296 / 0.421 / 0.507 | 0.586 / 0.746 / 1.584 | 0.468 / 0.614 / 0.689 |
+| 17 | 32 kB | 0.046 / 0.070 / 0.089 | 0.263 / 0.418 / 0.819 | 1.931 / 2.827 / 4.894 | 2.050 / 2.359 / 3.380 |
+
+The steady state is the hot column, inside the budget of 2 ms per shredded-entity write at every
+point. The cold cost is paid once per backend, like connection set-up. Example: a Hikari pool of
+10 connections with `maxLifetime` 30 minutes pays it about 20 times an hour. Three cases pay it
+more often. A backend whose transactions all roll back stays cold, because the marker is set inside
+the call's transaction. A pooler or pool that runs `DISCARD ALL` on release pays it once per
+checkout. And two `VerifiedSchema` instances on one pool (for example a parent and a child Spring
+context sharing it) overwrite each other's marker, so while both are live every call pays the cold
+cost (finding C-PR1c-5, stated, not fixed).
+
+**The marker.** `shredding.login_checked` is a per-start check value, not a credential. Any role
+can set the setting (with `SET`, or a startup option); that gives nothing without the 128-bit value,
+and a wrong value only makes the call read the login. The module never logs it, and it is not part
+of any message or `toString`. With statement logging on, it appears in the PostgreSQL log as a bind
+value; under pgjdbc's `preferQueryMode=simple` it appears in the backend's query text. Knowing it
+helps only a superuser login, which is already outside the model: a superuser can forge every fact
+of this check (finding C-PR1c-6). `SHOW shredding.login_checked` on the application's own
+connections shows it; it changes no server behaviour.
+
+**Stated limits.** Reach that grows after startup (an owner runs `GRANT shred_owner TO
+shredding_app`) is not re-checked per call: only a role with ADMIN on a privileged role can grant
+that membership, and such a role can already drop the guards. A `SECURITY DEFINER` function left by
+a privileged owner and executable by the runtime role is reach through code, not through roles; it
+needs the owner or a superuser to create, which is outside the runtime-role model. On PostgreSQL 14
+and earlier the parameter-grant catalogue does not exist, so startup refuses with
+`SHRED-SCHEMA-005`. Managed services (RDS, Cloud SQL, Azure) are not yet tried: their master logins
+usually carry CREATEROLE and are refused, so use a dedicated runtime login.
 
 ### The health endpoint publishes the posture
 
