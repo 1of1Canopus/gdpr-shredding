@@ -72,6 +72,16 @@
 # `[D]ollar`, `[B]rain`. (Names in this comment are bracketed like the pattern, so this
 # script stays self-non-matching.)
 #
+# Letter case of the document names (B-NG-12). A private document copied out under a
+# lower-case or mixed-case name (`q...s.md`, `Q...s.md`) passed. Each document name, and the
+# plans folder, is now matched in any letter case, written one bracket per letter (ERE has
+# no case-insensitive flag for one alternative). Two words stay upper case only: the bare
+# review word and the bare release word. In lower case both are plain English ("releasing a
+# version", "a security-review probe"): measured on the three trees (2026-10-17), they gave
+# 11 lines that are not leaks, one of them in a published SQL resource. With the new
+# pattern, measured the same day: 0 new hits in tree content, tree names, and the main,
+# sources and javadoc jars of the three repositories.
+#
 # File names (B-NG-7, with B-NG-9, B-NG-10, B-NG-11, B-NG-13 from the design review). The
 # content scan reads lines inside files; it never read a file's own name. So a file AT a
 # refused path passed while its text was clean: `QUESTIONS[.]md` at the root, a directory
@@ -161,7 +171,7 @@ trap 'rm -rf "$scratch"' EXIT
 # (the former `internal/**` carve-out protected nothing: this repository has no `internal/`
 # directory and by design never will, and the exemption had no self-test case covering it -
 # see R-3 in the security review).
-pattern='QUESTIONS\.md|STATUS\.md|SPEC\.md|LICENSING\.md|SHARED-CONVENTIONS\.md|AGENTS\.md|docs[/]plans|SECURITY[-]REVIEW|RELEASIN[G]|[/]Users[/]|[/]home[/][a-z]|[/]root[/]|[A-Z]:\\Users|(^|[^[:alnum:][:cntrl:]_]|[[:space:]])([T]hor|[I]sis|[R]a|[A]thena|[O]din|[H]ermes|[H]arvey|[D]ollar|[B]rain|[B]rainus|[L]oki)([^[:alnum:]_]|$)|(^|[^[:alnum:][:cntrl:]_./]|[[:space:]]|(^|[^o]|(^|[^t])o|(^|[^p])to|(^|[^y])pto|(^|[^r])ypto|(^|[^c])rypto)[./])[C]ipher($|[^[:alnum:]_])|(^|[^[:alnum:]._+-])([t]hor|[i]sis|[r]a|[a]thena|[o]din|[h]ermes|[h]arvey|[d]ollar|[b]rain|[b]rainus|[l]oki|[c]ipher)@housedevinci'
+pattern='[Qq][Uu][Ee][Ss][Tt][Ii][Oo][Nn][Ss][.][Mm][Dd]|[Ss][Tt][Aa][Tt][Uu][Ss][.][Mm][Dd]|[Ss][Pp][Ee][Cc][.][Mm][Dd]|[Ll][Ii][Cc][Ee][Nn][Ss][Ii][Nn][Gg][.][Mm][Dd]|[Ss][Hh][Aa][Rr][Ee][Dd]-[Cc][Oo][Nn][Vv][Ee][Nn][Tt][Ii][Oo][Nn][Ss][.][Mm][Dd]|[Aa][Gg][Ee][Nn][Tt][Ss][.][Mm][Dd]|[Dd][Oo][Cc][Ss][/][Pp][Ll][Aa][Nn][Ss]|[Rr][Ee][Ll][Ee][Aa][Ss][Ii][Nn][Gg][.][Mm][Dd]|SECURITY[-]REVIEW|RELEASIN[G]|[Ss][Ee][Cc][Uu][Rr][Ii][Tt][Yy][-][Rr][Ee][Vv][Ii][Ee][Ww][.-]|[Rr][Ee][Ll][Ee][Aa][Ss][Ii][Nn][Gg][.]|[/]Users[/]|[/]home[/][a-z]|[/]root[/]|[A-Z]:\\Users|(^|[^[:alnum:][:cntrl:]_]|[[:space:]])([T]hor|[I]sis|[R]a|[A]thena|[O]din|[H]ermes|[H]arvey|[D]ollar|[B]rain|[B]rainus|[L]oki)([^[:alnum:]_]|$)|(^|[^[:alnum:][:cntrl:]_./]|[[:space:]]|(^|[^o]|(^|[^t])o|(^|[^p])to|(^|[^y])pto|(^|[^r])ypto|(^|[^c])rypto)[./])[C]ipher($|[^[:alnum:]_])|(^|[^[:alnum:]._+-])([t]hor|[i]sis|[r]a|[a]thena|[o]din|[h]ermes|[h]arvey|[d]ollar|[b]rain|[b]rainus|[l]oki|[c]ipher)@housedevinci'
 
 # Rule N2, defined exactly once: the one tree path shape whose NAME may carry a hit. Tree
 # paths only; the slug is scanned again with `pattern` (admitted_review_doc).
@@ -643,6 +653,24 @@ run_self_test() {
   _case "probe-class-identifier"           green         doc.md   "class ${cr}ProbeJdbcTest"
   _case "jdk-class-qualified-in-source"    green         doc.md   "javax.crypto.$cr c = javax.crypto.$cr.getInstance(x);"
   _case "jdk-class-in-a-class-file"        green         doc.md   "(Ljava/lang/String;)Ljavax/crypto/$cr;"
+  # B-NG-12: the moved-private document names in any letter case (numbered, assembled).
+  local dn j=0
+  for dn in "question""s.md" "Question""s.md" "QUESTION""S.MD" "statu""s.md" "spe""c.md" \
+            "licensin""g.md" "shared-convention""s.md" "agent""s.md" "doc""s/Plans" \
+            "releasin""g.md" "Releasin""g.MD"; do
+    j=$((j + 1))
+    _case "private-document-any-case-$j"   red:content   doc.md   "see $dn for the details"
+  done
+  # B-NG-26: the upper-case originals stay refused (a pattern narrowed to lower case must go red).
+  j=0
+  for dn in "STATU""S.MD" "SPE""C.MD" "LICENSIN""G.MD" "SHARED-CONVENTION""S.MD" "AGENT""S.MD"; do
+    j=$((j + 1))
+    _case "private-document-upper-case-$j" red:content   doc.md   "see $dn for the details"
+  done
+  # B-NG-25: the review word and the release word as file names, any case.
+  _case "review-word-lower-case-dash-in-content" red:content doc.md "see securit""y-review.md"
+  _case "release-word-lower-case-dot-in-content" red:content doc.md "see Releasin""g.txt"
+  _case "plain-words-near-document-names"  green         doc.md   "releasing a version, a security-review probe, the status of the spec"
 
   # B-NG-7: file names in the tree. `sr` is a review document name in the admitted form;
   # each red case moves it out of that one shape by one step.
@@ -659,6 +687,11 @@ run_self_test() {
   _name_case "name-review-doc-in-a-sub-folder"     red:name       100644 "sub/docs/$sr.md"
   _name_case "name-review-doc-below-docs"          red:name       100644 "docs/sub/$sr.md"
   _name_case "name-review-doc-at-root"             red:name       100644 "$sr.md"
+  _name_case "name-lower-case-private-document"    red:name       100644 "notes/question""s.md"
+  _name_case "name-review-doc-slug-rescan"         red:name       100644 "docs/SECURITY""-REVIEW-statu""s.md.md"
+  _name_case "name-lower-case-review-word"         red:name       100644 "securit""y-review.md"
+  _name_case "name-mixed-case-review-word-dash"    red:name       100644 "docs/Securit""y-Review-pr12.md"
+  _name_case "name-mixed-case-release-word"        red:name       100644 "docs/Releasin""g.txt"
   _name_case "name-review-doc-upper-case-slug"     red:name       100644 "docs/SECURITY""-REVIEW-Feat.md"
   _name_case "name-review-doc-not-markdown"        red:name       100644 "docs/$sr.txt"
   _name_case "name-review-doc-trailing-suffix"     red:name       100644 "docs/$sr.md.bak"
@@ -807,6 +840,7 @@ with zipfile.ZipFile(sys.argv[1], "w") as z:
   }
   _zip_case "jar-member-agent-name"            red:name               case.jar "META-INF/review-by-$th.txt" "clean"
   _zip_case "jar-directory-entry-name"         red:name               case.jar "$pl/" ""
+  _zip_case "jar-member-mixed-case-document"   red:name               case.jar "META-INF/Agent""s.md" "clean"
   _zip_case "jar-member-review-doc-name"       red:name               case.jar "docs/$sr.md" "clean"
   _zip_case "jar-member-parent-segment"        "red:dot segment"      case.jar "../x.txt" "clean"
   _zip_case "jar-member-absolute-path"         "red:dot segment"      case.jar "/x.txt" "clean"
