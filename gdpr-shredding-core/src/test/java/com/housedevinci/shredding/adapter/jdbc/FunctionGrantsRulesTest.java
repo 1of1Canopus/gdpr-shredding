@@ -140,6 +140,24 @@ class FunctionGrantsRulesTest {
   }
 
   @Test
+  void a_function_whose_shipped_record_gives_public_execute_is_not_in_w() {
+    // Mutation 8: W is only what the record withholds. A member shipped to PUBLIC with an explicit
+    // record is not withheld, so PUBLIC on it is no leg 1 row, and its symbol makes no alias.
+    var shipped =
+        with(
+            with(
+                with(fn(17_200, "public.pgstattuple(text)", "pgstattuple"), "privtype", "e"),
+                "shippedPublic",
+                true),
+            "extension",
+            new String[] {"pgstattuple", "1.4"});
+    var keyed = with(shipped, "key", "pgstattuple(text)");
+    var copy = fn(20_100, "public.copy(text)", "pgstattuple");
+    assertThat(judge(keyed)).isEmpty();
+    assertThat(judge(keyed, copy)).singleElement().satisfies(r -> assertThat(r.leg()).isEqualTo(4));
+  }
+
+  @Test
   void a_caller_rights_alias_of_a_withheld_symbol_is_leg_2() {
     var rows = judge(loExport(), fn(20_000, "public.save_blob(oid, text)", "be_lo_export"));
     assertThat(rows)

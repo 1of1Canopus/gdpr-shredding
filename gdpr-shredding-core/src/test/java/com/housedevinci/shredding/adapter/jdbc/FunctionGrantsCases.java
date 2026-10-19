@@ -849,8 +849,16 @@ abstract class FunctionGrantsCases {
             + APP
             + " IN DATABASE "
             + db.name()
-            + " SET search_path = public, s, pg_catalog");
-    verifies(keep(TwoRoleCluster.app(pg, db.name())));
+            + " SET search_path = public, s, pg_catalog",
+        "GRANT USAGE ON SCHEMA s TO " + APP);
+    var app = keep(TwoRoleCluster.app(pg, db.name()));
+    // The hostile path is live for the runtime role: outside the pinned window the signature of
+    // lo_export reads pg_catalog.text, so the baseline would not match (mutation 23).
+    assertThat(
+            TwoRoleCluster.scalar(
+                app, "SELECT pg_catalog.pg_get_function_identity_arguments(765::pg_catalog.oid)"))
+        .isEqualTo("oid, pg_catalog.text");
+    verifies(app);
   }
 
   @Test
