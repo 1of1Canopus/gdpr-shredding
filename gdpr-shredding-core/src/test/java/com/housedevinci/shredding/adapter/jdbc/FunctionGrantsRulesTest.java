@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.housedevinci.shredding.adapter.jdbc.FunctionGrantsSql.ExecuteFact;
 import com.housedevinci.shredding.adapter.jdbc.FunctionGrantsSql.RecordFact;
+import com.housedevinci.shredding.adapter.jdbc.PinnedCatalogue.CoreNative;
 import com.housedevinci.shredding.adapter.jdbc.PinnedCatalogue.Member;
 import com.housedevinci.shredding.adapter.jdbc.PinnedCatalogue.Version;
 import com.housedevinci.shredding.adapter.jdbc.PinnedCatalogue.Withheld;
@@ -68,7 +69,14 @@ class FunctionGrantsRulesTest {
             new Version("dblink", "1.2", true, ""),
             new Version("pgstattuple", "1.4", true, ""),
             new Version("pgstattuple", "1.5", true, ""),
-            new Version("plperl", "1.0", false, "could not load library \"plperl.so\"")));
+            new Version("plperl", "1.0", false, "could not load library \"plperl.so\"")),
+        List.of(
+            new CoreNative(
+                "pg_catalog.pg_rotate_logfile_old()",
+                "internal",
+                "pg_rotate_logfile",
+                "-",
+                false)));
   }
 
   /** A native function PUBLIC may execute, outside any extension, owned by the superuser. */
@@ -88,12 +96,13 @@ class FunctionGrantsRulesTest {
         label,
         OWNER,
         "postgres",
-        "f");
+        "f",
+        "");
   }
 
   private static ExecuteFact with(ExecuteFact f, String field, Object value) {
     return new ExecuteFact(
-        f.oid(),
+        field.equals("oid") ? (Long) value : f.oid(),
         f.label(),
         field.equals("grantee") ? (OptionalLong) value : f.grantee(),
         field.equals("privtype") ? (String) value : f.privtype(),
@@ -107,11 +116,12 @@ class FunctionGrantsRulesTest {
         field.equals("key") ? (String) value : f.key(),
         field.equals("owner") ? (Long) value : f.owner(),
         f.ownerName(),
-        field.equals("kind") ? (String) value : f.kind());
+        field.equals("kind") ? (String) value : f.kind(),
+        field.equals("library") ? (String) value : f.library());
   }
 
   private static List<FunctionGrants.ExecuteRow> judge(List<String> accepted, ExecuteFact... f) {
-    return FunctionGrants.judgeExecutes(List.of(f), catalogue(), accepted, Set.of(APP));
+    return FunctionGrants.judgeExecutes(List.of(f), catalogue(), accepted, Set.of(APP), Map.of());
   }
 
   private static List<FunctionGrants.ExecuteRow> judge(ExecuteFact... f) {
@@ -402,7 +412,7 @@ class FunctionGrantsRulesTest {
   }
 
   @Test
-  void an_aggregate_owned_by_a_role_in_reach_is_skipped_pending_revision_5() {
+  void an_aggregate_owned_by_a_role_in_reach_is_not_judged_as_code() {
     var agg =
         with(
             with(
@@ -415,13 +425,15 @@ class FunctionGrantsRulesTest {
   }
 
   @Test
-  void an_aggregate_owned_outside_reach_stays_refused_by_r3() {
+  void an_aggregate_owned_outside_reach_is_judged_by_r6_not_by_r3() {
+    // Revision 5 replaces the interim accident: an aggregate runs no code of its own (symbol
+    // aggregate_dummy), so R3 does not apply; R6 judges the functions it calls.
     var agg =
         with(
             with(fn(20_013, "public.readall(boolean)", "aggregate_dummy"), "language", "internal"),
             "kind",
             "a");
-    assertThat(judge(agg)).singleElement().satisfies(r -> assertThat(r.leg()).isEqualTo(4));
+    assertThat(judge(agg)).isEmpty();
   }
 
   @Test
@@ -433,7 +445,7 @@ class FunctionGrantsRulesTest {
             "shippedPublic",
             false);
     var both = new ArrayList<ExecuteFact>(List.of(f, with(f, "grantee", OptionalLong.of(APP))));
-    var rows = FunctionGrants.judgeExecutes(both, catalogue(), List.of(), Set.of(APP));
+    var rows = FunctionGrants.judgeExecutes(both, catalogue(), List.of(), Set.of(APP), Map.of());
     assertThat(rows).hasSize(2).allSatisfy(r -> assertThat(r.leg()).isEqualTo(1));
   }
 
@@ -568,17 +580,20 @@ class FunctionGrantsRulesTest {
         PinnedCatalogue.baselineResource(16),
         "765\tpg_catalog.lo_export(oid, text)\tlo_export(oid,text)\tbe_lo_export\tf\t@owner=X\n");
     files.put(PinnedCatalogue.versionsResource(16), "dblink\t1.2\tok\t\n");
+    files.put(
+        PinnedCatalogue.coreResource(16),
+        "pg_catalog.pg_rotate_logfile_old()\tinternal\tpg_rotate_logfile\t-\tf\n");
     assertThatThrownBy(() -> PinnedCatalogue.load(16, n -> open(files, n)))
         .isInstanceOfSatisfying(
             ShreddingException.class,
             e -> assertThat(e.code()).isEqualTo(ErrorCodes.SCHEMA_UNVERIFIABLE));
-    files.put(PinnedCatalogue.manifestResource(16), "dblink\t1.2\tx()\tx\tmaybe\tf\n");
+    files.put(PinnedCatalogue.manifestResource(16), "dblink\t1.2\tx()\tx\tmaybe\tf\t\n");
     assertThatThrownBy(() -> PinnedCatalogue.load(16, n -> open(files, n)))
         .hasMessageContaining("a flag must be t or f");
     files.put(PinnedCatalogue.manifestResource(16), "");
     assertThatThrownBy(() -> PinnedCatalogue.load(16, n -> open(files, n)))
         .hasMessageContaining("non-empty");
-    files.put(PinnedCatalogue.manifestResource(16), "adminpack\t9.9\tx()\tx\tf\tf\n");
+    files.put(PinnedCatalogue.manifestResource(16), "adminpack\t9.9\tx()\tx\tf\tf\t\n");
     assertThatThrownBy(() -> PinnedCatalogue.load(16, n -> open(files, n)))
         .hasMessageContaining("no ok line");
     files.put(PinnedCatalogue.versionsResource(16), "dblink\t1.2\tfails\tpermission denied\n");
@@ -675,5 +690,190 @@ class FunctionGrantsRulesTest {
   private static java.io.InputStream open(Map<String, String> files, String name) {
     String text = files.get(name);
     return text == null ? null : new ByteArrayInputStream(text.getBytes(StandardCharsets.UTF_8));
+  }
+
+  // ------------------------------------------------------------------ R6, caller objects
+
+  private static FunctionGrantsSql.CallerFact caller(String kind, long owner, int slot, long fn) {
+    return new FunctionGrantsSql.CallerFact(
+        kind, 30_000, "public.agg(boolean)", owner, "postgres", true, slot, fn, "k(text)");
+  }
+
+  private static List<FunctionGrants.CallerRow> judgeCallers(FunctionGrantsSql.CallerFact c) {
+    return FunctionGrants.judgeCallers(
+        List.of(c), List.of(loExport()), catalogue(), List.of(), Set.of(APP));
+  }
+
+  @Test
+  void r6_refuses_an_aggregate_owned_outside_reach_over_a_withheld_function() {
+    assertThat(judgeCallers(caller("agg", OWNER, 1, 765)))
+        .singleElement()
+        .satisfies(
+            r -> {
+              assertThat(r.leg()).isEqualTo(1);
+              assertThat(r.slot()).isEqualTo("transfn");
+              assertThat(r.function()).isEqualTo("pg_catalog.lo_export(oid, text)");
+            });
+  }
+
+  @Test
+  void r6_skips_an_object_owned_in_reach_or_usable_by_nobody_in_reach() {
+    assertThat(judgeCallers(caller("agg", APP, 1, 765))).isEmpty();
+    var unusable = caller("agg", OWNER, 1, 765);
+    assertThat(
+            judgeCallers(
+                new FunctionGrantsSql.CallerFact(
+                    "agg", 30_000, "a", OWNER, "postgres", false, 1, 765, "k(text)")))
+        .isEmpty();
+    assertThat(unusable.usable()).isTrue();
+  }
+
+  @Test
+  void r6_skips_operator_code_and_judges_estimators_and_every_language_slot() {
+    assertThat(judgeCallers(caller("opr", OWNER, 1, 765))).isEmpty();
+    assertThat(judgeCallers(caller("opr", OWNER, 2, 765))).hasSize(1);
+    assertThat(judgeCallers(caller("opr", OWNER, 3, 765))).hasSize(1);
+    for (int slot = 1; slot <= 3; slot++) {
+      assertThat(judgeCallers(caller("lang", OWNER, slot, 765))).hasSize(1);
+    }
+  }
+
+  @Test
+  void r6_judges_all_eight_aggregate_slots_and_skips_a_function_it_has_no_fact_for() {
+    for (int slot = 1; slot <= 8; slot++) {
+      int s = slot;
+      assertThat(judgeCallers(caller("agg", OWNER, slot, 765)))
+          .singleElement()
+          .satisfies(
+              r -> assertThat(r.slot()).isEqualTo(FunctionGrants.SLOTS.get("agg").get(s - 1)));
+    }
+    assertThat(judgeCallers(caller("agg", OWNER, 1, 99_999))).isEmpty();
+  }
+
+  @Test
+  void r6_message_names_object_owner_slot_function_and_reason() {
+    var row = judgeCallers(caller("lang", OWNER, 3, 765)).get(0);
+    assertThat(FunctionGrantMessages.caller(row, catalogue()))
+        .contains("may create functions in language public.agg(boolean), owned by postgres")
+        .contains("whose validator is function pg_catalog.lo_export(oid, text)")
+        .contains("ships without EXECUTE for PUBLIC");
+  }
+
+  @Test
+  void supports_joins_each_aggregate_slot_in_order_and_ignores_other_objects() {
+    var rows =
+        List.of(
+            new FunctionGrantsSql.CallerFact("agg", 1, "a", 10, "p", true, 3, 5, "c(x,x)"),
+            new FunctionGrantsSql.CallerFact("agg", 1, "a", 10, "p", true, 1, 4, "t(x,y)"),
+            new FunctionGrantsSql.CallerFact("opr", 2, "o", 10, "p", true, 1, 6, "e(x,x)"));
+    assertThat(FunctionGrants.supports(rows))
+        .isEqualTo(Map.of(1L, "transfn=t(x,y);combinefn=c(x,x)"));
+  }
+
+  @Test
+  void a_shipped_aggregate_with_other_support_functions_is_not_as_shipped() {
+    var cat =
+        PinnedCatalogue.of(
+            16,
+            catalogue().baseline(),
+            List.of(
+                new Member(
+                    "citext",
+                    "1.6",
+                    "min(citext)",
+                    "aggregate_dummy",
+                    false,
+                    false,
+                    "transfn=citext_smaller(citext,citext)")),
+            List.of(new Version("citext", "1.6", true, "")),
+            catalogue().core());
+    var agg =
+        with(
+            with(
+                with(fn(20_020, "public.min(citext)", "aggregate_dummy"), "kind", "a"),
+                "key",
+                "min(citext)"),
+            "extension",
+            new String[] {"citext", "1.6"});
+    var shipped = Map.of(20_020L, "transfn=citext_smaller(citext,citext)");
+    var other = Map.of(20_020L, "transfn=citext_larger(citext,citext)");
+    assertThat(FunctionGrants.judgeExecutes(List.of(agg), cat, List.of(), Set.of(APP), shipped))
+        .isEmpty();
+    assertThat(FunctionGrants.judgeExecutes(List.of(agg), cat, List.of(), Set.of(APP), other))
+        .singleElement()
+        .satisfies(r -> assertThat(r.leg()).isEqualTo(6));
+  }
+
+  // ------------------------------------------------------------------ R7, core record
+
+  private static ExecuteFact core(String label, String language, String symbol, String library) {
+    return with(
+        with(with(fn(4099, label, symbol), "language", language), "library", library),
+        "grantee",
+        OptionalLong.empty());
+  }
+
+  @Test
+  void r7_accepts_a_core_function_as_shipped() {
+    var f = core("pg_catalog.pg_rotate_logfile_old()", "internal", "pg_rotate_logfile", "");
+    assertThat(FunctionGrants.judgeCore(List.of(f), catalogue())).isEmpty();
+  }
+
+  @Test
+  void r7_refuses_a_core_function_rewritten_in_language_symbol_library_or_rights() {
+    String sig = "pg_catalog.pg_rotate_logfile_old()";
+    var c = catalogue();
+    assertThat(FunctionGrants.judgeCore(List.of(core(sig, "c", "pg_rotate_logfile", "x")), c))
+        .singleElement()
+        .satisfies(
+            l -> assertThat(l).contains("is language c, symbol pg_rotate_logfile, library x"));
+    assertThat(FunctionGrants.judgeCore(List.of(core(sig, "internal", "other", "")), c)).hasSize(1);
+    assertThat(
+            FunctionGrants.judgeCore(List.of(core(sig, "internal", "pg_rotate_logfile", "lib")), c))
+        .hasSize(1);
+    var definer = with(core(sig, "internal", "pg_rotate_logfile", ""), "secdef", true);
+    assertThat(FunctionGrants.judgeCore(List.of(definer), c)).hasSize(1);
+  }
+
+  @Test
+  void r7_refuses_a_missing_core_function_and_an_unrecorded_one_and_ignores_others() {
+    var c = catalogue();
+    assertThat(FunctionGrants.judgeCore(List.of(), c))
+        .singleElement()
+        .satisfies(l -> assertThat(l).contains("is missing on this server"));
+    var asShipped = core("pg_catalog.pg_rotate_logfile_old()", "internal", "pg_rotate_logfile", "");
+    var unknown = with(core("pg_catalog.f()", "internal", "f", ""), "oid", 4100L);
+    assertThat(FunctionGrants.judgeCore(List.of(asShipped, unknown), c))
+        .singleElement()
+        .satisfies(l -> assertThat(l).contains("is not in the PostgreSQL 16 core record"));
+    var normal = with(core("public.f()", "c", "f", "x"), "oid", 20_000L);
+    var member = with(core("public.g()", "c", "g", "x"), "extension", new String[] {"e", "1"});
+    var added =
+        with(
+            core("pg_catalog.pg_rotate_logfile_old()", "internal", "pg_rotate_logfile", ""),
+            "extension",
+            new String[] {"e", "1"});
+    assertThat(FunctionGrants.judgeCore(List.of(added), c)).isEmpty();
+    assertThat(FunctionGrants.judgeCore(List.of(asShipped, normal, member), c)).isEmpty();
+  }
+
+  @Test
+  void a_malformed_core_record_or_support_column_refuses_with_005() {
+    assertThatThrownBy(() -> PinnedCatalogue.parseCore("c", "pg_catalog.f()\tsql\tf\t-\tf\n"))
+        .hasMessageContaining("internal or c");
+    assertThatThrownBy(() -> PinnedCatalogue.parseCore("c", "a()\tc\tf\t-\tf\na()\tc\tg\t-\tf\n"))
+        .hasMessageContaining("appears twice");
+    assertThatThrownBy(() -> PinnedCatalogue.parseCore("c", "a()\tc\tf\t\tf\n"))
+        .hasMessageContaining("an empty column");
+    assertThatThrownBy(
+            () -> PinnedCatalogue.parseManifest("m", "e\t1\tm(x)\taggregate_dummy\tf\tf\tjunk\n"))
+        .isInstanceOfSatisfying(
+            ShreddingException.class,
+            e -> assertThat(e.code()).isEqualTo(ErrorCodes.SCHEMA_UNVERIFIABLE));
+    assertThatThrownBy(
+            () ->
+                PinnedCatalogue.of(
+                    16, catalogue().baseline(), List.of(), catalogue().versions(), List.of()))
+        .hasMessageContaining("the core record has no line");
   }
 }

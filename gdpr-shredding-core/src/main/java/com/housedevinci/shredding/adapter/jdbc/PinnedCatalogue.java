@@ -15,10 +15,11 @@ import java.util.Set;
 import java.util.function.Function;
 
 /**
- * The three pinned files of one PostgreSQL major that the function-grants leg judges native code by
- * (C-PR45-3, design revision 4, section 5): the initdb baseline of withheld functions, the
- * extension manifest (one line per native member of each installable extension version), and the
- * list of every available extension version with whether the pinned image installs it.
+ * The four pinned files of one PostgreSQL major that the function-grants leg judges native code by
+ * (C-PR45-3, design revisions 4 and 5): the initdb baseline of withheld functions, the extension
+ * manifest (one line per native member of each installable extension version, with the support
+ * functions of an aggregate), the list of every available extension version with whether the pinned
+ * image installs it, and the record of every core native function (R7).
  *
  * <p>The files are data DDL cannot rewrite. They are generated from a pristine install of the
  * pinned image by {@code tools/generate-pinned-catalogue.sh}, never typed by hand, and a test
@@ -32,14 +33,40 @@ final class PinnedCatalogue {
   record Withheld(
       long oid, String signature, String key, String symbol, boolean securityDefiner, String acl) {}
 
-  /** One native member function of one extension version, as its pristine install creates it. */
+  /**
+   * One native member function of one extension version, as its pristine install creates it. For an
+   * aggregate, {@code supports} lists its support functions by slot and key ({@code
+   * transfn=key;finalfn=key}, slot order); it is empty for any other function (revision 5).
+   */
   record Member(
       String extension,
       String version,
       String key,
       String symbol,
       boolean securityDefiner,
-      boolean withheld) {}
+      boolean withheld,
+      String supports) {
+
+    /** A member that is not an aggregate. */
+    Member(
+        String extension,
+        String version,
+        String key,
+        String symbol,
+        boolean securityDefiner,
+        boolean withheld) {
+      this(extension, version, key, symbol, securityDefiner, withheld, "");
+    }
+  }
+
+  /**
+   * One core native function (oid below 16384, in no extension) as initdb ships it (R7,
+   * C-PR45-3-17). Keyed by signature, not oid: an oid of {@link #FIXED_OID_LIMIT} or more is given
+   * by initdb at run time, so it is not a stable key (the baseline refuses such oids for the same
+   * reason). {@code library} is {@code -} when the function has none.
+   */
+  record CoreNative(
+      String signature, String language, String symbol, String library, boolean securityDefiner) {}
 
   /** One row of {@code pg_available_extension_versions} on the pinned image. */
   record Version(String extension, String version, boolean installable, String error) {}
@@ -60,13 +87,19 @@ final class PinnedCatalogue {
   private final List<Withheld> baseline;
   private final List<Member> manifest;
   private final List<Version> versions;
+  private final List<CoreNative> core;
 
   private PinnedCatalogue(
-      int major, List<Withheld> baseline, List<Member> manifest, List<Version> versions) {
+      int major,
+      List<Withheld> baseline,
+      List<Member> manifest,
+      List<Version> versions,
+      List<CoreNative> core) {
     this.major = major;
     this.baseline = List.copyOf(baseline);
     this.manifest = List.copyOf(manifest);
     this.versions = List.copyOf(versions);
+    this.core = List.copyOf(core);
   }
 
   static String baselineResource(int major) {
@@ -79,6 +112,10 @@ final class PinnedCatalogue {
 
   static String versionsResource(int major) {
     return "pg-extension-versions-" + major + ".tsv";
+  }
+
+  static String coreResource(int major) {
+    return "pg-core-native-" + major + ".tsv";
   }
 
   /**
@@ -95,7 +132,8 @@ final class PinnedCatalogue {
     Optional<String> base = read(open, baselineResource(major));
     Optional<String> members = read(open, manifestResource(major));
     Optional<String> listed = read(open, versionsResource(major));
-    if (base.isEmpty() && members.isEmpty() && listed.isEmpty()) {
+    Optional<String> natives = read(open, coreResource(major));
+    if (base.isEmpty() && members.isEmpty() && listed.isEmpty() && natives.isEmpty()) {
       return Optional.empty();
     }
     String missing =
@@ -103,7 +141,9 @@ final class PinnedCatalogue {
             ? baselineResource(major)
             : members.isEmpty()
                 ? manifestResource(major)
-                : listed.isEmpty() ? versionsResource(major) : "";
+                : listed.isEmpty()
+                    ? versionsResource(major)
+                    : natives.isEmpty() ? coreResource(major) : "";
     if (!missing.isEmpty()) {
       throw malformed(missing, 0, "the file is missing while the other pinned files exist");
     }
@@ -112,12 +152,20 @@ final class PinnedCatalogue {
             major,
             parseBaseline(baselineResource(major), base.orElseThrow()),
             parseManifest(manifestResource(major), members.orElseThrow()),
-            parseVersions(versionsResource(major), listed.orElseThrow())));
+            parseVersions(versionsResource(major), listed.orElseThrow()),
+            parseCore(coreResource(major), natives.orElseThrow())));
   }
 
   /** Builds and cross-checks a catalogue: every manifest version has an installable line. */
   static PinnedCatalogue of(
-      int major, List<Withheld> baseline, List<Member> manifest, List<Version> versions) {
+      int major,
+      List<Withheld> baseline,
+      List<Member> manifest,
+      List<Version> versions,
+      List<CoreNative> core) {
+    if (core.isEmpty()) {
+      throw malformed(coreResource(major), 0, "the core record has no line");
+    }
     if (baseline.isEmpty()) {
       throw malformed(baselineResource(major), 0, "the baseline has no line");
     }
@@ -141,7 +189,7 @@ final class PinnedCatalogue {
                 + versionsResource(major));
       }
     }
-    return new PinnedCatalogue(major, baseline, manifest, versions);
+    return new PinnedCatalogue(major, baseline, manifest, versions, core);
   }
 
   /**
@@ -154,7 +202,7 @@ final class PinnedCatalogue {
 
   /** No files: statement 1 then reports only the rules that need none (R2, R4). */
   static PinnedCatalogue none(int major) {
-    return new PinnedCatalogue(major, List.of(), List.of(), List.of());
+    return new PinnedCatalogue(major, List.of(), List.of(), List.of(), List.of());
   }
 
   int major() {
@@ -176,6 +224,10 @@ final class PinnedCatalogue {
 
   List<Version> versions() {
     return versions;
+  }
+
+  List<CoreNative> core() {
+    return core;
   }
 
   /** Names of extensions with at least one version the image installs. */
@@ -263,7 +315,7 @@ final class PinnedCatalogue {
       if (line.startsWith("#")) {
         continue;
       }
-      String[] f = columns(file, n, line, 6);
+      String[] f = columns(file, n, line, 7);
       if (!keys.add(f[0] + "\t" + f[1] + "\t" + f[2])) {
         throw malformed(file, n, "extension " + f[0] + " " + f[1] + " lists " + f[2] + " twice");
       }
@@ -274,9 +326,46 @@ final class PinnedCatalogue {
               text(file, n, f[2]),
               f[3],
               flag(file, n, f[4]),
-              flag(file, n, f[5])));
+              flag(file, n, f[5]),
+              supports(file, n, f[6])));
     }
     return out;
+  }
+
+  /** The R7 record: one line per core native function, by signature (C-PR45-3-17). */
+  static List<CoreNative> parseCore(String file, String text) {
+    var out = new ArrayList<CoreNative>();
+    var signatures = new HashSet<String>();
+    int n = 0;
+    for (String line : lines(file, text)) {
+      n++;
+      if (line.startsWith("#")) {
+        continue;
+      }
+      String[] f = columns(file, n, line, 5);
+      if (!signatures.add(f[0])) {
+        throw malformed(file, n, "signature " + f[0] + " appears twice");
+      }
+      if (!f[1].equals("internal") && !f[1].equals("c")) {
+        throw malformed(file, n, "the language must be internal or c");
+      }
+      out.add(
+          new CoreNative(
+              text(file, n, f[0]),
+              f[1],
+              text(file, n, f[2]),
+              text(file, n, f[3]),
+              flag(file, n, f[4])));
+    }
+    return out;
+  }
+
+  /** The support column of a manifest line: empty, or {@code slot=key} items joined by ';'. */
+  private static String supports(String file, int n, String text) {
+    if (!text.isEmpty() && !text.matches("[a-z]+=[^;=]+\\)(;[a-z]+=[^;=]+\\))*")) {
+      throw malformed(file, n, "the support column is not slot=key items joined by ';'");
+    }
+    return text;
   }
 
   static List<Version> parseVersions(String file, String text) {

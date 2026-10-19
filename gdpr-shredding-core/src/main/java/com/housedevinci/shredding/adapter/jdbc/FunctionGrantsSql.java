@@ -14,13 +14,14 @@ import java.util.List;
 import java.util.OptionalLong;
 
 /**
- * Runs the two statements of the function-grants leg (C-PR45-3) and returns their rows as facts. It
- * judges nothing: {@link FunctionGrants} applies every rule in Java.
+ * Runs the three statements of the function-grants leg (C-PR45-3) and returns their rows as facts.
+ * It judges nothing: {@link FunctionGrants} applies every rule in Java.
  *
- * <p>The statements are the resource files {@value #STATEMENT_ONE} and {@value #STATEMENT_TWO},
- * beside the pinned files, in the house dialect, so the name-qualification gate lexes them whole.
- * Java binds parameters only; it never puts text into them. A missing or unreadable file is {@code
- * SHRED-SCHEMA-005}. Both run on the caller's connection, inside its pinned window.
+ * <p>The statements are the resource files {@value #STATEMENT_ONE}, {@value #STATEMENT_TWO} and
+ * {@value #STATEMENT_THREE}, beside the pinned files, in the house dialect, so the
+ * name-qualification gate lexes them whole. Java binds parameters only; it never puts text into
+ * them. A missing or unreadable file is {@code SHRED-SCHEMA-005}. Both run on the caller's
+ * connection, inside its pinned window.
  */
 final class FunctionGrantsSql {
 
@@ -28,6 +29,7 @@ final class FunctionGrantsSql {
 
   static final String STATEMENT_ONE = "function-grants-1.sql";
   static final String STATEMENT_TWO = "function-grants-2.sql";
+  static final String STATEMENT_THREE = "function-grants-3.sql";
 
   /** The first oid PostgreSQL assigns after initdb (FirstNormalObjectId). */
   static final long FIRST_NORMAL_OID = 16_384;
@@ -67,7 +69,23 @@ final class FunctionGrantsSql {
       String key,
       long owner,
       String ownerName,
-      String kind) {}
+      String kind,
+      String library) {}
+
+  /**
+   * One row of statement 3: one (caller object, slot, support function). {@code slot} is the
+   * 1-based position in the branch's slot list ({@link FunctionGrants#SLOTS}).
+   */
+  record CallerFact(
+      String kind,
+      long oid,
+      String label,
+      long owner,
+      String ownerName,
+      boolean usable,
+      int slot,
+      long fn,
+      String fnKey) {}
 
   static int major(Connection c) throws SQLException {
     try (PreparedStatement ps =
@@ -89,6 +107,11 @@ final class FunctionGrantsSql {
   /** The text of statement 2, read from the jar. */
   static String statementTwo() {
     return resource(STATEMENT_TWO);
+  }
+
+  /** The text of statement 3, read from the jar. */
+  static String statementThree() {
+    return resource(STATEMENT_THREE);
   }
 
   static List<RecordFact> records(
@@ -149,7 +172,33 @@ final class FunctionGrantsSql {
                   text(rs, 12),
                   rs.getLong(13),
                   text(rs, 14),
-                  text(rs, 15)));
+                  text(rs, 15),
+                  text(rs, 16)));
+        }
+      }
+    }
+    return out;
+  }
+
+  /** Statement 3: the caller objects (design revision 5, rule R6). */
+  static List<CallerFact> callers(Connection c, long[] reachOids) throws SQLException {
+    var out = new ArrayList<CallerFact>();
+    try (PreparedStatement ps = c.prepareStatement(statementThree())) {
+      ps.setArray(1, c.createArrayOf("oid", boxed(reachOids)));
+      ps.setArray(2, c.createArrayOf("oid", boxed(reachOids)));
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          out.add(
+              new CallerFact(
+                  text(rs, 1),
+                  rs.getLong(2),
+                  text(rs, 3),
+                  rs.getLong(4),
+                  text(rs, 5),
+                  rs.getBoolean(6),
+                  rs.getInt(7),
+                  rs.getLong(8),
+                  text(rs, 9)));
         }
       }
     }

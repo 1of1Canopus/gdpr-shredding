@@ -92,15 +92,18 @@ class FunctionGrantsPg16Test extends FunctionGrantsCases {
   @Test
   void core_function_rewritten_to_language_c_with_a_withheld_symbol_refuses() throws SQLException {
     // C-PR45-3-16: CREATE OR REPLACE keeps oid 4099 and makes it run pg_file_write's code.
+    // R7 refuses first (005); leg 2 still names the withheld code, as "also seen" (mutation 27).
     var db = db();
     exec(
         db.su(),
         "CREATE EXTENSION adminpack",
         "CREATE OR REPLACE FUNCTION pg_catalog.pg_rotate_logfile_old() RETURNS boolean"
             + " LANGUAGE c AS '$libdir/adminpack', 'pg_file_write_v1_1'");
-    refuses(
+    unverifiable(
         db.app(),
-        "PUBLIC " + held("pg_catalog.pg_rotate_logfile_old()"),
+        "core function pg_catalog.pg_rotate_logfile_old() is language c, symbol"
+            + " pg_file_write_v1_1",
+        "also seen: PUBLIC " + held("pg_catalog.pg_rotate_logfile_old()"),
         "symbol pg_file_write_v1_1");
   }
 }

@@ -84,12 +84,13 @@ public final class SqlSites {
   /**
    * Statement arguments that are a file read rather than a composed string. Accepted by name, with
    * the resource-identity assertion in the gate as the condition (the review's ruling on the first
-   * of the two unresolved sites). {@code statementOne()} and {@code statementTwo()} are the two
-   * statement files of the function-grants check (C-PR45-3, ruling of 2026-10-20, item 4); the gate
-   * lexes each file whole and asserts it is the resource the module loads.
+   * of the two unresolved sites). {@code statementOne()}, {@code statementTwo()} and {@code
+   * statementThree()} are the statement files of the function-grants check (C-PR45-3, ruling of
+   * 2026-10-20, item 4, and design revision 5); the gate lexes each file whole and asserts it is
+   * the resource the module loads.
    */
   public static final Set<String> FILE_READ_CALLS =
-      Set.of("schemaScript()", "statementOne()", "statementTwo()");
+      Set.of("schemaScript()", "statementOne()", "statementTwo()", "statementThree()");
 
   /**
    * The one-statement window of {@code JdbcSupport.inOneStatementWindow} (design section 4). A

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Writes the pinned files of the function-grants check (C-PR45-3) for one PostgreSQL major:
-#   pg-initdb-withheld-<major>.tsv, pg-extension-manifest-<major>.tsv, pg-extension-versions-<major>.tsv
+#   pg-initdb-withheld-<major>.tsv, pg-extension-manifest-<major>.tsv, pg-extension-versions-<major>.tsv,
+#   pg-core-native-<major>.tsv
 # into gdpr-shredding-core/src/main/resources/com/housedevinci/shredding/adapter/jdbc/.
 #
 # The files are never typed by hand. The generator starts the pinned image of that major by digest
