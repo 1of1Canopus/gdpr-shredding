@@ -7,6 +7,18 @@ All notable changes to this project. The format follows
 ## [Unreleased]
 
 ### Security
+- **C-PR45-3 (MEDIUM): EXECUTE on a function the server ships withheld passed the gate.**
+  `GRANT EXECUTE ON FUNCTION pg_catalog.lo_export(oid, text) TO shredding_app` let the runtime
+  role write any file as the server's user, and startup reported it unprivileged. Startup now
+  refuses with `SHRED-SCHEMA-004` when the login role, any role it can reach, or PUBLIC holds
+  EXECUTE on a function the server or a shipped extension withholds, on a native alias of one, on
+  native `SECURITY DEFINER` code, on native code made by hand outside an extension, or on an
+  extension member that is no longer as shipped. The record is compared with pinned files for
+  PostgreSQL 16 and 17 in the core jar; another major, a rewritten baseline signature or an
+  extension version the files do not list refuses with `SHRED-SCHEMA-005`. New property
+  `shredding.jdbc.accepted-third-party-extensions` (empty by default, WARN at every startup when
+  set) trusts the native functions of a named third-party extension such as `vector`. See
+  SECURITY-NOTES, "Functions the server ships withheld, and native code".
 - **C-PR-1d (LOW): core stayed silent in the weaker privileged mode.**
   `JdbcSupport.verifySchema(ds, true)` and `initializeAndVerifySchema(ds, true)` accepted a
   privileged runtime role and logged nothing. The javadoc left the WARN to the caller, so a team
