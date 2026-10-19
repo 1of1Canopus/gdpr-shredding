@@ -1497,7 +1497,7 @@ final class SchemaVerification {
     checkSequenceOwnerAndPrivileges(c, session.schemaOid(), reach, owns, excess, missing);
     checkTablePrivileges(c, relations, excess, missing);
     checkObjectGrants(c, session, reach, excess);
-    checkColumnGrants(c, relations, reach, excess);
+    checkColumnGrants(c, session.schemaOid(), relations, reach, excess);
     checkParameterGrants(c, reach, excess);
     checkFunctionGrants(c, reach, accepted, excess);
   }
@@ -1702,7 +1702,7 @@ final class SchemaVerification {
    * {@link #checkColumnUpdate}.
    */
   private static void checkColumnGrants(
-      Connection c, Map<String, Relation> relations, Reach reach, List<String> excess)
+      Connection c, long ns, Map<String, Relation> relations, Reach reach, List<String> excess)
       throws SQLException {
     if (relations.isEmpty()) {
       return;
@@ -1723,7 +1723,9 @@ final class SchemaVerification {
                 + " FROM pg_catalog.pg_class c"
                 + " JOIN pg_catalog.pg_attribute a ON (a.attrelid OPERATOR(pg_catalog.=) c.oid),"
                 + " pg_catalog.aclexplode(a.attacl) x"
-                + " WHERE (c.oid OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))"
+                + " WHERE ((c.oid OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))"
+                + " OR ((c.relnamespace OPERATOR(pg_catalog.=) ?)"
+                + " AND (c.relname OPERATOR(pg_catalog.=) ?)))"
                 + " AND (a.attnum OPERATOR(pg_catalog.>) 0) AND NOT a.attisdropped"
                 + " AND (x.privilege_type OPERATOR(pg_catalog.<>) 'UPDATE')"
                 + " AND (x.grantee OPERATOR(pg_catalog.<>) c.relowner)"
@@ -1734,7 +1736,9 @@ final class SchemaVerification {
       ps.setArray(1, oids);
       ps.setArray(2, tableOids);
       ps.setArray(3, tableOids);
-      ps.setArray(4, oids);
+      ps.setLong(4, ns);
+      ps.setString(5, SchemaExpectations.SEQUENCE);
+      ps.setArray(6, oids);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           String table = rs.getString(1);
@@ -1748,15 +1752,22 @@ final class SchemaVerification {
               && reach.name(grantee).equals(reach.current())) {
             continue;
           }
-          TablePrivileges want =
-              SchemaExpectations.PRIVILEGES.stream()
-                  .filter(p -> p.table().equals(table))
-                  .findFirst()
-                  .orElseThrow();
-          boolean allowed =
-              "UPDATE".equals(privilege)
-                  ? want.required().contains("UPDATE") || column.equals(want.updatableColumn())
-                  : want.required().contains(privilege);
+          boolean allowed;
+          if (table.equals(SchemaExpectations.SEQUENCE)) {
+            // C-PR45-6: a column grant on the sequence is judged against the sequence allow list,
+            // like a whole-sequence grant.
+            allowed = SchemaExpectations.SEQUENCE_ALLOWED.contains(privilege);
+          } else {
+            TablePrivileges want =
+                SchemaExpectations.PRIVILEGES.stream()
+                    .filter(p -> p.table().equals(table))
+                    .findFirst()
+                    .orElseThrow();
+            allowed =
+                "UPDATE".equals(privilege)
+                    ? want.required().contains("UPDATE") || column.equals(want.updatableColumn())
+                    : want.required().contains(privilege);
+          }
           if (!allowed) {
             excess.add(
                 reach.holder(grantee) + "holds " + privilege + " on " + table + "." + column);

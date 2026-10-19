@@ -7,7 +7,7 @@
 ### Build
 `CIPHER_PROBE_MAVEN=1 ./mvnw -B verify`, Docker up: BUILD SUCCESS, 321 + 239 + 17 = 577 tests,
 0 failures, 0 skipped. CI on 8134d70: Build & test, DCO, Reference guard, Vulnerability scan,
-Release dry run green; Cipher probes still running at review time.
+Release dry run green; Security probes still running at review time.
 
 ### P-1 (LOW), confirmed closed
 `probe_non_bmp_hook_name_breaks_the_chain` is green. Decoder now steps by code point; the encoder

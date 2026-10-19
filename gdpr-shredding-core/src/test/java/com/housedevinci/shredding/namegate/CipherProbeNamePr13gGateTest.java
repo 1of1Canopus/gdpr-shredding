@@ -12,7 +12,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * Cipher probes, review of PR A of the name-resolution design, second pass (2026-10-03).
+ * Security probes, review of PR A of the name-resolution design, second pass (2026-10-03).
  *
  * <p>Head {@code e918d02}. Every statement below is accepted by the gate on this head and resolves
  * a name through {@code search_path} on PostgreSQL 16.14 (the digest the module's own tests pin),

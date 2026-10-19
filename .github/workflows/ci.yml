@@ -150,7 +150,7 @@ jobs:
   # its own probes assert that this very job cannot be disabled by a comment, by `if: false`,
   # or by renaming it.
   cipher-probes:
-    name: Cipher probes
+    name: Security probes
     runs-on: ubuntu-latest
     permissions:
       contents: read

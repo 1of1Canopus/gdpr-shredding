@@ -166,7 +166,7 @@ the fix needs no third review pass: the probe below turning green is the confirm
 | `cipher-probe-c-pr-1-split-package.sh` on this build's core jar | GREEN, exit 0: `sealing violation: can't seal package ...adapter.jdbc: already defined` |
 | Same probe on the core jar nested in the sample's Boot jar (`BOOT-INF/lib`) | GREEN, exit 0; manifest carries `Sealed: true` |
 | `cipher-probe-c-pr-1-starter-scope.sh` | GREEN, exit 0: both `StarterArchitectureTest` rules fail on the planted class (core 574 green, starter 302 with 2 failures) |
-| CI run 38979015817 on `f96326c` | 6 of 6 green; the Cipher probes job prints both GREEN lines |
+| CI run 38979015817 on `f96326c` | 6 of 6 green; the Security probes job prints both GREEN lines |
 
 ### Mutations (each applied alone, run, restored)
 
