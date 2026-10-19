@@ -305,6 +305,45 @@ class NameQualificationGateTest {
     }
   }
 
+  /** The statement files of the function-grants check, as {@code FunctionGrantsSql} names them. */
+  private static final List<String> STATEMENT_FILES =
+      List.of(
+          "/com/housedevinci/shredding/adapter/jdbc/function-grants-1.sql",
+          "/com/housedevinci/shredding/adapter/jdbc/function-grants-2.sql");
+
+  /**
+   * C-PR45-3, ruling item 4: each statement file is lexed whole under the strict rule, and the file
+   * lexed is the resource the module loads, byte for byte. Its only inputs are bind parameters.
+   */
+  @Test
+  void the_function_grants_statement_files_resolve_no_name_and_are_the_shipped_resources()
+      throws IOException {
+    for (String resource : STATEMENT_FILES) {
+      String onDisk = SqlSites.read(Path.of("src/main/resources" + resource));
+      try (InputStream in = NameQualificationGateTest.class.getResourceAsStream(resource)) {
+        assertThat(in).describedAs(resource + " must be on the classpath").isNotNull();
+        assertThat(onDisk)
+            .describedAs("the file the gate lexes must be the resource the module loads")
+            .isEqualTo(new String(in.readAllBytes(), StandardCharsets.UTF_8));
+      }
+      assertThat(SqlNameLexer.refusals(onDisk)).describedAs(resource).isEmpty();
+      assertThat(onDisk).describedAs(resource + ": bind parameters only").contains("?");
+      assertThat(onDisk)
+          .describedAs(resource + ": no CTE")
+          .doesNotContainPattern(
+              "(?i)\\bWITH\\s+(RECURSIVE\\s+)?\\w+\\s+AS\\s+(NOT\\s+)?(MATERIALIZED\\s+)?\\(");
+    }
+  }
+
+  /** The negative: one qualifier removed from a real statement file is refused by the lexer. */
+  @Test
+  void a_statement_file_with_one_qualifier_removed_is_refused() {
+    String text = SqlSites.read(Path.of("src/main/resources" + STATEMENT_FILES.get(0)));
+    String broken = text.replaceFirst("pg_catalog\\.pg_proc AS p", "pg_proc AS p");
+    assertThat(broken).isNotEqualTo(text);
+    assertThat(SqlNameLexer.refusals(broken)).isNotEmpty();
+  }
+
   // --------------------------------------------- one negative per rule class
 
   private static List<String> rules(String sql) {

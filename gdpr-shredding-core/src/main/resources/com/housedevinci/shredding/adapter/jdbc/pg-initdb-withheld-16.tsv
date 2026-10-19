@@ -1,0 +1,62 @@
+764	pg_catalog.lo_import(text)	lo_import(text)	be_lo_import	f	@owner=X
+765	pg_catalog.lo_export(oid, text)	lo_export(oid,text)	be_lo_export	f	@owner=X
+767	pg_catalog.lo_import(text, oid)	lo_import(text,oid)	be_lo_import_with_oid	f	@owner=X
+2172	pg_catalog.pg_backup_start(label text, fast boolean)	pg_backup_start(text,bool)	pg_backup_start	f	@owner=X
+2274	pg_catalog.pg_stat_reset()	pg_stat_reset()	pg_stat_reset	f	@owner=X
+2282	pg_catalog.pg_get_backend_memory_contexts(OUT name text, OUT ident text, OUT parent text, OUT level integer, OUT total_bytes bigint, OUT total_nblocks bigint, OUT free_bytes bigint, OUT free_chunks bigint, OUT used_bytes bigint)	pg_get_backend_memory_contexts()	pg_get_backend_memory_contexts	f	@owner=X,pg_read_all_stats=X
+2307	pg_catalog.pg_stat_reset_slru(text)	pg_stat_reset_slru(text)	pg_stat_reset_slru	f	@owner=X
+2621	pg_catalog.pg_reload_conf()	pg_reload_conf()	pg_reload_conf	f	@owner=X
+2622	pg_catalog.pg_rotate_logfile()	pg_rotate_logfile()	pg_rotate_logfile_v2	f	@owner=X
+2623	pg_catalog.pg_stat_file(filename text, OUT size bigint, OUT access timestamp with time zone, OUT modification timestamp with time zone, OUT change timestamp with time zone, OUT creation timestamp with time zone, OUT isdir boolean)	pg_stat_file(text)	pg_stat_file_1arg	f	@owner=X
+2624	pg_catalog.pg_read_file(text, bigint, bigint)	pg_read_file(text,int8,int8)	pg_read_file_off_len	f	@owner=X
+2625	pg_catalog.pg_ls_dir(text)	pg_ls_dir(text)	pg_ls_dir_1arg	f	@owner=X
+2739	pg_catalog.pg_backup_stop(wait_for_archive boolean, OUT lsn pg_lsn, OUT labelfile text, OUT spcmapfile text)	pg_backup_stop(bool)	pg_backup_stop	f	@owner=X
+2848	pg_catalog.pg_switch_wal()	pg_switch_wal()	pg_switch_wal	f	@owner=X
+3071	pg_catalog.pg_wal_replay_pause()	pg_wal_replay_pause()	pg_wal_replay_pause	f	@owner=X
+3072	pg_catalog.pg_wal_replay_resume()	pg_wal_replay_resume()	pg_wal_replay_resume	f	@owner=X
+3098	pg_catalog.pg_create_restore_point(text)	pg_create_restore_point(text)	pg_create_restore_point	f	@owner=X
+3293	pg_catalog.pg_read_file(text, bigint, bigint, boolean)	pg_read_file(text,int8,int8,bool)	pg_read_file_off_len_missing	f	@owner=X
+3295	pg_catalog.pg_read_binary_file(text, bigint, bigint, boolean)	pg_read_binary_file(text,int8,int8,bool)	pg_read_binary_file_off_len_missing	f	@owner=X
+3297	pg_catalog.pg_ls_dir(text, boolean, boolean)	pg_ls_dir(text,bool,bool)	pg_ls_dir	f	@owner=X
+3307	pg_catalog.pg_stat_file(filename text, missing_ok boolean, OUT size bigint, OUT access timestamp with time zone, OUT modification timestamp with time zone, OUT change timestamp with time zone, OUT creation timestamp with time zone, OUT isdir boolean)	pg_stat_file(text,bool)	pg_stat_file	f	@owner=X
+3329	pg_catalog.pg_show_all_file_settings(OUT sourcefile text, OUT sourceline integer, OUT seqno integer, OUT name text, OUT setting text, OUT applied boolean, OUT error text)	pg_show_all_file_settings()	show_all_file_settings	f	@owner=X
+3353	pg_catalog.pg_ls_logdir(OUT name text, OUT size bigint, OUT modification timestamp with time zone)	pg_ls_logdir()	pg_ls_logdir	f	@owner=X,pg_monitor=X
+3354	pg_catalog.pg_ls_waldir(OUT name text, OUT size bigint, OUT modification timestamp with time zone)	pg_ls_waldir()	pg_ls_waldir	f	@owner=X,pg_monitor=X
+3400	pg_catalog.pg_config(OUT name text, OUT setting text)	pg_config()	pg_config	f	@owner=X
+3401	pg_catalog.pg_hba_file_rules(OUT rule_number integer, OUT file_name text, OUT line_number integer, OUT type text, OUT database text[], OUT user_name text[], OUT address text, OUT netmask text, OUT auth_method text, OUT options text[], OUT error text)	pg_hba_file_rules()	pg_hba_file_rules	f	@owner=X
+3436	pg_catalog.pg_promote(wait boolean, wait_seconds integer)	pg_promote(bool,int4)	pg_promote	f	@owner=X
+3775	pg_catalog.pg_stat_reset_shared(text)	pg_stat_reset_shared(text)	pg_stat_reset_shared	f	@owner=X
+3776	pg_catalog.pg_stat_reset_single_table_counters(oid)	pg_stat_reset_single_table_counters(oid)	pg_stat_reset_single_table_counters	f	@owner=X
+3777	pg_catalog.pg_stat_reset_single_function_counters(oid)	pg_stat_reset_single_function_counters(oid)	pg_stat_reset_single_function_counters	f	@owner=X
+3800	pg_catalog.pg_current_logfile()	pg_current_logfile()	pg_current_logfile	f	@owner=X
+3801	pg_catalog.pg_current_logfile(text)	pg_current_logfile(text)	pg_current_logfile_1arg	f	@owner=X
+3826	pg_catalog.pg_read_file(text)	pg_read_file(text)	pg_read_file_all	f	@owner=X
+3827	pg_catalog.pg_read_binary_file(text, bigint, bigint)	pg_read_binary_file(text,int8,int8)	pg_read_binary_file_off_len	f	@owner=X
+3828	pg_catalog.pg_read_binary_file(text)	pg_read_binary_file(text)	pg_read_binary_file_all	f	@owner=X
+4543	pg_catalog.pg_log_backend_memory_contexts(integer)	pg_log_backend_memory_contexts(int4)	pg_log_backend_memory_contexts	f	@owner=X
+5029	pg_catalog.pg_ls_tmpdir(OUT name text, OUT size bigint, OUT modification timestamp with time zone)	pg_ls_tmpdir()	pg_ls_tmpdir_noargs	f	@owner=X,pg_monitor=X
+5030	pg_catalog.pg_ls_tmpdir(tablespace oid, OUT name text, OUT size bigint, OUT modification timestamp with time zone)	pg_ls_tmpdir(oid)	pg_ls_tmpdir_1arg	f	@owner=X,pg_monitor=X
+5031	pg_catalog.pg_ls_archive_statusdir(OUT name text, OUT size bigint, OUT modification timestamp with time zone)	pg_ls_archive_statusdir()	pg_ls_archive_statusdir	f	@owner=X,pg_monitor=X
+5052	pg_catalog.pg_get_shmem_allocations(OUT name text, OUT off bigint, OUT size bigint, OUT allocated_size bigint)	pg_get_shmem_allocations()	pg_get_shmem_allocations	f	@owner=X,pg_read_all_stats=X
+6003	pg_catalog.pg_replication_origin_create(text)	pg_replication_origin_create(text)	pg_replication_origin_create	f	@owner=X
+6004	pg_catalog.pg_replication_origin_drop(text)	pg_replication_origin_drop(text)	pg_replication_origin_drop	f	@owner=X
+6005	pg_catalog.pg_replication_origin_oid(text)	pg_replication_origin_oid(text)	pg_replication_origin_oid	f	@owner=X
+6006	pg_catalog.pg_replication_origin_session_setup(text)	pg_replication_origin_session_setup(text)	pg_replication_origin_session_setup	f	@owner=X
+6007	pg_catalog.pg_replication_origin_session_reset()	pg_replication_origin_session_reset()	pg_replication_origin_session_reset	f	@owner=X
+6008	pg_catalog.pg_replication_origin_session_is_setup()	pg_replication_origin_session_is_setup()	pg_replication_origin_session_is_setup	f	@owner=X
+6009	pg_catalog.pg_replication_origin_session_progress(boolean)	pg_replication_origin_session_progress(bool)	pg_replication_origin_session_progress	f	@owner=X
+6010	pg_catalog.pg_replication_origin_xact_setup(pg_lsn, timestamp with time zone)	pg_replication_origin_xact_setup(pg_lsn,timestamptz)	pg_replication_origin_xact_setup	f	@owner=X
+6011	pg_catalog.pg_replication_origin_xact_reset()	pg_replication_origin_xact_reset()	pg_replication_origin_xact_reset	f	@owner=X
+6012	pg_catalog.pg_replication_origin_advance(text, pg_lsn)	pg_replication_origin_advance(text,pg_lsn)	pg_replication_origin_advance	f	@owner=X
+6013	pg_catalog.pg_replication_origin_progress(text, boolean)	pg_replication_origin_progress(text,bool)	pg_replication_origin_progress	f	@owner=X
+6014	pg_catalog.pg_show_replication_origin_status(OUT local_id oid, OUT external_id text, OUT remote_lsn pg_lsn, OUT local_lsn pg_lsn)	pg_show_replication_origin_status()	pg_show_replication_origin_status	f	@owner=X
+6170	pg_catalog.pg_stat_reset_replication_slot(text)	pg_stat_reset_replication_slot(text)	pg_stat_reset_replication_slot	f	@owner=X
+6208	pg_catalog.pg_read_file(text, boolean)	pg_read_file(text,bool)	pg_read_file_all_missing	f	@owner=X
+6209	pg_catalog.pg_read_binary_file(text, boolean)	pg_read_binary_file(text,bool)	pg_read_binary_file_all_missing	f	@owner=X
+6230	pg_catalog.pg_stat_have_stats(text, oid, oid)	pg_stat_have_stats(text,oid,oid)	pg_stat_have_stats	f	@owner=X
+6232	pg_catalog.pg_stat_reset_subscription_stats(oid)	pg_stat_reset_subscription_stats(oid)	pg_stat_reset_subscription_stats	f	@owner=X
+6250	pg_catalog.pg_ident_file_mappings(OUT map_number integer, OUT file_name text, OUT line_number integer, OUT map_name text, OUT sys_name text, OUT pg_username text, OUT error text)	pg_ident_file_mappings()	pg_ident_file_mappings	f	@owner=X
+6270	pg_catalog.pg_ls_logicalsnapdir(OUT name text, OUT size bigint, OUT modification timestamp with time zone)	pg_ls_logicalsnapdir()	pg_ls_logicalsnapdir	f	@owner=X,pg_monitor=X
+6271	pg_catalog.pg_ls_logicalmapdir(OUT name text, OUT size bigint, OUT modification timestamp with time zone)	pg_ls_logicalmapdir()	pg_ls_logicalmapdir	f	@owner=X,pg_monitor=X
+6272	pg_catalog.pg_ls_replslotdir(slot_name text, OUT name text, OUT size bigint, OUT modification timestamp with time zone)	pg_ls_replslotdir(text)	pg_ls_replslotdir	f	@owner=X,pg_monitor=X
+6305	pg_catalog.pg_log_standby_snapshot()	pg_log_standby_snapshot()	pg_log_standby_snapshot	f	@owner=X
