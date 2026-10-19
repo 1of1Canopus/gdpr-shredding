@@ -29,7 +29,7 @@ with one routing question for the coordinator (C-PR45-3, below).
 | C-PR45-1 | MEDIUM | The owner of the verified schema passes when it has revoked CREATE from itself, and can DROP the erasure log |
 | C-PR45-2 | LOW | A column-level REFERENCES grant to the runtime role itself passes the allow list, and a foreign key then blocks key destruction |
 | C-PR45-3 | MEDIUM | EXECUTE on a server-file function (for example `lo_export`) passes, while the role that carries the same right is refused. DESIGN STOP |
-| C-PR45-4 | LOW | The required "Cipher probes" check is red on this head: two release probes plant the old six-argument constructor |
+| C-PR45-4 | LOW | The required probe check (job `cipher-probes`) is red on this head: two release probes plant the old six-argument constructor |
 
 ### Numbers on this head
 
@@ -44,7 +44,7 @@ with one routing question for the coordinator (C-PR45-3, below).
 | Load point re-measured: pin 16, 406 live backends, 32 kB text, the module's fingerprint statement verbatim, server time, 100 calls | hot 0.047 / 0.084 / 0.158 ms; cold on a running backend 1.71 / 2.42 / 4.88 ms; hot plan shows `pg_stat_get_activity (never executed)`. Matches the PR table |
 | `tools/cipher-probe-c-pr38-p2-changelog-codespans.sh` | GREEN |
 | `tools/cipher-probe-release-pipeline.sh` | 90 fixed, 3 weak (the same three as on `main`) |
-| `tools/cipher-probe-c-pr-1-split-package.sh`, `-starter-scope.sh` | both UNVERIFIABLE: the planted class does not compile. CI "Cipher probes" is red on 285fd1c (C-PR45-4) |
+| `tools/cipher-probe-c-pr-1-split-package.sh`, `-starter-scope.sh` | both UNVERIFIABLE: the planted class does not compile. CI probe check (job `cipher-probes`) is red on 285fd1c (C-PR45-4) |
 | New probes from this pass | 5 tests in `internal/gdpr-shredding/probes/CipherProbePr45Test.java`: 3 RED (C-PR45-1, -2, -3), 2 confirmations green |
 
 ### Checks the brief asked for
@@ -159,13 +159,13 @@ The no-allowance rule says no merge while it is open. I recommend: the coordinat
 design page now; this PR merges after C-PR45-1, -2 and -4; the 0.2.1 tag waits for C-PR45-3.
 The coordinator decides.
 
-### C-PR45-4 (LOW): the required "Cipher probes" check is red on this head
+### C-PR45-4 (LOW): the required probe check (job `cipher-probes`) is red on this head
 
 **What goes wrong.** `tools/cipher-probe-c-pr-1-split-package.sh` and
 `tools/cipher-probe-c-pr-1-starter-scope.sh` plant a class that calls `new DatabaseIdentity(0L,
 0L, "app", 2200L, "app", "app")`. This PR added two components (`loginRoleOid`, `loginRole`), so
 the planted class no longer compiles. Both probes stop as UNVERIFIABLE. The CI job
-"Cipher probes" fails on 285fd1c (run 39111970629, step "Probe the sealed jdbc package"). The
+probe check (job `cipher-probes`) fails on 285fd1c (run 39111970629, step "Probe the sealed jdbc package"). The
 builder report lists the suite green and does not mention it.
 
 **Example.** Today nobody can tell from CI whether the jdbc package is still sealed against a
@@ -175,7 +175,7 @@ forged `VerifiedSchema`. The probe that answers that question cannot run.
 DatabaseIdentity(0L, 0L, "app", 2200L, "app", "app", 0L, "app")`. Run both with
 `CIPHER_PROBE_MAVEN=1` and show in the PR body that each is GREEN for the right reason (split
 package: a sealing violation at run time; starter scope: both architecture rules report the
-planted class). CI "Cipher probes" green before the PR leaves draft.
+planted class). CI probe check (job `cipher-probes`) green before the PR leaves draft.
 
 ### Deviations from the design page, judged
 
@@ -200,3 +200,137 @@ planted class). CI "Cipher probes" green before the PR leaves draft.
 
 The probe file for the fixer is `internal/gdpr-shredding/probes/CipherProbePr45Test.java`. The
 load-point script is `internal/gdpr-shredding/probes/cipher-probe-pr45-load-point.sh`.
+
+## Pass 2 (2026-10-19)
+
+Head reviewed: `4cd0e1e` (fix pass on top of `main` `f2e15b4`; `main` is now `d24b2ae`, a probe
+check rename, no code change). Scope: the fix commits `b5ed156` and `f378af9`, and the line break
+moved in this file by `4cd0e1e`. That last change only re-wraps one paragraph of C-PR45-4: no word
+changed (checked with a word diff). In this pass I also replaced the old display name of the probe check by
+its job id in the pass-1 text, because the reference guard on `main` now refuses that name. Only
+that name changed.
+
+### Verdict: MERGE WITH FIXES
+
+C-PR45-1, C-PR45-2 and C-PR45-4 are fixed. Their probes are green and the three mutations are
+caught. C-PR45-3 stays open in its own design and PR, as the coordinator ruled; the tag waits for
+it. This pass found three INFO problems. Two are small corrections for this PR (C-PR45-6, C-PR45-7).
+One joins the C-PR45-3 design page (C-PR45-5).
+
+| Id | Severity | Status | One line |
+| --- | --- | --- | --- |
+| C-PR45-1 | MEDIUM | fixed | schema ownership leg in `checkRole`; probe green |
+| C-PR45-2 | LOW | fixed | column skip limited to UPDATE rows; probe green |
+| C-PR45-3 | MEDIUM | open, DESIGN STOP, own PR | probe still red, as expected |
+| C-PR45-4 | LOW | fixed | both release probes GREEN for the right reason; CI probe check (job `cipher-probes`) green |
+| C-PR45-5 | INFO | new, routed to the C-PR45-3 design | a view owned by the owner lets the runtime role UPDATE `wrapped_key`; the gate passes |
+| C-PR45-6 | INFO | new, fix in this PR | a column SELECT grant on the erasure log's sequence passes the sequence allow list |
+| C-PR45-7 | INFO | new, fix in this PR | the split-package probe reports a non-compiling plant as exit 1 (its RED code), with no UNVERIFIABLE line |
+
+### Numbers on this head
+
+| What | Result |
+| --- | --- |
+| `./mvnw -B clean verify`, Docker up, no other Maven run | green: core 709, starter 315, sample 25; 0 failures, 0 errors, 0 skipped; JaCoCo gate met |
+| CI on `4cd0e1e` | all six checks green, probe check (job `cipher-probes`) included |
+| Pass-1 probes (`CipherProbePr45Test`, unchanged) | 4 of 5 green; C-PR45-1 and C-PR45-2 probes green; C-PR45-3 probe red (expected) |
+| Pass-2 probes (`CipherProbePr45Pass2Test`, 5 tests) | 3 confirmations green; 2 probes red (C-PR45-5, C-PR45-6) |
+| Mutation 1: schema ownership leg off (`if (false)`) | caught: the 2 builder tests, the pass-1 probe and 2 pass-2 confirmations go red |
+| Mutation 2: unconditional current-role skip restored | caught: the builder test and the pass-1 probe go red |
+| Mutation 3: plant back to six arguments | caught by both scripts (non-zero exit). Starter scope: "UNVERIFIABLE: the planted copy did not compile", exit 2. Split package: javac error, exit 1, no verdict line (C-PR45-7) |
+| `cipher-probe-c-pr-1-split-package.sh`, `CIPHER_PROBE_MAVEN=1` | GREEN: "sealing violation" |
+| `cipher-probe-c-pr-1-starter-scope.sh`, `CIPHER_PROBE_MAVEN=1` | GREEN: both architecture rules name the planted class |
+
+A correction to pass 1: I wrote that both release probes "stop as UNVERIFIABLE". The starter-scope
+probe did. The split-package probe stopped on the javac error with exit 1. Both failed CI, so the
+finding stands as written; the wording was wrong. The PR body's mutation line repeats it ("shown for
+both scripts"); the fixer corrects that line with C-PR45-7.
+
+### Attacks the brief asked for
+
+| Attack | Result |
+| --- | --- |
+| Schema owner reached only through a SET FALSE, INHERIT FALSE grant | refused, 004, "login role ... owns, or is a member of the owner of, schema public". `confirm_schema_owner_reached_only_through_a_set_false_grant_refuses`. Such a member cannot use the owner's rights; refusing it matches the table legs and errs on the safe side |
+| Schema owned by a group the login is a NOINHERIT member of | refused; covered by the builder test `noinherit_member_of_a_schema_owning_group_refuses_naming_the_login_and_the_schema`. Confirmed |
+| Module in a non-public schema `shred` | the leg judges `shred`, the schema the gate verifies. The runtime role owning `public` passes, which is right: it cannot drop objects in `shred`. Owning `shred` with CREATE revoked refuses with "owns schema shred", after the role showed it could drop the erasure log (rolled back). `confirm_module_in_a_non_public_schema_judges_that_schema` |
+| Column grants on the sequence | PostgreSQL accepts only SELECT on a sequence column; it warns and drops UPDATE, INSERT and REFERENCES. The SELECT grant passes the gate: C-PR45-6. UPDATE on the sequence (it allows `setval`) through a group in reach is refused |
+| Column grants on views | PostgreSQL accepts them. No leg reads views: C-PR45-5 |
+| The UPDATE allow list | `encryption_count` on the data key table and `erased_at` on the erased-subject table, nothing else. UPDATE on `wrapped_key` to the runtime role, and on `state` and `tenant` through an INHERIT FALSE group, all refuse. `encryption_count` cannot re-key. `erased_at` is inert: the append-only trigger refuses every UPDATE of that table. `confirm_update_on_a_key_column_refuses_directly_and_through_reach` |
+| Probe scripts, UNVERIFIABLE path for a non-compiling plant | both fail closed (non-zero exit). Only starter scope says UNVERIFIABLE: C-PR45-7 |
+
+### C-PR45-5 (INFO): a view owned by the owner writes the data key table for the runtime role
+
+**What goes wrong.** A view (with the default `security_invoker = false`) reads and writes its
+base table with the view owner's rights. The column and table legs read the module's four tables
+only. So a view over the data key table, owned by the owner, with UPDATE granted to the runtime
+role, passes the gate. The role then rewrites any column of a key row.
+
+**Example.** The owner runs `CREATE VIEW rpt.keys AS SELECT * FROM public.shredding_data_key;
+GRANT SELECT, UPDATE ON rpt.keys TO shredding_app`. The runtime role runs `UPDATE rpt.keys SET
+wrapped_key = '\x02', state = 'X'`. It succeeds and the gate still starts.
+
+**Measured bound.** I found no gain beyond rights the role already holds on that table. The wrap
+uses AAD `tenant|subject|keyVersion`, so a moved or copied wrapped key does not unwrap under
+another identity. INSERT plus SELECT already lets the role copy a key row under a new name. DELETE
+already lets it destroy a key. The three guarded tables carry row triggers on the base table. I did
+not measure a write through a view on them in this pass.
+
+**Repro.** `CipherProbePr45Pass2Test.probe_view_owned_by_the_owner_lets_the_runtime_role_update_wrapped_key`,
+red on `4cd0e1e`.
+
+**Fix: routed to the C-PR45-3 design page.** This is the same line as C-PR45-3 and the stated L19
+limit: rights reached through an object a privileged role owns (a function, a view, a rule), not
+through a role. The design page must take views and rules as paths. It either refuses them, or
+states the limit with the bound above in SECURITY-NOTES (the stated-limits paragraph today names
+`SECURITY DEFINER` functions only), and says why the line is drawn there. If the page refuses, the
+probe flips green. If it states the limit, I reclassify the probe to a confirmation at that review.
+No code in this PR.
+
+### C-PR45-6 (INFO): a column SELECT grant on the sequence passes
+
+**What goes wrong.** `SEQUENCE_ALLOWED` says USAGE is the only privilege a role in reach may hold on
+`shredding_erasure_seq_seq`. A table-level SELECT on it is refused. A column-level SELECT
+(`GRANT SELECT (last_value) ON shredding_erasure_seq_seq TO shredding_app`) passes, because
+`checkColumnGrants` scans the four tables only. This is the C-PR45-2 shape on one more object.
+Measured impact: the role reads `last_value`. It can already read every sequence value in the
+erasure log, so it gains nothing.
+
+**Repro.** `CipherProbePr45Pass2Test.probe_column_select_grant_on_the_sequence_passes_the_sequence_allow_list`,
+red on `4cd0e1e` at the first refusal.
+
+**Fix (correction, fixer).** In `SchemaVerification.checkColumnGrants`, include the sequence's oid
+in the column scan (second branch of the union) and judge its rows against `SEQUENCE_ALLOWED`, so
+every column grant on the sequence refuses. Message: "holds SELECT on
+shredding_erasure_seq_seq.last_value". Test: the probe moved into `LoginRoleReachTest`. Mutation:
+take the sequence out of the scan; expected red: the probe.
+
+### C-PR45-7 (INFO): the split-package probe gives the wrong verdict for a non-compiling plant
+
+**What goes wrong.** The script's contract is exit 0 GREEN, 1 RED, 2 UNVERIFIABLE. Its `javac` line
+runs under `set -e`. When the planted class does not compile, javac exits 1 and the script stops
+with exit 1, the RED code, and prints no verdict line. CI still fails, so nothing passes that
+should not. But the result says "the package is forgeable" when the truth is "not checked".
+
+**Example.** Plant the six-argument constructor again. The script prints the javac error and exits
+1. The starter-scope probe in the same state prints "UNVERIFIABLE: the planted copy did not compile"
+and exits 2.
+
+**Repro.** `internal/.../probes/cipher-probe-pr45-p2-split-package-unverifiable.sh <module root>`,
+RED on `4cd0e1e`. With the fix below applied to a copy, it is GREEN, and the unmodified plant still
+gives "GREEN: the JVM refused the split package".
+
+**Fix (correction, fixer).** In `tools/cipher-probe-c-pr-1-split-package.sh`, end the javac line
+with `|| { echo "UNVERIFIABLE: the planted class did not compile"; exit 2; }`. Correct the PR body's
+mutation 3 line to the real output of each script. Mutation: none needed; the probe is the test.
+
+### Fix list for the fixer
+
+1. C-PR45-6: sequence in the column scan, judged against `SEQUENCE_ALLOWED`; probe into
+   `LoginRoleReachTest`; mutation shown red.
+2. C-PR45-7: verdict line and exit 2 on a javac failure in the split-package probe; PR body line.
+3. C-PR45-5: no code here. Add views and rules to the C-PR45-3 design page's paths.
+4. Merge `main` (`d24b2ae`) before the PR leaves draft: the reference guard on `main` refuses the
+   old check name, and this branch still holds it in files outside this review.
+
+The probe files are `internal/gdpr-shredding/probes/CipherProbePr45Pass2Test.java` and
+`internal/gdpr-shredding/probes/cipher-probe-pr45-p2-split-package-unverifiable.sh`.
