@@ -94,6 +94,13 @@ All notable changes to this project. The format follows
   schema was verified on. They are removed in 0.3.0.
 
 ### Fixed
+- The reference guard now refuses the moved-private document names in any letter case (for
+  example a lower-case copy of a private document), in content and in file names. The bare
+  review and release words stay upper case only, because in lower case they are plain English.
+- The reference guard also refuses the review word followed by a dot or a dash, and the release word followed by
+  a dot, in any letter case (for example a lower-case copy of a review document, or a release runbook with
+  another extension). Its self-test now pins the upper-case form of five document names and the combined
+  file-name cases (lower-case private name, the slug re-scan, a mixed-case jar member).
 - The reference guard (`tools/check-private-references.sh`) now reads file names as well as
   file content, with the same pattern: every tracked path in the tree, every member name and
   the file name of each built jar. One shape is admitted by name only, a security review

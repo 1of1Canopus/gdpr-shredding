@@ -184,14 +184,8 @@ class MovingTargetStarterTest {
       }
       hikari.getHikariConfigMXBean().setUsername("intruder");
       hikari.getHikariConfigMXBean().setPassword("intruder-pw");
-      hikari.getHikariPoolMXBean().softEvictConnections();
-      // Precondition: the path is reachable, new connections log in as the other role.
-      try (var c = hikari.getConnection();
-          var s = c.createStatement();
-          var rs = s.executeQuery("SELECT session_user")) {
-        rs.next();
-        assertThat(rs.getString(1)).isEqualTo("intruder");
-      }
+      // Precondition: the path is reachable and the pool holds only new-login connections.
+      awaitPoolLoggedInAs(hikari, "intruder");
 
       Throwable thrown = catchThrowable(() -> keys.currentForWrite(TenantId.of("m10"), subject()));
 
@@ -199,6 +193,47 @@ class MovingTargetStarterTest {
       assertThat(thrown.getMessage()).contains("login role").contains("\"intruder\"");
     }
     assertThat(keyRows(POSTGRES.getJdbcUrl())).isEqualTo(verifiedBefore);
+  }
+
+  /**
+   * Evicts until every connection the pool holds logs in as {@code user}. A connection that was
+   * idle or still being opened with the old login when the credentials changed would otherwise be
+   * handed out, and the control correctly lets an old-login connection pass. The wait is bounded.
+   */
+  private static void awaitPoolLoggedInAs(HikariDataSource hikari, String user)
+      throws SQLException {
+    long deadline = System.nanoTime() + java.time.Duration.ofSeconds(30).toNanos();
+    while (System.nanoTime() < deadline) {
+      hikari.getHikariPoolMXBean().softEvictConnections();
+      int total = Math.max(hikari.getHikariPoolMXBean().getTotalConnections(), 1);
+      List<java.sql.Connection> held = new ArrayList<>();
+      boolean allNew = true;
+      try {
+        for (int i = 0; i < total; i++) {
+          var c = hikari.getConnection();
+          held.add(c);
+          try (var s = c.createStatement();
+              var rs = s.executeQuery("SELECT session_user")) {
+            rs.next();
+            allNew &= user.equals(rs.getString(1));
+          }
+        }
+      } finally {
+        for (var c : held) {
+          c.close();
+        }
+      }
+      if (allNew && hikari.getHikariPoolMXBean().getTotalConnections() == held.size()) {
+        return;
+      }
+      try {
+        Thread.sleep(50);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new IllegalStateException(e);
+      }
+    }
+    throw new IllegalStateException("pool did not converge on login " + user);
   }
 
   // ------------------------------------------------------------------ M13
