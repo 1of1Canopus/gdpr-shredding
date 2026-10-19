@@ -19,6 +19,18 @@ All notable changes to this project. The format follows
   `shredding.jdbc.accepted-third-party-extensions` (empty by default, WARN at every startup when
   set) trusts the native functions of a named third-party extension such as `vector`. See
   SECURITY-NOTES, "Functions the server ships withheld, and native code".
+- **C-PR45-3-15 (MEDIUM): an aggregate handed out a withheld function.** PostgreSQL checks
+  EXECUTE on an aggregate's support functions as the aggregate's owner. A superuser's
+  `CREATE AGGREGATE public.readall(bool) (sfunc = pg_catalog.pg_read_file, ...)` let the runtime
+  role read any file. Startup now refuses, with `SHRED-SCHEMA-004`, an aggregate, trusted
+  language or operator that reach or PUBLIC may use, owned outside reach, whose support
+  function, validator, handler or estimator falls under the function-grants rules (R6). A
+  hand-made aggregate over ordinary functions no longer refuses. The extension manifest gains a
+  seventh column, the support functions of each contrib aggregate.
+- **C-PR45-3-17 (MEDIUM): a core function rewritten in place passed.** `CREATE OR REPLACE` keeps
+  the oid of `pg_catalog.lower(text)` while it changes its language, library and symbol. A new
+  pinned file per major, `pg-core-native-<major>.tsv`, records every core native function;
+  a rewritten, missing or unrecorded one refuses with `SHRED-SCHEMA-005` (R7).
 - **C-PR-1d (LOW): core stayed silent in the weaker privileged mode.**
   `JdbcSupport.verifySchema(ds, true)` and `initializeAndVerifySchema(ds, true)` accepted a
   privileged runtime role and logged nothing. The javadoc left the WARN to the caller, so a team

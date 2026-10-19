@@ -1454,13 +1454,47 @@ SELECT p.oid::regprocedure                                  AS function,
  ORDER BY 1, 6;
 ```
 
-**Open, blocks the release: functions called by other catalogue objects.** PostgreSQL checks
-EXECUTE on an aggregate's support functions as the aggregate's owner, not as the caller. The
-same shape exists for other objects that call a function (operators, casts, type input and output,
-and more), and for a core function rewritten in place under its oid. A design revision covers them
-before the next release. Until then: an aggregate owned by a role in reach is not refused (its
-support functions run with reach's rights, which legs 1 to 3 judge); an aggregate owned by any
-other role, outside an extension, is refused as native code made by hand.
+**Objects that call a function for you (R6).** Some catalogue objects name a function that the
+server calls on your behalf. For an aggregate, the server checks EXECUTE on its support functions
+as the aggregate's owner, not as the caller. For a language validator, a language handler and an
+operator's estimators, it checks nothing. Example: a superuser runs `CREATE AGGREGATE
+public.readall(bool) (sfunc = pg_catalog.pg_read_file, stype = text, initcond = 'PG_VERSION')`.
+The runtime role then runs `SELECT public.readall(true)` and reads the file, although a direct
+`pg_read_file` call is "permission denied". Startup now refuses such an object with
+`SHRED-SCHEMA-004` when three things hold: PUBLIC or a role in reach may use it (EXECUTE on the
+aggregate, USAGE on a trusted language; anyone may use an operator); a role outside reach owns
+it; and the function in one of its slots falls under any rule above (in W, an alias, native
+`SECURITY DEFINER`, native code made by hand, or a shipped member not as shipped).
+The slots judged are all eight aggregate slots (transition, final, combine, serialise,
+deserialise, and the three moving-aggregate slots), the language handler, inline handler and
+validator, and the operator's restrict and join estimators. An operator's own function is checked
+as the caller (measured), so it is left to the server. An object owned by a role in reach is not
+judged here: its owner checks run as reach, and the legs above judge what reach holds. A
+hand-made aggregate over ordinary functions (`sfunc = pg_catalog.int4pl`) verifies: an aggregate
+runs no code of its own. The manifest records each contrib aggregate's support functions, so a
+contrib aggregate re-created over another support function (`citext`'s `min` over
+`citext_larger`) is not as shipped. Four withheld built-ins fit a language validator's `(oid)`
+slot on 16 and 17: the three `pg_stat_reset_*(oid)` functions and `pg_ls_tmpdir(oid)`.
+
+**Paths the server refuses by signature.** Type input and output (and receive, send,
+typmod, analyze, subscript), range canonical and subtype-diff functions, operator class support
+functions, access method handlers, conversions, text search parsers and templates, foreign-data
+wrapper handlers and validators, transforms, triggers and event triggers. Each slot takes or
+returns `cstring` or `internal`, or has a shape that no withheld built-in fits. A test counts the
+fits on each pin and expects zero, so a pin bump that adds one turns the build red. A cast is not
+in this list: a withheld function may fit a new cast (`lo_import(text)` returns `oid`; not tried), but the
+server checks EXECUTE on a cast's function as the caller (measured), as for an operator's.
+
+**Core functions rewritten in place (R7).** `CREATE OR REPLACE FUNCTION` keeps a function's oid
+and may change its language, library and symbol. Example: a superuser rewrites
+`pg_catalog.lower(text)` as `LANGUAGE c AS '$libdir/pg_trgm', 'similarity'`. A fourth pinned file
+per major, `pg-core-native-<major>.tsv`, records every native function below oid 16384 in no
+extension: signature, language, symbol, library, rights mode. It is keyed by signature, not oid,
+because initdb gives some functions their oids at run time, so an oid is not a stable key.
+A recorded function that is missing or differs, or a native function below oid 16384 in no
+extension that the file does not list, refuses with `SHRED-SCHEMA-005`. What the other legs saw
+is listed after it as "also seen". Limit: a core function in SQL that is rewritten as `SECURITY
+DEFINER` is the wrapper of limit L19, not R7.
 
 **Outside this check.** `pg_logical_emit_message` is PUBLIC by default and lets any role append to
 the WAL; a loop of large messages fills the WAL disk. Watch WAL size, or revoke it from PUBLIC (the
