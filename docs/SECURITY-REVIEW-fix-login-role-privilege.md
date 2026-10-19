@@ -164,9 +164,9 @@ The coordinator decides.
 **What goes wrong.** `tools/cipher-probe-c-pr-1-split-package.sh` and
 `tools/cipher-probe-c-pr-1-starter-scope.sh` plant a class that calls `new DatabaseIdentity(0L,
 0L, "app", 2200L, "app", "app")`. This PR added two components (`loginRoleOid`, `loginRole`), so
-the planted class no longer compiles. Both probes stop as UNVERIFIABLE. The CI job "Cipher
-probes" fails on 285fd1c (run 39111970629, step "Probe the sealed jdbc package"). The builder
-report lists the suite green and does not mention it.
+the planted class no longer compiles. Both probes stop as UNVERIFIABLE. The CI job
+"Cipher probes" fails on 285fd1c (run 39111970629, step "Probe the sealed jdbc package"). The
+builder report lists the suite green and does not mention it.
 
 **Example.** Today nobody can tell from CI whether the jdbc package is still sealed against a
 forged `VerifiedSchema`. The probe that answers that question cannot run.
