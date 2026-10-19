@@ -76,6 +76,14 @@ All notable changes to this project. The format follows
   from a table the role owned could then pin a data key and make the key-destroying `DELETE`
   fail. The current role is now skipped only for `UPDATE` (judged by its own check); any other
   column privilege beyond the allow list refuses.
+- **C-PR45-6 (INFO): a column-level `SELECT` grant on the erasure log's sequence passed.** The
+  column check scanned the four tables only. `GRANT SELECT (last_value) ON
+  shredding_erasure_seq_seq TO shredding_app` passed, while the same grant on the whole sequence
+  refused. The column scan now includes the sequence and judges its column grants against the
+  sequence allow list (`USAGE` only), so every column grant on it refuses.
+- **C-PR45-7 (INFO): the split-package release probe gave the wrong verdict for a non-compiling
+  planted class.** `tools/cipher-probe-c-pr-1-split-package.sh` stopped with exit 1 (its RED code)
+  and no verdict line. It now prints `UNVERIFIABLE: the planted class did not compile` and exits 2.
 
 ### Changed
 - The core jar now seals the package `com.housedevinci.shredding.adapter.jdbc` (manifest entry

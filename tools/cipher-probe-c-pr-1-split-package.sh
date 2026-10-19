@@ -52,7 +52,8 @@ public final class Forge {
   }
 }
 JAVA
-javac -cp "$JAR" -d "$WORK/out" "$WORK/src/$PKG/Forge.java"
+javac -cp "$JAR" -d "$WORK/out" "$WORK/src/$PKG/Forge.java" \
+  || { echo "UNVERIFIABLE: the planted class did not compile"; exit 2; }
 set +e
 OUT=$(java -cp "$JAR:$WORK/out" com.housedevinci.shredding.adapter.jdbc.Forge 2>&1)
 set -e

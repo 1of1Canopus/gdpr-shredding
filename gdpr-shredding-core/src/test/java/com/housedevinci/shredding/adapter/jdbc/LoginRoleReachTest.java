@@ -605,7 +605,7 @@ class LoginRoleReachTest {
     exec(su, "CREATE ROLE " + role + " LOGIN PASSWORD '" + PASSWORD + "' " + attributes);
   }
 
-  // ------------------------------------------------------------------ C-PR45-1, C-PR45-2
+  // ------------------------------------------------------------------ C-PR45-1, C-PR45-2, C-PR45-6
 
   /**
    * C-PR45-1. The owner of the verified schema can DROP every table in it, whoever owns the table,
@@ -692,6 +692,26 @@ class LoginRoleReachTest {
 
       assertThat(refusal.code()).isEqualTo(ErrorCodes.RUNTIME_ROLE_PRIVILEGED);
       assertThat(refusal).hasMessageContaining("REFERENCES on shredding_data_key");
+    }
+  }
+
+  /**
+   * C-PR45-6. A column-level SELECT grant on the erasure log's sequence refuses, like the
+   * whole-sequence grant. PostgreSQL accepts only SELECT on a sequence column.
+   */
+  @Test
+  void column_select_grant_on_the_sequence_refuses_naming_the_column() throws SQLException {
+    String db = "p45_seq_col";
+    TwoRoleCluster.install(PG, db);
+    try (var admin = TwoRoleCluster.superuser(PG, db);
+        var app = TwoRoleCluster.app(PG, db)) {
+      exec(admin, "GRANT SELECT (last_value) ON shredding_erasure_seq_seq TO " + APP);
+
+      var refusal = refusal(app);
+
+      assertThat(refusal.code()).isEqualTo(ErrorCodes.RUNTIME_ROLE_PRIVILEGED);
+      assertThat(refusal)
+          .hasMessageContaining("holds SELECT on shredding_erasure_seq_seq.last_value");
     }
   }
 
