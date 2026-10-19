@@ -312,7 +312,7 @@ formatting commit (`3d08811`) and one comment edit (`1bf1d52`). This is the last
 | `CipherProbe*` classes | 63, all green, none changed except as noted below |
 | The five pass-1 probes | green: `CipherProbePr18Test` 4/4, `CipherProbePr18StarterTest` 1/1 |
 | Pass-1 probes compared with the copies kept outside the tree | identical once whitespace is ignored. `3d08811` re-wrapped two comment blocks and changed no assertion |
-| CI at `1bf1d52` | 6 of 6 green: Build & test, Cipher probes, DCO sign-off, Reference guard, Release dry run, Vulnerability scan |
+| CI at `1bf1d52` | 6 of 6 green: Build & test, Security probes, DCO sign-off, Reference guard, Release dry run, Vulnerability scan |
 | New findings | 1 INFO (C-18-7), its probe RED on `1bf1d52` |
 
 ### Pass-1 findings, closed by their probes

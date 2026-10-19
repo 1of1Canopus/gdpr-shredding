@@ -7,7 +7,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * Cipher probes, review of PR A of the name-resolution design (2026-10-03).
+ * Security probes, review of PR A of the name-resolution design (2026-10-03).
  *
  * <p>Each test states a statement the gate accepts today and that PostgreSQL 16.15 resolves through
  * {@code search_path} on a session whose path names {@code pg_catalog} last. Measured in a two-role

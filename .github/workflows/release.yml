@@ -106,7 +106,7 @@ jobs:
             | jq -r '[.[]? | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context] | .[]' 2>/dev/null)" \
             || fail "could not parse the branch rules for main"
           missing=""
-          for want in "Build & test" "DCO sign-off" "Cipher probes" "Reference guard"; do
+          for want in "Build & test" "DCO sign-off" "Security probes" "Reference guard"; do
             printf '%s\n' "$contexts" | grep -qxF "$want" || missing="$missing\n  - $want"
           done
           if [ -n "$missing" ]; then
