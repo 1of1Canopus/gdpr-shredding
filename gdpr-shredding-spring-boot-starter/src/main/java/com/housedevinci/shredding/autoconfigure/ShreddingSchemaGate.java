@@ -54,8 +54,12 @@ public final class ShreddingSchemaGate {
     var jdbc = Objects.requireNonNull(properties, "properties").getJdbc();
     this.verdict =
         jdbc.isInitializeSchema()
-            ? JdbcSupport.initializeAndVerifySchema(dataSource, true)
-            : JdbcSupport.verifySchema(dataSource, jdbc.isAllowPrivilegedRuntimeRole());
+            ? JdbcSupport.initializeAndVerifySchema(
+                dataSource, true, jdbc.getAcceptedThirdPartyExtensions())
+            : JdbcSupport.verifySchema(
+                dataSource,
+                jdbc.isAllowPrivilegedRuntimeRole(),
+                jdbc.getAcceptedThirdPartyExtensions());
     warn(jdbc);
     verdict
         .indexWarnings()

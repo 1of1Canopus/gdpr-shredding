@@ -149,6 +149,28 @@ public class ShreddingProperties {
     private boolean allowPrivilegedRuntimeRole = false;
 
     /**
+     * Third-party extensions whose native functions are trusted as shipped (C-PR45-3, limit L20 in
+     * SECURITY-NOTES). Empty by default, and empty is fail closed: a native function of an
+     * extension the pinned PostgreSQL image does not ship, that the runtime role or PUBLIC may
+     * execute, refuses startup with {@code SHRED-SCHEMA-004}. Example: {@code vector}.
+     *
+     * <p>Each entry is trimmed; a blank entry refuses to start. The name of an extension the pinned
+     * image ships (for example {@code adminpack} or {@code AdminPack}) refuses to start: those are
+     * judged against the pinned manifest and need no acceptance. A name the image lists but cannot
+     * install ({@code plperl}) may be listed. A non-empty list WARNs at every startup.
+     */
+    private List<String> acceptedThirdPartyExtensions = new ArrayList<>();
+
+    public List<String> getAcceptedThirdPartyExtensions() {
+      return acceptedThirdPartyExtensions;
+    }
+
+    public void setAcceptedThirdPartyExtensions(List<String> acceptedThirdPartyExtensions) {
+      this.acceptedThirdPartyExtensions =
+          acceptedThirdPartyExtensions == null ? new ArrayList<>() : acceptedThirdPartyExtensions;
+    }
+
+    /**
      * Copies of a blind-index column that this application admits because a {@code PostErasureHook}
      * clears what they keep (audit-table coverage design, section 3c). Empty by default: every
      * trigger on a blind-indexed table, every publication carrying a blind-index column and every
