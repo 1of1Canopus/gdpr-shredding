@@ -1,7 +1,7 @@
 -- C-PR45-3, statement 2: who in reach, or PUBLIC, may execute native code or a function
 -- with a shipped record. One row per (function, grantee); a function nobody of interest may
 -- execute still gives one row with a NULL grantee, so its symbol is known (leg 2, the generator).
--- Facts only: Java applies legs 1 to 3, R3, R5a and R5b to the rows (FunctionGrants).
+-- Facts only: Java applies legs 1 to 3, R3, R5a, R5b and R7 to the rows (FunctionGrants).
 -- Runs inside the gate's pinned window. House dialect: every name qualified, no CTE.
 -- Binds: 1 reach oids (_oid); 2 baseline oids (_oid).
 SELECT p.oid AS oid,
@@ -24,7 +24,8 @@ SELECT p.oid AS oid,
             JOIN pg_catalog.pg_type AS t ON (t.oid OPERATOR(pg_catalog.=) arg.arg)), ')') AS key,
        p.proowner AS owner,
        pg_catalog.pg_get_userbyid(p.proowner)::pg_catalog.text AS owner_name,
-       p.prokind::pg_catalog.text AS kind
+       p.prokind::pg_catalog.text AS kind,
+       p.probin AS library
   FROM pg_catalog.pg_proc AS p
   JOIN pg_catalog.pg_namespace AS n ON (n.oid OPERATOR(pg_catalog.=) p.pronamespace)
   JOIN pg_catalog.pg_language AS l ON (l.oid OPERATOR(pg_catalog.=) p.prolang)
@@ -47,5 +48,7 @@ SELECT p.oid AS oid,
              OR (g.grantee OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid)))
  WHERE (l.lanname OPERATOR(pg_catalog.=) ANY ('{internal,c}'::pg_catalog._name))
     OR (i.objoid IS NOT NULL)
+    -- Every core function, whatever its language, for R7 (C-PR45-3-17).
+    OR (p.oid OPERATOR(pg_catalog.<) 16384::pg_catalog.oid)
     OR (p.oid OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))
  ORDER BY 1, 3

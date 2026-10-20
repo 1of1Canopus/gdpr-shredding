@@ -63,6 +63,12 @@ class PinnedFilesMatchTheImageTest {
 
   @ParameterizedTest
   @ValueSource(ints = {16, 17})
+  void core_native_record_file_equals_a_clean_database_on_each_pin(int major) throws Exception {
+    assertThat(generated(major).core()).isEqualTo(shipped(PinnedCatalogue.coreResource(major)));
+  }
+
+  @ParameterizedTest
+  @ValueSource(ints = {16, 17})
   void pristine_install_of_every_available_extension_version_gives_no_r5_row(int major)
       throws Exception {
     // The generator refuses on any R5 row; reaching here means none. No other leg fires either:

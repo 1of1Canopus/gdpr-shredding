@@ -115,6 +115,112 @@ final class FunctionGrantMessages {
         + " (limit L20)";
   }
 
+  /** R6: a caller object that calls a judged function for reach or PUBLIC (revision 5). */
+  static String caller(FunctionGrants.CallerRow row, PinnedCatalogue catalogue) {
+    String what =
+        switch (row.kind()) {
+          case "agg" -> "aggregate " + text(row.label());
+          case "lang" -> "language " + text(row.label());
+          default -> "operator " + text(row.label());
+        };
+    String use = row.kind().equals("lang") ? "create functions in" : "use";
+    return "PUBLIC or a role in reach may "
+        + use
+        + " "
+        + what
+        + ", owned by "
+        + text(row.ownerName())
+        // Only an aggregate is judged for its owner's place (C-PR47-1): a no-check slot is judged
+        // whoever owns the object, so "outside reach" would be false for a reach-owned language.
+        + (row.kind().equals("agg") ? " outside reach" : "")
+        + ", whose "
+        + text(row.slot())
+        + " is function "
+        + text(row.function())
+        + "; the server runs it with no EXECUTE check for the caller, so the object hands out "
+        + reason(row, catalogue)
+        + ". Drop the object, or rebuild it over functions reach may execute itself (R6)";
+  }
+
+  private static String reason(FunctionGrants.CallerRow row, PinnedCatalogue catalogue) {
+    return switch (row.leg()) {
+      case 1 -> "a function the server ships without EXECUTE for PUBLIC";
+      case 2 ->
+          "the server code (symbol "
+              + text(row.ref())
+              + ") of "
+              + text(row.sameAs())
+              + ", which the server ships without EXECUTE for PUBLIC";
+      case 3 -> "native code that runs with the rights of its owner";
+      case 4 -> "native code created outside any extension";
+      case 5 -> "code that PostgreSQL or a shipped extension withholds from PUBLIC";
+      case 7 ->
+          "a SECURITY DEFINER function that neither PUBLIC nor a role whose rights the login may"
+              + " use may execute, whose body runs with its owner's rights";
+      default ->
+          row.sub() == 1
+              ? "a member of extension "
+                  + text(row.extension())
+                  + " "
+                  + text(row.version())
+                  + " that the PostgreSQL "
+                  + catalogue.major()
+                  + " manifest does not list for that version"
+              : "native code of extension "
+                  + text(row.extension())
+                  + ", which the manifest has no record of";
+    };
+  }
+
+  /** R7, a 005 line: a recorded core function the server no longer has. */
+  static String coreMissing(PinnedCatalogue.CoreNative line, int major) {
+    return "core function "
+        + text(line.signature())
+        + " is missing on this server; PostgreSQL "
+        + major
+        + " ships it as "
+        + shape(line.language(), line.symbol(), line.library())
+        + ": this is not a build the module verified";
+  }
+
+  /** R7, a 005 line: a core function rewritten in place (C-PR45-3-17). */
+  static String coreRewritten(
+      FunctionGrantsSql.ExecuteFact live,
+      String library,
+      PinnedCatalogue.CoreNative line,
+      int major) {
+    return "core function "
+        + text(line.signature())
+        + " is "
+        + shape(live.language(), live.symbol(), library)
+        + (live.securityDefiner() ? ", SECURITY DEFINER" : "")
+        + " on this server; PostgreSQL "
+        + major
+        + " ships it as "
+        + shape(line.language(), line.symbol(), line.library())
+        + (line.securityDefiner() ? ", SECURITY DEFINER" : "")
+        + ". It was rewritten in place (CREATE OR REPLACE keeps the oid); restore it as shipped";
+  }
+
+  /** R7, a 005 line: a native function below the first normal oid that no record lists. */
+  static String coreUnknown(FunctionGrantsSql.ExecuteFact live, String library, int major) {
+    return "core function "
+        + text(live.label())
+        + " ("
+        + shape(live.language(), live.symbol(), library)
+        + ") is not in the PostgreSQL "
+        + major
+        + " core record: this is not a build the module verified";
+  }
+
+  private static String shape(String language, String symbol, String library) {
+    return "language "
+        + text(language)
+        + ", symbol "
+        + text(symbol)
+        + ("-".equals(library) ? "" : ", library " + text(library));
+  }
+
   /** R1, R2, R4: the record DDL rewrote. {@code baseAcl} is the pinned ACL, or empty. */
   static String record(FunctionGrants.RecordRow row, int major, String baseAcl) {
     String fn = text(row.label().isEmpty() ? "oid " + row.oid() : row.label());

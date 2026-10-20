@@ -334,6 +334,8 @@ jobs:
                 com/housedevinci/shredding/adapter/jdbc/pg-initdb-withheld-[0-9][0-9].tsv) continue ;;
                 com/housedevinci/shredding/adapter/jdbc/pg-extension-manifest-[0-9][0-9].tsv) continue ;;
                 com/housedevinci/shredding/adapter/jdbc/pg-extension-versions-[0-9][0-9].tsv) continue ;;
+                # The R7 core record (design revision 5), by exact name: a '*' would match a '/'.
+                com/housedevinci/shredding/adapter/jdbc/pg-core-native-[0-9][0-9].tsv) continue ;;
               esac
               # Path check first: the entry must live under META-INF/ or under the module's
               # own source package root (com/), whatever its extension. This is what refuses

@@ -19,9 +19,10 @@ import org.postgresql.util.PSQLException;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 /**
- * Writes the three pinned files of one PostgreSQL major from a pristine container of the pinned
+ * Writes the four pinned files of one PostgreSQL major from a pristine container of the pinned
  * image (C-PR45-3, revision 4 with C-PR45-3-13): the initdb baseline, the per-version extension
- * manifest and the list of available versions. Never typed by hand: {@code
+ * manifest (with each aggregate's support functions), the list of available versions, and the
+ * record of every core native function (revision 5, R7). Never typed by hand: {@code
  * tools/generate-pinned-catalogue.sh} runs {@link #main}, and the byte-for-byte tests run {@link
  * #generate} and compare.
  *
@@ -40,11 +41,12 @@ final class PinnedCatalogueGenerator {
     }
   }
 
-  /** The three files, as bytes would be written, plus what the self-check saw. */
+  /** The four files, as bytes would be written, plus what the self-check saw. */
   record Output(
       String baseline,
       String manifest,
       String versions,
+      String core,
       int databasesJudged,
       List<String> otherLegRows) {}
 
@@ -60,9 +62,15 @@ final class PinnedCatalogueGenerator {
 
   private static final Comparator<String> C_ORDER = PinnedCatalogue.C_ORDER;
 
+  /**
+   * The login oid statement 3 takes (C-PR47-4). The generator passes no reach, so no CASE branch
+   * calls pg_has_role; oid 10 is the bootstrap superuser, which every cluster has.
+   */
+  private static final long BOOTSTRAP_SUPERUSER = 10L;
+
   private PinnedCatalogueGenerator() {}
 
-  /** {@code major outDir}: starts the pinned image of {@code major}, writes its three files. */
+  /** {@code major outDir}: starts the pinned image of {@code major}, writes its four files. */
   public static void main(String[] args) throws Exception {
     if (args.length != 2) {
       throw new IllegalArgumentException("usage: <major 16|17> <output directory>");
@@ -75,12 +83,15 @@ final class PinnedCatalogueGenerator {
       Files.writeString(out.resolve(PinnedCatalogue.baselineResource(major)), o.baseline());
       Files.writeString(out.resolve(PinnedCatalogue.manifestResource(major)), o.manifest());
       Files.writeString(out.resolve(PinnedCatalogue.versionsResource(major)), o.versions());
+      Files.writeString(out.resolve(PinnedCatalogue.coreResource(major)), o.core());
       System.out.printf(
-          "PostgreSQL %d: baseline %d, manifest %d, versions %d lines; %d databases judged%n",
+          "PostgreSQL %d: baseline %d, manifest %d, versions %d, core %d lines;"
+              + " %d databases judged%n",
           major,
           o.baseline().lines().count(),
           o.manifest().lines().count(),
           o.versions().lines().count(),
+          o.core().lines().count(),
           o.databasesJudged());
     }
   }
@@ -145,13 +156,16 @@ final class PinnedCatalogueGenerator {
       String core = "gen_core";
       create(admin, core);
       dbs.add(core);
+      var cleanCore = facts(pg, core);
+      String coreText = coreText(cleanCore);
       var catalogue =
           PinnedCatalogue.of(
               major,
               PinnedCatalogue.parseBaseline("baseline", baseline),
               PinnedCatalogue.parseManifest("manifest", manifest),
-              PinnedCatalogue.parseVersions("versions", versionsText));
-      proveCoreExemption(facts(pg, core), catalogue, internalWithheld);
+              PinnedCatalogue.parseVersions("versions", versionsText),
+              PinnedCatalogue.parseCore("core", coreText));
+      proveCoreExemption(cleanCore, catalogue, internalWithheld);
       var other = new ArrayList<String>();
       for (String db : dbs) {
         selfCheck(pg, db, catalogue, other);
@@ -161,7 +175,7 @@ final class PinnedCatalogueGenerator {
           s.execute("DROP DATABASE " + db);
         }
       }
-      return new Output(baseline, manifest, versionsText, dbs.size(), List.copyOf(other));
+      return new Output(baseline, manifest, versionsText, coreText, dbs.size(), List.copyOf(other));
     }
   }
 
@@ -324,8 +338,11 @@ final class PinnedCatalogueGenerator {
       PostgreSQLContainer<?> pg, String db, String ext, Map<String, String> internalWithheld)
       throws SQLException {
     var byOid = new TreeMap<Long, List<FunctionGrantsSql.ExecuteFact>>();
+    Map<Long, String> supports;
     try (Connection c = connect(pg, db)) {
       pin(c);
+      supports =
+          FunctionGrants.supports(FunctionGrantsSql.callers(c, new long[0], BOOTSTRAP_SUPERUSER));
       for (var f : FunctionGrantsSql.executes(c, new long[0], new long[0])) {
         if (f.nativeCode() && f.extension().equals(ext)) {
           byOid.computeIfAbsent(f.oid(), k -> new ArrayList<>()).add(f);
@@ -345,10 +362,58 @@ final class PinnedCatalogueGenerator {
               field(f.key()),
               field(f.symbol()),
               f.securityDefiner() ? "t" : "f",
-              withheld ? "t" : "f"));
+              withheld ? "t" : "f",
+              aggregateSupports(f, supports)));
     }
     out.sort(C_ORDER);
     return out;
+  }
+
+  /** The seventh manifest column: an aggregate's support functions, empty for any other. */
+  private static String aggregateSupports(
+      FunctionGrantsSql.ExecuteFact f, Map<Long, String> supports) {
+    if (!f.kind().equals("a")) {
+      return "";
+    }
+    String s = supports.getOrDefault(f.oid(), "");
+    if (s.isEmpty()) {
+      throw new Refused("aggregate " + f.label() + " has no support function in statement 3");
+    }
+    return field(s);
+  }
+
+  /**
+   * The R7 record (C-PR45-3-17): every native function below the first normal oid in no extension,
+   * by signature, from a clean database. Refuses a repeated signature.
+   */
+  static String coreText(List<FunctionGrantsSql.ExecuteFact> cleanCore) {
+    var lines = new TreeMap<String, String>(C_ORDER);
+    var seen = new java.util.HashSet<Long>();
+    for (var f : cleanCore) {
+      if (f.oid() >= FunctionGrantsSql.FIRST_NORMAL_OID
+          || !f.extension().isEmpty()
+          || !f.nativeCode()
+          || !seen.add(f.oid())) {
+        continue;
+      }
+      String line =
+          String.join(
+              "\t",
+              field(f.label()),
+              field(f.language()),
+              field(f.symbol()),
+              field(FunctionGrants.library(f)),
+              f.securityDefiner() ? "t" : "f");
+      if (lines.put(f.label(), line) != null) {
+        throw new Refused("core signature " + f.label() + " appears twice");
+      }
+    }
+    if (lines.isEmpty()) {
+      throw new Refused("the image has no core native function");
+    }
+    var out = new StringBuilder();
+    lines.values().forEach(l -> out.append(l).append('\n'));
+    return out.toString();
   }
 
   /**
@@ -460,7 +525,17 @@ final class PinnedCatalogueGenerator {
       }
       var facts =
           FunctionGrantsSql.executes(c, new long[0], FunctionGrants.baselineOids(catalogue));
-      for (var r : FunctionGrants.judgeExecutes(facts, catalogue, List.of(), java.util.Set.of())) {
+      for (String line : FunctionGrants.judgeCore(facts, catalogue)) {
+        throw new Refused(db + ": R7 " + line);
+      }
+      var callers = FunctionGrantsSql.callers(c, new long[0], BOOTSTRAP_SUPERUSER);
+      for (var r :
+          FunctionGrants.judgeCallers(callers, facts, catalogue, List.of(), java.util.Set.of())) {
+        throw new Refused(db + ": R6 " + r.label() + " " + r.slot() + " " + r.function());
+      }
+      for (var r :
+          FunctionGrants.judgeExecutes(
+              facts, catalogue, List.of(), java.util.Set.of(), FunctionGrants.supports(callers))) {
         if (r.leg() >= 5) {
           throw new Refused(
               db + ": R5 row, leg " + r.leg() + " case " + r.sub() + " on " + r.label());

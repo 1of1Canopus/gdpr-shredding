@@ -309,7 +309,8 @@ class NameQualificationGateTest {
   private static final List<String> STATEMENT_FILES =
       List.of(
           "/com/housedevinci/shredding/adapter/jdbc/function-grants-1.sql",
-          "/com/housedevinci/shredding/adapter/jdbc/function-grants-2.sql");
+          "/com/housedevinci/shredding/adapter/jdbc/function-grants-2.sql",
+          "/com/housedevinci/shredding/adapter/jdbc/function-grants-3.sql");
 
   /**
    * C-PR45-3, ruling item 4: each statement file is lexed whole under the strict rule, and the file

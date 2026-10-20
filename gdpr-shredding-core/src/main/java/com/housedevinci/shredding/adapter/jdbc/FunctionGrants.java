@@ -21,13 +21,16 @@ import java.util.function.IntFunction;
  * function the server or a shipped extension withholds, on an alias of one, on native {@code
  * SECURITY DEFINER} code, on native code made by hand, or on a shipped extension member that is no
  * longer as shipped. The record those rules read is itself checked against the pinned files of
- * {@link PinnedCatalogue}.
+ * {@link PinnedCatalogue}. Design revision 5 adds R6: no object that calls a function with its
+ * owner's rights, or with no EXECUTE check, and that reach or PUBLIC may use, calls such a function
+ * for a role outside reach; and R7: every core native function is as initdb ships it.
  *
  * <p>Runs on the verification's connection, inside its pinned window, after the parameter leg. A
  * finding is a {@code SHRED-SCHEMA-004} line. A server major with no pinned files, a baseline oid
  * whose signature differs (R0), and an installed extension version the manifest does not list (R5v)
- * are {@code SHRED-SCHEMA-005}: the record cannot be judged, and unverifiable is not clean,
- * whatever {@code allow-privileged-runtime-role} says.
+ * and a core native function that differs from its pinned line (R7) are {@code SHRED-SCHEMA-005}:
+ * the record cannot be judged, and unverifiable is not clean, whatever {@code
+ * allow-privileged-runtime-role} says.
  */
 final class FunctionGrants {
 
@@ -50,6 +53,62 @@ final class FunctionGrants {
       String extension,
       String version,
       String symbol) {}
+
+  /** One R6 finding: a caller object that calls a judged function for reach or PUBLIC. */
+  record CallerRow(
+      String kind,
+      long oid,
+      String label,
+      String slot,
+      String ownerName,
+      String function,
+      int leg,
+      int sub,
+      String ref,
+      String sameAs,
+      String extension,
+      String version) {}
+
+  /**
+   * The slots of each caller-object branch of statement 3, in the statement's order: the slot of a
+   * row is its 1-based position here.
+   */
+  static final Map<String, List<String>> SLOTS =
+      Map.of(
+          "agg",
+          List.of(
+              "transfn",
+              "finalfn",
+              "combinefn",
+              "serialfn",
+              "deserialfn",
+              "mtransfn",
+              "minvtransfn",
+              "mfinalfn"),
+          "opr",
+          List.of("oprcode", "oprrest", "oprjoin"),
+          "lang",
+          List.of("handler", "inline", "validator"));
+
+  /**
+   * True when the server checks EXECUTE on the slot's function as the object's owner: every
+   * aggregate slot (by the server's source, and measured for the eight on both pins). R6 skips such
+   * a slot when the owner is in reach: the check then runs as reach.
+   */
+  static boolean ownerChecked(String kind, int slot) {
+    return kind.equals("agg") && slot >= 1;
+  }
+
+  /**
+   * True when the server calls the slot's function with no EXECUTE check at all: a language's
+   * handler, inline handler and validator, and an operator's estimators ({@code oprrest}, {@code
+   * oprjoin}). Measured on both pins (revision 5, round 5 review). R6 judges such a slot whoever
+   * owns the object (C-PR47-1): the owner's rights play no part. An operator's {@code oprcode} is
+   * neither: the server checks it as the caller ({@code permission denied for function}).
+   */
+  static boolean noCheck(String kind, int slot) {
+    return kind.equals("lang") || (kind.equals("opr") && slot != 1);
+  }
 
   static void check(
       Connection c, SchemaVerification.Reach reach, List<String> accepted, List<String> excess)
@@ -99,23 +158,39 @@ final class FunctionGrants {
     if (!unjudged.isEmpty()) {
       throw unverifiable(unjudged, List.of());
     }
+    List<FunctionGrantsSql.ExecuteFact> facts =
+        FunctionGrantsSql.executes(c, reach.oids(), baselineOids(catalogue));
+    List<String> rewritten = judgeCore(facts, catalogue);
     if (superuserLogin(reach)) {
       // "login role X is a superuser" says it all (F28): the bootstrap superuser is the owner in
       // the default ACL of every withheld function, so the leg would list each one.
+      if (!rewritten.isEmpty()) {
+        throw unverifiable(rewritten, List.of());
+      }
       return;
     }
     var reachOids = new HashSet<Long>();
     for (long oid : reach.oids()) {
       reachOids.add(oid);
     }
-    List<FunctionGrantsSql.ExecuteFact> facts =
-        FunctionGrantsSql.executes(c, reach.oids(), baselineOids(catalogue));
-    for (ExecuteRow row : judgeExecutes(facts, catalogue, accepted, reachOids)) {
+    List<FunctionGrantsSql.CallerFact> callers =
+        FunctionGrantsSql.callers(c, reach.oids(), reach.loginOid());
+    var lines = new ArrayList<String>();
+    for (ExecuteRow row : judgeExecutes(facts, catalogue, accepted, reachOids, supports(callers))) {
       long g = row.grantee();
-      excess.add(
+      lines.add(
           FunctionGrantMessages.held(
               row, reach.named(g), g == 0 ? "PUBLIC" : reach.name(g), catalogue));
     }
+    for (CallerRow row : judgeCallers(callers, facts, catalogue, accepted, reachOids)) {
+      lines.add(FunctionGrantMessages.caller(row, catalogue));
+    }
+    if (!rewritten.isEmpty()) {
+      // R7 first: a rewritten core function means the record the other legs read is not the
+      // one this module verified. What they saw is still listed, as "also seen".
+      throw unverifiable(rewritten, lines);
+    }
+    excess.addAll(lines);
   }
 
   static List<FunctionGrantsSql.RecordFact> records(Connection c, PinnedCatalogue catalogue)
@@ -202,20 +277,22 @@ final class FunctionGrants {
 
   // ------------------------------------------------------- statement 2: legs 1 to 3, R3, R5
 
-  /**
-   * Legs 1 to 3, R3 (leg 4), R5a (leg 5) and R5b (leg 6) over the facts of statement 2. Each
-   * (function, grantee) pair is reported once, by its lowest leg, in (function, grantee) order.
-   */
-  static List<ExecuteRow> judgeExecutes(
+  /** What every verdict reads: the baseline oids, the symbols of W, the manifest index. */
+  private record Context(
+      TreeMap<Long, List<FunctionGrantsSql.ExecuteFact>> byOid,
+      Set<Long> baselineOids,
+      Map<String, String> wSymbols,
+      Map<String, String> initdbSymbols,
+      ManifestIndex index) {}
+
+  private static Context context(
       List<FunctionGrantsSql.ExecuteFact> facts,
       PinnedCatalogue catalogue,
-      List<String> accepted,
-      Set<Long> reach) {
+      Map<Long, String> supports) {
     var baselineOids = new HashSet<Long>();
     catalogue.baseline().forEach(w -> baselineOids.add(w.oid()));
     var byOid = new TreeMap<Long, List<FunctionGrantsSql.ExecuteFact>>();
     facts.forEach(f -> byOid.computeIfAbsent(f.oid(), k -> new ArrayList<>()).add(f));
-
     // Symbols of the caller-rights functions in W, and of its initdb part, with the lowest oid.
     var wSymbols = new HashMap<String, String>();
     var initdbSymbols = new HashMap<String, String>();
@@ -231,22 +308,30 @@ final class FunctionGrants {
         initdbSymbols.putIfAbsent(f.symbol(), f.label());
       }
     }
-    var index = new ManifestIndex(catalogue);
+    return new Context(
+        byOid, baselineOids, wSymbols, initdbSymbols, new ManifestIndex(catalogue, supports));
+  }
 
+  /**
+   * Legs 1 to 3, R3 (leg 4), R5a (leg 5) and R5b (leg 6) over the facts of statement 2. Each
+   * (function, grantee) pair is reported once, by its lowest leg, in (function, grantee) order.
+   * {@code supports} holds the live support column of each aggregate ({@link #supports}).
+   */
+  static List<ExecuteRow> judgeExecutes(
+      List<FunctionGrantsSql.ExecuteFact> facts,
+      PinnedCatalogue catalogue,
+      List<String> accepted,
+      Set<Long> reach,
+      Map<Long, String> supports) {
+    var ctx = context(facts, catalogue, supports);
     var out = new ArrayList<ExecuteRow>();
-    for (var list : byOid.values()) {
+    for (var list : ctx.byOid().values()) {
       var f = list.get(0);
       var grantees = list.stream().filter(x -> x.grantee().isPresent()).toList();
       if (grantees.isEmpty()) {
         continue;
       }
-      if (f.kind().equals("a") && reach.contains(f.owner())) {
-        // pending ruling (C-PR45-3-15, design revision 5): an aggregate owned by a role in reach
-        // runs its support functions with reach's rights, so legs 1 to 3 judge what it can call.
-        // An aggregate owned outside reach is not exempt and stays judged below.
-        continue;
-      }
-      Optional<Verdict> v = verdict(f, baselineOids, wSymbols, initdbSymbols, index, accepted);
+      Optional<Verdict> v = verdict(f, ctx, accepted);
       if (v.isEmpty()) {
         continue;
       }
@@ -276,18 +361,22 @@ final class FunctionGrants {
   private record Verdict(int leg, int sub, String ref, String sameAs) {}
 
   private static Optional<Verdict> verdict(
-      FunctionGrantsSql.ExecuteFact f,
-      Set<Long> baselineOids,
-      Map<String, String> wSymbols,
-      Map<String, String> initdbSymbols,
-      ManifestIndex index,
-      List<String> accepted) {
+      FunctionGrantsSql.ExecuteFact f, Context ctx, List<String> accepted) {
+    Set<Long> baselineOids = ctx.baselineOids();
+    ManifestIndex index = ctx.index();
     if (inW(f, baselineOids)) {
       return Optional.of(new Verdict(1, 0, "", ""));
+    }
+    if (f.kind().equals("a")) {
+      // R6 (revision 5): an aggregate runs no code of its own (symbol aggregate_dummy). R6 judges
+      // the functions it calls; R5b still judges a shipped aggregate, support functions included.
+      return index.r5b(f, accepted);
     }
     if (!f.nativeCode()) {
       return Optional.empty();
     }
+    Map<String, String> wSymbols = ctx.wSymbols();
+    Map<String, String> initdbSymbols = ctx.initdbSymbols();
     // Leg 2 (C-PR45-3-16): a core function in language internal can run only server built-ins,
     // so it is compared with the initdb part of W; every other native function with all of W.
     boolean core = f.oid() < FunctionGrantsSql.FIRST_NORMAL_OID && f.extension().isEmpty();
@@ -322,8 +411,10 @@ final class FunctionGrants {
     private final Map<String, PinnedCatalogue.Withheld> baselineSymbol = new HashMap<>();
     private final Set<String> okPairs = new HashSet<>();
     private final Set<String> okExtensions;
+    private final Map<Long, String> supports;
 
-    ManifestIndex(PinnedCatalogue catalogue) {
+    ManifestIndex(PinnedCatalogue catalogue, Map<Long, String> supports) {
+      this.supports = supports;
       for (var m : catalogue.manifest()) {
         byKey.put(m.extension() + "\t" + m.version() + "\t" + m.key(), m);
         if (m.withheld() && !m.securityDefiner()) {
@@ -386,7 +477,8 @@ final class FunctionGrants {
         boolean asShipped =
             entry != null
                 && entry.symbol().equals(f.symbol())
-                && entry.securityDefiner() == f.securityDefiner();
+                && entry.securityDefiner() == f.securityDefiner()
+                && entry.supports().equals(supports.getOrDefault(f.oid(), ""));
         return asShipped ? Optional.empty() : Optional.of(new Verdict(6, 1, "", ""));
       }
       if (okExtensions.contains(f.extension())) {
@@ -400,6 +492,146 @@ final class FunctionGrants {
     private static String line(PinnedCatalogue.Member m) {
       return String.join("\t", m.extension(), m.version(), m.key(), m.symbol());
     }
+  }
+
+  // ------------------------------------------------------- statement 3: R6, caller objects
+
+  /**
+   * The live support column of each aggregate in statement 3, in the manifest's form: {@code
+   * slot=key} items in slot order, joined by ';'.
+   */
+  static Map<Long, String> supports(List<FunctionGrantsSql.CallerFact> callers) {
+    var bySlot = new TreeMap<Long, TreeMap<Integer, String>>();
+    for (var c : callers) {
+      if (c.kind().equals("agg")) {
+        bySlot
+            .computeIfAbsent(c.oid(), k -> new TreeMap<>())
+            .put(c.slot(), slotName(c) + "=" + c.fnKey());
+      }
+    }
+    var out = new HashMap<Long, String>();
+    bySlot.forEach((oid, slots) -> out.put(oid, String.join(";", slots.values())));
+    return out;
+  }
+
+  /**
+   * R6: a caller object that reach or PUBLIC may use, whose slot function falls under leg 1 to 6,
+   * or is a {@code SECURITY DEFINER} function reach may not run as itself (leg 7, C-PR47-2). An
+   * owner-checked slot ({@link #ownerChecked}) is judged only when the owner is outside reach: with
+   * the owner in reach the check runs as reach, and the other legs judge what reach holds. A
+   * no-check slot ({@link #noCheck}) is judged whoever owns the object (C-PR47-1). One row per
+   * (object, slot), in (kind, object, slot) order.
+   */
+  static List<CallerRow> judgeCallers(
+      List<FunctionGrantsSql.CallerFact> callers,
+      List<FunctionGrantsSql.ExecuteFact> facts,
+      PinnedCatalogue catalogue,
+      List<String> accepted,
+      Set<Long> reach) {
+    var ctx = context(facts, catalogue, supports(callers));
+    var out = new ArrayList<CallerRow>();
+    for (var c : callers) {
+      if (!c.usable() || !judged(c, reach)) {
+        continue;
+      }
+      // A function statement 2 has no row for is not native, has no shipped record and is not in
+      // the baseline. It runs with the caller's rights unless it is a revoked definer wrapper.
+      var fact = Optional.ofNullable(ctx.byOid().get(c.fn())).map(list -> list.get(0));
+      Optional<Verdict> v = fact.flatMap(f -> verdict(f, ctx, accepted));
+      if (v.isEmpty() && revokedDefiner(c)) {
+        v = Optional.of(new Verdict(7, 0, "", ""));
+      }
+      if (v.isEmpty()) {
+        continue;
+      }
+      Verdict verdict = v.orElseThrow();
+      out.add(
+          new CallerRow(
+              c.kind(),
+              c.oid(),
+              c.label(),
+              slotName(c),
+              c.ownerName(),
+              fact.map(FunctionGrantsSql.ExecuteFact::label).orElse(c.fnLabel()),
+              verdict.leg(),
+              verdict.sub(),
+              verdict.ref(),
+              verdict.sameAs(),
+              fact.map(FunctionGrantsSql.ExecuteFact::extension).orElse(""),
+              fact.map(FunctionGrantsSql.ExecuteFact::version).orElse("")));
+    }
+    return out;
+  }
+
+  /**
+   * C-PR47-2: the slot function is {@code SECURITY DEFINER}, in any language, and reach may not run
+   * it as itself (no EXECUTE for PUBLIC or for a role whose rights the login may use, and no such
+   * role owns it; C-PR47-4: a role reached WITH INHERIT FALSE, SET FALSE is not one). Its body runs
+   * as its owner, and on the slots R6 judges nobody checks that reach may execute it. A wrapper
+   * reach may execute stays limit L19: the object then gives nothing a direct call does not.
+   */
+  static boolean revokedDefiner(FunctionGrantsSql.CallerFact c) {
+    return c.fnDefiner() && !c.fnReach();
+  }
+
+  /** Whether R6 judges this slot at all, before its function is looked at. */
+  private static boolean judged(FunctionGrantsSql.CallerFact c, Set<Long> reach) {
+    if (ownerChecked(c.kind(), c.slot())) {
+      return !reach.contains(c.owner());
+    }
+    return noCheck(c.kind(), c.slot());
+  }
+
+  private static String slotName(FunctionGrantsSql.CallerFact c) {
+    List<String> names = SLOTS.getOrDefault(c.kind(), List.of());
+    return c.slot() >= 1 && c.slot() <= names.size() ? names.get(c.slot() - 1) : "slot " + c.slot();
+  }
+
+  // ------------------------------------------------------------- R7, core native functions
+
+  /**
+   * R7 (C-PR45-3-17): each function the core record lists (by signature, below oid 16384, in an
+   * extension or not, so {@code ALTER EXTENSION ... ADD} does not hide it) matches its line in
+   * language, symbol, library and rights mode; and each native function below oid 16384 in no
+   * extension has a line. {@code CREATE OR REPLACE} keeps the oid, so only this record tells "as
+   * shipped" from "rewritten in place". Each mismatch is one {@code 005} line, in signature order.
+   */
+  static List<String> judgeCore(
+      List<FunctionGrantsSql.ExecuteFact> facts, PinnedCatalogue catalogue) {
+    var live = new TreeMap<String, FunctionGrantsSql.ExecuteFact>(PinnedCatalogue.C_ORDER);
+    for (var f : facts) {
+      if (f.oid() < FunctionGrantsSql.FIRST_NORMAL_OID) {
+        live.putIfAbsent(f.label(), f);
+      }
+    }
+    var lines = new TreeMap<String, String>(PinnedCatalogue.C_ORDER);
+    var recorded = new HashSet<String>();
+    int major = catalogue.major();
+    for (var line : catalogue.core()) {
+      recorded.add(line.signature());
+      var f = live.get(line.signature());
+      if (f == null) {
+        lines.put(line.signature(), FunctionGrantMessages.coreMissing(line, major));
+      } else if (!f.nativeCode()
+          || !f.language().equals(line.language())
+          || !f.symbol().equals(line.symbol())
+          || !library(f).equals(line.library())
+          || f.securityDefiner() != line.securityDefiner()) {
+        lines.put(
+            line.signature(), FunctionGrantMessages.coreRewritten(f, library(f), line, major));
+      }
+    }
+    for (var f : live.values()) {
+      if (f.nativeCode() && f.extension().isEmpty() && !recorded.contains(f.label())) {
+        lines.put(f.label(), FunctionGrantMessages.coreUnknown(f, library(f), major));
+      }
+    }
+    return List.copyOf(lines.values());
+  }
+
+  /** The library column of a fact, as the core record writes it. */
+  static String library(FunctionGrantsSql.ExecuteFact f) {
+    return f.library().isEmpty() ? "-" : f.library();
   }
 
   private static boolean superuserLogin(SchemaVerification.Reach reach) {

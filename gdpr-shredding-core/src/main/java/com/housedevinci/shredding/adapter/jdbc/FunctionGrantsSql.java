@@ -12,15 +12,17 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.OptionalLong;
+import java.util.Set;
 
 /**
- * Runs the two statements of the function-grants leg (C-PR45-3) and returns their rows as facts. It
- * judges nothing: {@link FunctionGrants} applies every rule in Java.
+ * Runs the three statements of the function-grants leg (C-PR45-3) and returns their rows as facts.
+ * It judges nothing: {@link FunctionGrants} applies every rule in Java.
  *
- * <p>The statements are the resource files {@value #STATEMENT_ONE} and {@value #STATEMENT_TWO},
- * beside the pinned files, in the house dialect, so the name-qualification gate lexes them whole.
- * Java binds parameters only; it never puts text into them. A missing or unreadable file is {@code
- * SHRED-SCHEMA-005}. Both run on the caller's connection, inside its pinned window.
+ * <p>The statements are the resource files {@value #STATEMENT_ONE}, {@value #STATEMENT_TWO} and
+ * {@value #STATEMENT_THREE}, beside the pinned files, in the house dialect, so the
+ * name-qualification gate lexes them whole. Java binds parameters only; it never puts text into
+ * them. A missing or unreadable file is {@code SHRED-SCHEMA-005}. Both run on the caller's
+ * connection, inside its pinned window.
  */
 final class FunctionGrantsSql {
 
@@ -28,6 +30,7 @@ final class FunctionGrantsSql {
 
   static final String STATEMENT_ONE = "function-grants-1.sql";
   static final String STATEMENT_TWO = "function-grants-2.sql";
+  static final String STATEMENT_THREE = "function-grants-3.sql";
 
   /** The first oid PostgreSQL assigns after initdb (FirstNormalObjectId). */
   static final long FIRST_NORMAL_OID = 16_384;
@@ -67,7 +70,32 @@ final class FunctionGrantsSql {
       String key,
       long owner,
       String ownerName,
-      String kind) {}
+      String kind,
+      String library) {}
+
+  /**
+   * One row of statement 3: one (caller object, slot, support function). {@code slot} is the
+   * 1-based position in the branch's slot list ({@link FunctionGrants#SLOTS}). {@code fnLabel} is
+   * the slot function's schema-qualified name: {@code fnKey} has no schema, as the manifest's
+   * support column has none. {@code fnDefiner} is its rights mode; {@code fnReach} is true when
+   * reach may run it as itself (C-PR47-2): PUBLIC holds EXECUTE on it, or a role whose rights the
+   * login may use (inherited, or reachable by {@code SET ROLE}) holds EXECUTE on it or owns it.
+   * Membership alone does not count (C-PR47-4): a grant {@code WITH INHERIT FALSE, SET FALSE} gives
+   * the login none of the role's rights.
+   */
+  record CallerFact(
+      String kind,
+      long oid,
+      String label,
+      long owner,
+      String ownerName,
+      boolean usable,
+      int slot,
+      long fn,
+      String fnKey,
+      String fnLabel,
+      boolean fnDefiner,
+      boolean fnReach) {}
 
   static int major(Connection c) throws SQLException {
     try (PreparedStatement ps =
@@ -89,6 +117,11 @@ final class FunctionGrantsSql {
   /** The text of statement 2, read from the jar. */
   static String statementTwo() {
     return resource(STATEMENT_TWO);
+  }
+
+  /** The text of statement 3, read from the jar. */
+  static String statementThree() {
+    return resource(STATEMENT_THREE);
   }
 
   static List<RecordFact> records(
@@ -149,7 +182,55 @@ final class FunctionGrantsSql {
                   text(rs, 12),
                   rs.getLong(13),
                   text(rs, 14),
-                  text(rs, 15)));
+                  text(rs, 15),
+                  text(rs, 16)));
+        }
+      }
+    }
+    return out;
+  }
+
+  /** The number of binds of statement 3. */
+  static final int STATEMENT_THREE_BINDS = 11;
+
+  /**
+   * The binds of statement 3 that take the login oid, one per branch (C-PR47-4); every other bind
+   * takes the reach oids.
+   */
+  static final Set<Integer> STATEMENT_THREE_LOGIN_BINDS = Set.of(4, 7, 11);
+
+  /**
+   * Statement 3: the caller objects (design revision 5, rule R6).
+   *
+   * @param loginOid the login role, whose usable rights decide {@code fnReach} (C-PR47-4)
+   */
+  static List<CallerFact> callers(Connection c, long[] reachOids, long loginOid)
+      throws SQLException {
+    var out = new ArrayList<CallerFact>();
+    try (PreparedStatement ps = c.prepareStatement(statementThree())) {
+      for (int i = 1; i <= STATEMENT_THREE_BINDS; i++) {
+        if (STATEMENT_THREE_LOGIN_BINDS.contains(i)) {
+          ps.setLong(i, loginOid);
+        } else {
+          ps.setArray(i, c.createArrayOf("oid", boxed(reachOids)));
+        }
+      }
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          out.add(
+              new CallerFact(
+                  text(rs, 1),
+                  rs.getLong(2),
+                  text(rs, 3),
+                  rs.getLong(4),
+                  text(rs, 5),
+                  rs.getBoolean(6),
+                  rs.getInt(7),
+                  rs.getLong(8),
+                  text(rs, 9),
+                  text(rs, 10),
+                  rs.getBoolean(11),
+                  rs.getBoolean(12)));
         }
       }
     }

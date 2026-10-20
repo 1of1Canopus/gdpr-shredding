@@ -25,6 +25,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.images.builder.Transferable;
 
@@ -68,6 +70,16 @@ abstract class FunctionGrantsCases {
             "CREATE FUNCTION tp_similarity(text, text) RETURNS real"
                 + " AS '$libdir/pg_trgm', 'similarity' LANGUAGE c STRICT;\n"),
         EXT_DIR + "tp--1.0.sql");
+    // A test-only extension that withholds one function with an internal argument (C-PR47-3).
+    pg.copyFileToContainer(
+        Transferable.of("default_version = '1.0'\nrelocatable = true\n"), EXT_DIR + "tpi.control");
+    pg.copyFileToContainer(
+        Transferable.of(
+            "CREATE FUNCTION tpi_sel(internal, oid, internal, integer) RETURNS float8"
+                + " AS 'eqsel' LANGUAGE internal STRICT;\n"
+                + "REVOKE EXECUTE ON FUNCTION tpi_sel(internal, oid, internal, integer)"
+                + " FROM PUBLIC;\n"),
+        EXT_DIR + "tpi--1.0.sql");
     // A test-only update script to a pgstattuple version no manifest lists (R5v).
     pg.copyFileToContainer(Transferable.of("SELECT 1;\n"), EXT_DIR + "pgstattuple--1.5--1.9.sql");
   }
@@ -513,6 +525,33 @@ abstract class FunctionGrantsCases {
   }
 
   @Test
+  void published_security_definer_audit_query_lists_a_revoked_wrapper_an_aggregate_calls()
+      throws Exception {
+    // C-PR47-2: the second half of the L19 query lists a wrapper nobody may execute directly.
+    var db = db();
+    exec(
+        db.su(),
+        DEFINER_W,
+        REVOKE_W,
+        "CREATE AGGREGATE public.agg_w(boolean) (sfunc = public.w, stype = text,"
+            + " initcond = 'PG_VERSION')");
+    String notes = Files.readString(Path.of("../SECURITY-NOTES.md"));
+    Matcher m =
+        Pattern.compile("<!-- l19-audit-query -->\\s*```sql\\n(.*?)```", Pattern.DOTALL)
+            .matcher(notes);
+    assertThat(m.find()).isTrue();
+    var listed = new ArrayList<String>();
+    try (var c = db.su().getConnection();
+        var s = c.createStatement();
+        var rs = s.executeQuery(m.group(1).replace("'app'", "'" + APP + "'"))) {
+      while (rs.next()) {
+        listed.add(rs.getString("function") + " via " + rs.getString("executable_via"));
+      }
+    }
+    assertThat(listed).contains("w(text,boolean) via called by aggregate agg_w(boolean)");
+  }
+
+  @Test
   void withheld_function_in_a_schema_without_usage_refuses() throws SQLException {
     var db = db();
     exec(
@@ -876,7 +915,8 @@ abstract class FunctionGrantsCases {
             first.symbol(),
             first.securityDefiner(),
             first.acl()));
-    var doctored = PinnedCatalogue.of(major, baseline, real.manifest(), real.versions());
+    var doctored =
+        PinnedCatalogue.of(major, baseline, real.manifest(), real.versions(), real.core());
     try (Connection c = pinned(db.app())) {
       var rows = FunctionGrants.judgeRecords(FunctionGrants.records(c, doctored), doctored);
       assertThat(rows)
@@ -989,5 +1029,674 @@ abstract class FunctionGrantsCases {
         .isEqualTo(jit);
     assertThat(TwoRoleCluster.scalar(one, "SELECT pg_catalog.current_setting('search_path')"))
         .isEqualTo(path);
+  }
+
+  // ------------------------------------- R6, caller objects (design revision 5, C-PR45-3-15)
+
+  private static final String READ2 = "pg_catalog.pg_read_file(text, boolean)";
+  private static final String READ1 = "pg_catalog.pg_read_file(text)";
+
+  /** The first column of the first row, as the given pool. */
+  static String scalar(DataSource ds, String sql) throws SQLException {
+    try (var c = ds.getConnection();
+        var st = c.createStatement();
+        var rs = st.executeQuery(sql)) {
+      return rs.next() ? rs.getString(1) : "";
+    }
+  }
+
+  /**
+   * A hand-made copy of core function {@code fn} in language internal, as {@code public.r6_copy},
+   * with EXECUTE revoked from PUBLIC: no other leg sees it, only R6 through the object naming it.
+   */
+  static String handMadeCopy(Db db, String fn) throws SQLException {
+    exec(
+        db.su(),
+        "DO $$ DECLARE p pg_catalog.oid := '"
+            + fn
+            + "'::pg_catalog.regprocedure; BEGIN"
+            + " EXECUTE pg_catalog.format('CREATE FUNCTION public.r6_copy(%s) RETURNS %s"
+            + " LANGUAGE internal%s AS %L', pg_catalog.pg_get_function_identity_arguments(p),"
+            + " pg_catalog.pg_get_function_result(p),"
+            + " (SELECT CASE WHEN x.proisstrict THEN ' STRICT' ELSE '' END"
+            + " FROM pg_catalog.pg_proc x WHERE x.oid = p),"
+            + " (SELECT x.prosrc FROM pg_catalog.pg_proc x WHERE x.oid = p));"
+            + " EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION public.r6_copy(%s) FROM"
+            + " PUBLIC', pg_catalog.pg_get_function_identity_arguments(p)); END $$");
+    return scalar(
+        db.su(),
+        "SELECT pg_catalog.concat('public.r6_copy(',"
+            + " pg_catalog.pg_get_function_identity_arguments('public.r6_copy'::pg_catalog.regproc),"
+            + " ')')");
+  }
+
+  @Test
+  void aggregate_with_sfunc_pg_read_file_refuses() throws SQLException {
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE AGGREGATE public.agg_s(boolean) (sfunc = pg_catalog.pg_read_file,"
+            + " stype = text, initcond = 'PG_VERSION')");
+    // The path itself (A1): the runtime role reads a file it may not read directly.
+    assertThat(scalar(db.app(), "SELECT public.agg_s(true)")).startsWith(Integer.toString(major));
+    assertThatThrownBy(() -> scalar(db.app(), "SELECT pg_catalog.pg_read_file('PG_VERSION')"))
+        .hasMessageContaining("permission denied for function pg_read_file");
+    refuses(
+        db.app(),
+        "PUBLIC or a role in reach may use aggregate public.agg_s(boolean), owned by",
+        "outside reach, whose transfn is function " + READ2,
+        "a function the server ships without EXECUTE for PUBLIC");
+  }
+
+  @Test
+  void aggregate_with_finalfunc_pg_read_file_refuses() throws SQLException {
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE AGGREGATE public.agg_f(text) (sfunc = pg_catalog.textcat, stype = text,"
+            + " initcond = '', finalfunc = pg_catalog.pg_read_file)");
+    assertThat(scalar(db.app(), "SELECT public.agg_f('PG_VERSION')"))
+        .startsWith(Integer.toString(major));
+    refuses(db.app(), "aggregate public.agg_f(text)", "whose finalfn is function " + READ1);
+  }
+
+  @Test
+  void moving_aggregate_with_mfinalfunc_pg_read_file_refuses() throws SQLException {
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE AGGREGATE public.agg_m(text) (sfunc = pg_catalog.textcat, stype = text,"
+            + " initcond = '', msfunc = pg_catalog.textcat, minvfunc = pg_catalog.textcat,"
+            + " mstype = text, minitcond = '', mfinalfunc = pg_catalog.pg_read_file)");
+    // The moving path (A4): the window frame runs mfinalfunc with no check for the caller.
+    assertThat(
+            scalar(
+                db.app(),
+                "SELECT pg_catalog.max(m) FROM (SELECT public.agg_m(x) OVER (ROWS BETWEEN"
+                    + " CURRENT ROW AND CURRENT ROW) AS m FROM (VALUES ('PG_VERSION')) AS v(x)) AS w"))
+        .startsWith(Integer.toString(major));
+    refuses(db.app(), "aggregate public.agg_m(text)", "whose mfinalfn is function " + READ1);
+  }
+
+  /** Slot k of the R6 aggregate list, with the core function each template puts there. */
+  private static final String[] SLOT_FUNCTIONS = {
+    "pg_catalog.string_agg_transfn(internal, text, text)",
+    "pg_catalog.string_agg_finalfn(internal)",
+    "pg_catalog.string_agg_combine(internal, internal)",
+    "pg_catalog.string_agg_serialize(internal)",
+    "pg_catalog.string_agg_deserialize(bytea, internal)",
+    "pg_catalog.textcat(text, text)",
+    "pg_catalog.textcat(text, text)",
+    "pg_catalog.lower(text)"
+  };
+
+  /**
+   * Each of the eight aggregate slots is judged: the slot's function is replaced by a hand-made
+   * internal copy that PUBLIC may not execute (R3 code), and only R6 can see it.
+   */
+  @ParameterizedTest
+  @ValueSource(ints = {1, 2, 3, 4, 5, 6, 7, 8})
+  void each_aggregate_slot_running_hand_made_native_code_refuses(int slot) throws SQLException {
+    var db = db();
+    String copy = handMadeCopy(db, SLOT_FUNCTIONS[slot - 1]);
+    var f = new String[8];
+    for (int i = 0; i < 8; i++) {
+      String fn = i == slot - 1 ? copy : SLOT_FUNCTIONS[i];
+      f[i] = fn.substring(0, fn.indexOf('('));
+    }
+    String sql =
+        slot <= 5
+            ? "CREATE AGGREGATE public.agg_t(text, text) (sfunc = "
+                + f[0]
+                + ", stype = internal, finalfunc = "
+                + f[1]
+                + ", combinefunc = "
+                + f[2]
+                + ", serialfunc = "
+                + f[3]
+                + ", deserialfunc = "
+                + f[4]
+                + ")"
+            : "CREATE AGGREGATE public.agg_t(text) (sfunc = pg_catalog.textcat, stype = text,"
+                + " initcond = '', msfunc = "
+                + f[5]
+                + ", minvfunc = "
+                + f[6]
+                + ", mstype = text, minitcond = '', mfinalfunc = "
+                + f[7]
+                + ")";
+    exec(db.su(), sql);
+    String name = FunctionGrants.SLOTS.get("agg").get(slot - 1);
+    refuses(
+        db.app(),
+        "whose " + name + " is function " + copy,
+        "native code created outside any extension");
+  }
+
+  @Test
+  void aggregate_over_a_withheld_function_owned_by_the_runtime_role_is_skipped_by_r6()
+      throws SQLException {
+    // Its owner checks run as the runtime role, which may not execute pg_read_file: the call
+    // fails at run time, and legs 1 to 3 judge what reach holds.
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE AGGREGATE public.agg_s(boolean) (sfunc = pg_catalog.pg_read_file,"
+            + " stype = text, initcond = 'PG_VERSION')",
+        "ALTER AGGREGATE public.agg_s(boolean) OWNER TO " + APP);
+    assertThatThrownBy(() -> scalar(db.app(), "SELECT public.agg_s(true)"))
+        .hasMessageContaining("permission denied for function pg_read_file");
+    verifies(db.app());
+  }
+
+  @Test
+  void hand_made_aggregate_over_core_functions_owned_outside_reach_verifies() throws SQLException {
+    // The interim rule refused it by R3, by accident: an aggregate runs no code of its own.
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE AGGREGATE public.my_sum(integer) (sfunc = pg_catalog.int4pl, stype = integer)");
+    verifies(db.app());
+  }
+
+  @Test
+  void aggregate_over_a_withheld_function_nobody_in_reach_may_use_verifies() throws SQLException {
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE AGGREGATE public.agg_s(boolean) (sfunc = pg_catalog.pg_read_file,"
+            + " stype = text, initcond = 'PG_VERSION')",
+        "REVOKE EXECUTE ON FUNCTION public.agg_s(boolean) FROM PUBLIC");
+    verifies(db.app());
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "pg_stat_reset_single_table_counters",
+        "pg_stat_reset_single_function_counters",
+        "pg_stat_reset_subscription_stats",
+        "pg_ls_tmpdir"
+      })
+  void trusted_language_with_a_withheld_validator_refuses(String validator) throws SQLException {
+    // L1: the validator fires on CREATE FUNCTION with no EXECUTE check (round 5 review). The
+    // fourth fit, pg_ls_tmpdir(oid), was measured at build time: no return-type check either.
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE TRUSTED LANGUAGE r6lang HANDLER pg_catalog.plpgsql_call_handler"
+            + " VALIDATOR pg_catalog."
+            + validator);
+    refuses(
+        db.app(),
+        "may create functions in language r6lang, owned by",
+        "whose validator is function pg_catalog." + validator + "(",
+        "a function the server ships without EXECUTE for PUBLIC");
+  }
+
+  @Test
+  void untrusted_language_with_a_withheld_validator_verifies() throws SQLException {
+    // Only a superuser may create functions in an untrusted language.
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE LANGUAGE r6lang HANDLER pg_catalog.plpgsql_call_handler"
+            + " VALIDATOR pg_catalog.pg_stat_reset_single_table_counters");
+    verifies(db.app());
+  }
+
+  @Test
+  void language_owned_by_the_runtime_role_with_a_withheld_validator_refuses() throws SQLException {
+    // C-PR47-1: a validator runs with no EXECUTE check, so the owner's place plays no part.
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE TRUSTED LANGUAGE r6lang HANDLER pg_catalog.plpgsql_call_handler"
+            + " VALIDATOR pg_catalog.pg_ls_tmpdir",
+        "ALTER LANGUAGE r6lang OWNER TO " + APP);
+    var e = refusal(db.app());
+    assertThat(e)
+        .hasMessageContaining(
+            "may create functions in language r6lang, owned by " + APP + ", whose")
+        .hasMessageContaining("whose validator is function pg_catalog.pg_ls_tmpdir(")
+        .hasMessageNotContaining(APP + " outside reach");
+  }
+
+  @Test
+  void operator_owned_by_the_runtime_role_with_a_hand_made_estimator_refuses() throws SQLException {
+    // C-PR47-1: the planner calls an estimator with no EXECUTE check, whoever owns the operator.
+    var db = db();
+    String rest = handMadeCopy(db, "pg_catalog.eqsel(internal, oid, internal, integer)");
+    exec(
+        db.su(),
+        "CREATE OPERATOR public.=== (LEFTARG = text, RIGHTARG = text,"
+            + " FUNCTION = pg_catalog.texteq, RESTRICT = public.r6_copy)",
+        "ALTER OPERATOR public.=== (text, text) OWNER TO " + APP);
+    refuses(
+        db.app(),
+        "operator public.===(text,text), owned by " + APP + ", whose oprrest is function " + rest,
+        "native code created outside any extension");
+  }
+
+  // ------------------------------------------- C-PR47-2: revoked SECURITY DEFINER wrappers
+
+  private static final String DEFINER_W =
+      "CREATE FUNCTION public.w(text, boolean) RETURNS text LANGUAGE sql SECURITY DEFINER"
+          + " AS 'SELECT pg_catalog.pg_read_file($1, 0, 200, $2)'";
+  private static final String REVOKE_W =
+      "REVOKE EXECUTE ON FUNCTION public.w(text, boolean) FROM PUBLIC";
+  private static final String W_REASON =
+      "a SECURITY DEFINER function that neither PUBLIC nor a role whose rights the login may"
+          + " use may execute";
+
+  @Test
+  void aggregate_over_a_revoked_security_definer_wrapper_refuses() throws SQLException {
+    var db = db();
+    exec(
+        db.su(),
+        DEFINER_W,
+        REVOKE_W,
+        "CREATE AGGREGATE public.agg_w(boolean) (sfunc = public.w, stype = text,"
+            + " initcond = 'PG_VERSION')");
+    assertThat(scalar(db.app(), "SELECT public.agg_w(true)")).startsWith(Integer.toString(major));
+    refuses(
+        db.app(),
+        "aggregate public.agg_w(boolean)",
+        "whose transfn is function public.w(text, boolean)",
+        W_REASON);
+  }
+
+  @Test
+  void core_aggregate_rewritten_over_a_revoked_wrapper_refuses() throws SQLException {
+    // Oid 2518 and the symbol aggregate_dummy stay, so R7 is silent; R6 sees the wrapper.
+    var db = db();
+    exec(
+        db.su(),
+        DEFINER_W,
+        REVOKE_W,
+        "CREATE FUNCTION public.tobool(text) RETURNS boolean LANGUAGE sql AS 'SELECT true'",
+        "CREATE OR REPLACE AGGREGATE pg_catalog.bool_or(boolean) (sfunc = public.w,"
+            + " stype = text, initcond = 'PG_VERSION', finalfunc = public.tobool)");
+    refuses(
+        db.app(),
+        "aggregate pg_catalog.bool_or(boolean)",
+        "whose transfn is function public.w(text, boolean)",
+        W_REASON);
+  }
+
+  @Test
+  void contrib_aggregate_over_a_same_key_wrapper_in_another_schema_refuses() throws SQLException {
+    // The manifest key citext_larger(citext,citext) has no schema, so R5b sees the shipped
+    // support set; statement 3's schema-qualified name and rights mode tell the wrapper apart.
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE EXTENSION citext",
+        "CREATE SCHEMA evil",
+        "CREATE FUNCTION evil.citext_larger(public.citext, public.citext) RETURNS public.citext"
+            + " LANGUAGE sql STRICT SECURITY DEFINER"
+            + " AS 'SELECT pg_catalog.pg_read_file($2::text)::public.citext'",
+        "REVOKE EXECUTE ON FUNCTION evil.citext_larger(public.citext, public.citext) FROM PUBLIC",
+        "ALTER EXTENSION citext DROP AGGREGATE public.max(public.citext)",
+        "DROP AGGREGATE public.max(public.citext)",
+        "CREATE AGGREGATE public.max(public.citext) (sfunc = evil.citext_larger,"
+            + " stype = public.citext, combinefunc = evil.citext_larger)",
+        "ALTER EXTENSION citext ADD AGGREGATE public.max(public.citext)");
+    refuses(
+        db.app(),
+        "aggregate public.max(public.citext)",
+        "whose transfn is function evil.citext_larger(",
+        "whose combinefn is function evil.citext_larger(",
+        W_REASON);
+  }
+
+  @Test
+  void trusted_language_with_a_revoked_security_definer_validator_refuses() throws SQLException {
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE FUNCTION public.v(pg_catalog.oid) RETURNS void LANGUAGE sql SECURITY DEFINER"
+            + " AS 'SELECT 1'",
+        "REVOKE EXECUTE ON FUNCTION public.v(pg_catalog.oid) FROM PUBLIC",
+        "CREATE TRUSTED LANGUAGE r6lang HANDLER pg_catalog.plpgsql_call_handler"
+            + " VALIDATOR public.v");
+    refuses(
+        db.app(),
+        "may create functions in language r6lang",
+        "whose validator is function public.v(oid)",
+        W_REASON);
+  }
+
+  @Test
+  void aggregate_over_a_public_security_definer_wrapper_is_the_stated_limit() throws SQLException {
+    // L19: reach may call the wrapper directly, so the aggregate gives nothing more.
+    var db = db();
+    exec(
+        db.su(),
+        DEFINER_W,
+        "CREATE AGGREGATE public.agg_w(boolean) (sfunc = public.w, stype = text,"
+            + " initcond = 'PG_VERSION')");
+    verifies(db.app());
+  }
+
+  // ------------------------------- C-PR47-4: reach may run it only with rights the login may use
+
+  private static final String AGG_W =
+      "CREATE AGGREGATE public.agg_w(boolean) (sfunc = public.w, stype = text,"
+          + " initcond = 'PG_VERSION')";
+
+  @Test
+  void aggregate_over_a_wrapper_granted_to_a_no_inherit_no_set_member_refuses()
+      throws SQLException {
+    // A grant WITH INHERIT FALSE, SET FALSE gives the login none of g's rights: a direct call is
+    // denied, so the aggregate gives more than a direct call and R6 refuses it.
+    var db = db();
+    String g = group("fg_nis" + major);
+    exec(
+        db.su(),
+        "GRANT " + g + " TO " + APP + " WITH INHERIT FALSE, SET FALSE",
+        DEFINER_W,
+        REVOKE_W,
+        "GRANT EXECUTE ON FUNCTION public.w(text, boolean) TO " + g,
+        AGG_W);
+    assertThatThrownBy(() -> scalar(db.app(), "SELECT public.w('PG_VERSION', true)"))
+        .hasMessageContaining("permission denied for function w");
+    refuses(
+        db.app(),
+        "aggregate public.agg_w(boolean)",
+        "whose transfn is function public.w(text, boolean)",
+        W_REASON);
+  }
+
+  @Test
+  void aggregate_over_a_wrapper_owned_by_a_no_inherit_no_set_member_refuses() throws SQLException {
+    // The owner side: w1 runs as g, which the login cannot use, and calls w, granted to g only.
+    var db = db();
+    String g = group("fg_nio" + major);
+    exec(
+        db.su(),
+        "GRANT " + g + " TO " + APP + " WITH INHERIT FALSE, SET FALSE",
+        DEFINER_W,
+        REVOKE_W,
+        "GRANT EXECUTE ON FUNCTION public.w(text, boolean) TO " + g,
+        "CREATE FUNCTION public.w1(text, boolean) RETURNS text LANGUAGE sql SECURITY DEFINER"
+            + " AS 'SELECT public.w($1, $2)'",
+        "REVOKE EXECUTE ON FUNCTION public.w1(text, boolean) FROM PUBLIC",
+        "ALTER FUNCTION public.w1(text, boolean) OWNER TO " + g,
+        "CREATE AGGREGATE public.agg_w1(boolean) (sfunc = public.w1, stype = text,"
+            + " initcond = 'PG_VERSION')");
+    refuses(
+        db.app(),
+        "aggregate public.agg_w1(boolean)",
+        "whose transfn is function public.w1(text, boolean)",
+        W_REASON);
+  }
+
+  @Test
+  void aggregate_over_a_wrapper_granted_to_an_inherited_group_is_the_stated_limit()
+      throws SQLException {
+    // L19: the login inherits g's rights and may call w directly, so the aggregate gives nothing
+    // more.
+    var db = db();
+    String g = group("fg_inh" + major);
+    exec(
+        db.su(),
+        "GRANT " + g + " TO " + APP + " WITH INHERIT TRUE, SET FALSE",
+        DEFINER_W,
+        REVOKE_W,
+        "GRANT EXECUTE ON FUNCTION public.w(text, boolean) TO " + g,
+        AGG_W);
+    assertThat(scalar(db.app(), "SELECT public.w('PG_VERSION', true)"))
+        .startsWith(Integer.toString(major));
+    verifies(db.app());
+  }
+
+  @Test
+  void aggregate_over_a_wrapper_granted_to_a_set_only_group_is_the_stated_limit()
+      throws SQLException {
+    // L19 through SET ROLE: the login may become g and call w directly.
+    var db = db();
+    String g = group("fg_set" + major);
+    exec(
+        db.su(),
+        "GRANT " + g + " TO " + APP + " WITH INHERIT FALSE, SET TRUE",
+        DEFINER_W,
+        REVOKE_W,
+        "GRANT EXECUTE ON FUNCTION public.w(text, boolean) TO " + g,
+        AGG_W);
+    verifies(db.app());
+  }
+
+  @Test
+  void refusal_quotes_a_schema_and_object_name_that_is_not_plain_lowercase() throws SQLException {
+    // C-PR47-5: labels go through quote_ident, so "Evil" and "Agg" show as regprocedure prints
+    // them, and a look-alike of public.w cannot read as public.w.
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE SCHEMA \"Evil\"",
+        "CREATE FUNCTION \"Evil\".w(text, boolean) RETURNS text LANGUAGE sql SECURITY DEFINER"
+            + " AS 'SELECT pg_catalog.pg_read_file($1, 0, 200, $2)'",
+        "REVOKE EXECUTE ON FUNCTION \"Evil\".w(text, boolean) FROM PUBLIC",
+        "CREATE AGGREGATE public.\"Agg\"(boolean) (sfunc = \"Evil\".w, stype = text,"
+            + " initcond = 'PG_VERSION')");
+    refuses(
+        db.app(),
+        "aggregate public.\"Agg\"(boolean)",
+        "whose transfn is function \"Evil\".w(text, boolean)",
+        W_REASON);
+  }
+
+  @Test
+  void operator_code_is_checked_as_the_caller_and_its_estimator_is_judged() throws SQLException {
+    var db = db();
+    String code = handMadeCopy(db, "pg_catalog.texteq(text, text)");
+    exec(
+        db.su(),
+        "CREATE OPERATOR public.=== (LEFTARG = text, RIGHTARG = text, FUNCTION = public.r6_copy)");
+    // O1: oprcode runs with the caller's EXECUTE checked, so R6 leaves it to the server.
+    assertThatThrownBy(() -> scalar(db.app(), "SELECT 'a'::text OPERATOR(public.===) 'a'"))
+        .hasMessageContaining("permission denied for function r6_copy");
+    verifies(db.app());
+    var other = db();
+    String rest = handMadeCopy(other, "pg_catalog.eqsel(internal, oid, internal, integer)");
+    exec(
+        other.su(),
+        "CREATE OPERATOR public.=== (LEFTARG = text, RIGHTARG = text,"
+            + " FUNCTION = pg_catalog.texteq, RESTRICT = public.r6_copy)");
+    // The planner calls an estimator with no EXECUTE check at all.
+    refuses(other.app(), "operator public.===(text,text)", "whose oprrest is function " + rest);
+    assertThat(code).isEqualTo("public.r6_copy(text, text)");
+  }
+
+  @Test
+  void contrib_aggregate_re_created_over_another_support_function_refuses() throws SQLException {
+    // Revision 5, manifest column 7: the key min(citext) and the symbol aggregate_dummy stay,
+    // so only the recorded support functions tell it from the shipped one.
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE EXTENSION citext",
+        "ALTER EXTENSION citext DROP AGGREGATE public.min(public.citext)",
+        "DROP AGGREGATE public.min(public.citext)",
+        "CREATE AGGREGATE public.min(public.citext) (sfunc = public.citext_larger,"
+            + " stype = public.citext, combinefunc = public.citext_larger)",
+        "ALTER EXTENSION citext ADD AGGREGATE public.min(public.citext)");
+    refuses(
+        db.app(),
+        "PUBLIC " + held("public.min(public.citext)"),
+        "manifest does not list for that version");
+  }
+
+  // ------------------------------------ R7, core functions rewritten in place (C-PR45-3-17)
+
+  @Test
+  void core_function_rewritten_in_place_with_a_symbol_w_does_not_hold_refuses_with_005()
+      throws SQLException {
+    // K1: CREATE OR REPLACE keeps the oid; pg_trgm's similarity is in no part of W, so no other
+    // leg sees it. Before R7 this verified.
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE OR REPLACE FUNCTION pg_catalog.lower(text) RETURNS text LANGUAGE c"
+            + " AS '$libdir/pg_trgm', 'similarity'");
+    unverifiable(
+        db.app(),
+        "core function pg_catalog.lower(text) is language c, symbol similarity, library"
+            + " $libdir/pg_trgm on this server",
+        "ships it as language internal, symbol lower",
+        "rewritten in place");
+  }
+
+  @Test
+  void core_function_rewritten_to_another_internal_symbol_or_to_sql_refuses_with_005()
+      throws SQLException {
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE OR REPLACE FUNCTION pg_catalog.lower(text) RETURNS text LANGUAGE internal"
+            + " IMMUTABLE STRICT AS 'upper'");
+    unverifiable(
+        db.app(), "core function pg_catalog.lower(text) is language internal, symbol upper");
+    var other = db();
+    exec(
+        other.su(),
+        "CREATE OR REPLACE FUNCTION pg_catalog.lower(text) RETURNS text LANGUAGE sql"
+            + " IMMUTABLE STRICT AS 'SELECT $1'");
+    unverifiable(other.app(), "core function pg_catalog.lower(text) is language sql");
+  }
+
+  @Test
+  void core_function_rewritten_as_security_definer_refuses_with_005() throws SQLException {
+    var db = db();
+    exec(db.su(), "ALTER FUNCTION pg_catalog.lower(text) SECURITY DEFINER");
+    unverifiable(
+        db.app(), "pg_catalog.lower(text) is language internal, symbol lower, SECURITY DEFINER");
+  }
+
+  // --------------------------------- the paths the server refuses by signature (revision 5)
+
+  /**
+   * Every other slot that names a function takes or returns {@code cstring} or {@code internal}, or
+   * has a shape no withheld built-in fits, so the server refuses a withheld function there at
+   * CREATE. One statement per path group; statements of one case are split on {@code |}.
+   */
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "CREATE CAST (boolean AS text) WITH FUNCTION pg_catalog.pg_read_file(text)",
+        "CREATE OPERATOR public.<=> (LEFTARG = text, RIGHTARG = text,"
+            + " FUNCTION = pg_catalog.texteq, JOIN = pg_catalog.pg_read_file)",
+        "CREATE TYPE public.r6t|CREATE TYPE public.r6t (INPUT = pg_catalog.pg_read_file,"
+            + " OUTPUT = pg_catalog.textout)",
+        "CREATE TYPE public.r6r AS RANGE (SUBTYPE = text, SUBTYPE_DIFF = pg_catalog.pg_read_file)",
+        "CREATE OPERATOR CLASS public.r6oc FOR TYPE text USING btree AS OPERATOR 1 <,"
+            + " FUNCTION 1 pg_catalog.pg_read_file(text, boolean)",
+        "CREATE CONVERSION public.r6c FOR 'UTF8' TO 'LATIN1' FROM pg_catalog.pg_read_file",
+        "CREATE TEXT SEARCH TEMPLATE public.r6tt (LEXIZE = pg_catalog.pg_read_file)",
+        "CREATE TEXT SEARCH PARSER public.r6p (START = pg_catalog.pg_read_file,"
+            + " GETTOKEN = pg_catalog.prsd_nexttoken, END = pg_catalog.prsd_end,"
+            + " LEXTYPES = pg_catalog.prsd_lextype)",
+        "CREATE LANGUAGE r6h HANDLER pg_catalog.pg_read_file",
+        "CREATE FOREIGN DATA WRAPPER r6f HANDLER pg_catalog.pg_read_file",
+        "CREATE FOREIGN DATA WRAPPER r6f VALIDATOR pg_catalog.pg_stat_reset_single_table_counters",
+        "CREATE TRANSFORM FOR text LANGUAGE plpgsql"
+            + " (FROM SQL WITH FUNCTION pg_catalog.pg_read_file(text))",
+        "CREATE TABLE public.r6tab (x integer)|CREATE TRIGGER r6tg BEFORE INSERT ON public.r6tab"
+            + " FOR EACH ROW EXECUTE FUNCTION pg_catalog.pg_read_file()",
+        "CREATE EVENT TRIGGER r6e ON ddl_command_start EXECUTE FUNCTION pg_catalog.pg_read_file()"
+      })
+  void server_refuses_a_withheld_function_in_a_slot_it_cannot_fit(String statements)
+      throws SQLException {
+    var db = db();
+    String[] parts = statements.split("\\|");
+    for (int i = 0; i < parts.length - 1; i++) {
+      exec(db.su(), parts[i]);
+    }
+    assertThatThrownBy(() -> exec(db.su(), parts[parts.length - 1]))
+        .isInstanceOf(SQLException.class);
+    verifies(db.app());
+  }
+
+  /**
+   * W as the count tests read it: every function the server or a shipped extension records without
+   * PUBLIC EXECUTE in pg_init_privs (privtype 'i' or 'e'), C-PR47-3.
+   */
+  private static final String W =
+      "FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_init_privs i ON i.objoid = p.oid"
+          + " AND i.classoid = 'pg_catalog.pg_proc'::pg_catalog.regclass"
+          + " AND i.privtype IN ('i', 'e')"
+          + " WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(i.initprivs) y"
+          + " WHERE y.grantee = 0)";
+
+  /**
+   * The shapes of every slot statement 3 does not read: cstring or internal in or out (type I/O,
+   * analyze, subscript, access method, conversion, text search, FDW handler), a cstring[] argument
+   * (typmod input), trigger and event_trigger, a btree compare {@code (T, T) -> int4/bool/float8},
+   * an FDW validator {@code (text[], oid)}, a hash {@code (T) -> int4}, an extended hash {@code (T,
+   * int8) -> int8} and a btree equal-image {@code (oid) -> bool}.
+   */
+  private static final String UNREAD_SHAPES =
+      "SELECT pg_catalog.count(*) "
+          + W
+          + " AND (p.prorettype IN ('cstring'::pg_catalog.regtype, 'internal'::pg_catalog.regtype,"
+          + " 'trigger'::pg_catalog.regtype, 'event_trigger'::pg_catalog.regtype)"
+          + " OR p.proargtypes::pg_catalog.oid[] && '{2275,2281,1263}'::pg_catalog.oid[]"
+          + " OR (p.pronargs = 2 AND p.proargtypes[0] = p.proargtypes[1]"
+          + " AND p.prorettype IN ('int4'::pg_catalog.regtype, 'bool'::pg_catalog.regtype,"
+          + " 'float8'::pg_catalog.regtype))"
+          + " OR (p.pronargs = 2 AND p.proargtypes[0] = 'text[]'::pg_catalog.regtype)"
+          + " OR (p.pronargs = 1 AND p.prorettype = 'int4'::pg_catalog.regtype)"
+          + " OR (p.pronargs = 2 AND p.proargtypes[1] = 'int8'::pg_catalog.regtype"
+          + " AND p.prorettype = 'int8'::pg_catalog.regtype)"
+          + " OR (p.pronargs = 1 AND p.proargtypes[0] = 'oid'::pg_catalog.regtype"
+          + " AND p.prorettype = 'bool'::pg_catalog.regtype))";
+
+  private static String fits(String shape) {
+    return "SELECT pg_catalog.string_agg(p.oid::pg_catalog.regprocedure::pg_catalog.text, ';'"
+        + " ORDER BY p.proname) "
+        + W
+        + " AND "
+        + shape;
+  }
+
+  /**
+   * The count behind "refused by signature", kept live on each pin with every manifest extension
+   * created: no withheld function, built-in or shipped by an extension, fits a slot statement 3
+   * does not read. Two read slots have fits, asserted by name: the validator {@code (oid)} fits
+   * four built-ins, and the aggregate combine {@code (s, s) -> s} fits {@code dblink_connect_u}. R6
+   * judges both. A pin bump that adds a fit turns this red.
+   */
+  @Test
+  void withheld_functions_fit_no_unread_slot_shape() throws SQLException {
+    var db = db();
+    for (String ext : PinnedCatalogue.forMajor(major).orElseThrow().installableExtensions()) {
+      exec(db.su(), "CREATE EXTENSION IF NOT EXISTS \"" + ext + "\" CASCADE");
+    }
+    assertThat(scalar(db.su(), UNREAD_SHAPES)).isEqualTo("0");
+    assertThat(
+            scalar(
+                db.su(), fits("p.pronargs = 1 AND p.proargtypes[0] = 'oid'::pg_catalog.regtype")))
+        .isEqualTo(
+            "pg_ls_tmpdir(oid);pg_stat_reset_single_function_counters(oid);"
+                + "pg_stat_reset_single_table_counters(oid);pg_stat_reset_subscription_stats(oid)");
+    assertThat(
+            scalar(
+                db.su(),
+                fits(
+                    "p.pronargs = 2 AND p.proargtypes[0] = p.proargtypes[1]"
+                        + " AND p.prorettype = p.proargtypes[0]")))
+        .isEqualTo("dblink_connect_u(text,text)");
+  }
+
+  @Test
+  void count_test_sees_an_extension_withheld_function_with_an_internal_argument()
+      throws SQLException {
+    // C-PR47-3: the count reads the extension part of W too, so a pin bump that ships such a
+    // function in a contrib extension turns the guard red.
+    var db = db();
+    assertThat(scalar(db.su(), UNREAD_SHAPES)).isEqualTo("0");
+    exec(db.su(), "CREATE EXTENSION tpi");
+    assertThat(scalar(db.su(), UNREAD_SHAPES)).isEqualTo("1");
   }
 }
