@@ -1242,6 +1242,7 @@ connection taken by reflection or through an ORM API. The starter's boot-time ma
 | M19 | A role-owned `=(name, name)` ahead of `pg_catalog` on the moved target | refused: every comparison is qualified, exactly one row is required |
 | M20 | A read/write-splitting driver that switches host on `Connection.setReadOnly(true)` | not triggered: the module never calls `setReadOnly`; read-only is set with SQL |
 | M21 | A read on a connection inside the application's own transaction | accepted and checked inside that transaction; the module does not commit, roll back or make it read-only |
+| M21w | A key write (`currentForWrite`, `recordEncryptions`, `rotate`) on a connection inside the application's own transaction (C-RC021-1) | refused with `SHRED-SCHEMA-008` before any statement; the caller's transaction is neither joined, committed nor rolled back. A key row that committed or rolled back with application rows would change the erasure-race reasoning |
 
 **What the check resists, and what it does not.** It resists accident (a misrouted pool, a
 refreshed URL, a failover to the wrong cluster) and an unprivileged role on the wrong target. It

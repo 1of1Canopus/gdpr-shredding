@@ -60,6 +60,15 @@ read-only transaction of its own, so it pays one extra statement and a `COMMIT`.
 your own transaction (Spring's `TransactionAwareDataSourceProxy` within `@Transactional`) runs
 inside that transaction: the module does not commit it, roll it back or make it read-only.
 
+A key write (creating, recording or rotating a key) does not run inside your transaction. It
+needs its own, because it commits. A write on a connection that arrives inside your transaction
+(the same `TransactionAwareDataSourceProxy` within `@Transactional`) is refused with
+`SHRED-SCHEMA-008` before any statement, and your transaction is left as it was. Example: your
+code inserts an order, then the first encrypted write for a new subject asks for a key. Before
+this fix the module committed the order row, and your later rollback could not undo it. Now the
+key write fails and your rollback works. Give the module's stores a plain `DataSource` (the
+starter's default does), or request the key before you open your transaction.
+
 Two smaller changes come with it:
 
 - Verification sets its read-only `REPEATABLE READ` transaction with SQL (`SET TRANSACTION`)
