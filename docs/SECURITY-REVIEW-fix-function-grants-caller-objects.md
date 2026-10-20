@@ -240,3 +240,159 @@ that call `pg_read_file` are each "permission denied for function pg_read_file".
 expressions and generated columns need an immutable function, which no withheld function is.
 
 Security review, pass 1.
+
+## Pass 2 (2026-10-20)
+
+Head reviewed: `13afe8f` (fix commits `6a74c92`, `3904cc7`, `13afe8f`; the function-grants head
+`f10d151` merged in at `0669566`). Limited pass: verify the three fixes, then attack the surfaces
+they added.
+
+### Verdict: MERGE WITH FIXES
+
+C-PR47-1 and C-PR47-3 are fixed. C-PR47-2 is fixed for the three shapes pass 1 measured. Its new
+"reach may run it as itself" test is too wide, and that opens the same hole through a weaker role
+grant (C-PR47-4, MEDIUM). Two smaller findings remain. None is HIGH. All must be fixed before
+merge (no allowance). PR 46, which this PR is stacked on, must merge first.
+
+| Id | Severity | One line | Route |
+| --- | --- | --- | --- |
+| C-PR47-4 | MEDIUM | `fn_reach` counts a role the login is a member of WITH INHERIT FALSE, SET FALSE; the login has none of that role's rights, yet R6 treats a wrapper granted to it, or owned by it, as one reach may run | builder of R6 |
+| C-PR47-5 | LOW | The refusal label of a slot function hides a zero width character in its schema name: `public​.w` prints as `public.w` | correction |
+| C-PR47-6 | INFO | SECURITY-NOTES says the second half of the L19 query lists every wrapper an operator calls; it reads the estimators only, not the operator's function | correction |
+
+### Numbers (local, own worktree, Docker up)
+
+| What | Result |
+| --- | --- |
+| `./mvnw -B clean verify` on `13afe8f` | BUILD SUCCESS, 12 min 54 s |
+| core / starter / sample tests | 1010 / 319 / 25, 0 failures, 0 skipped |
+| pass 1 probes (`CipherProbePr47Test`, both pins) | 22 / 22 green (10 former `probe_*` now green, 12 `confirms_*` still green) |
+| M46 (owner skip on every slot again) | 8 red (rules, cases on 16, probes) |
+| M47 (revoked-definer condition removed) | 11 red; also turns 4 of the new pass 2 `confirms_*` runs red |
+| M48 (count test W back to initdb only) | 4 red |
+| pass 2 probes (`CipherProbePr47Pass2Test`, both pins) | 6 red (3 probes x 2 pins), 8 `confirms_*` green |
+| CI on PR 47 | none: `ci.yml` runs on pull requests to `main` only, and this PR targets `fix/function-grants`. `gh pr checks 47` reports no checks. The required checks run once the base is `main` |
+
+Production files were restored after each mutation (`git status` clean but for the new probe
+file). The probe class `CipherProbePr47Pass2Test` (package
+`com.housedevinci.shredding.adapter.jdbc`, core tests) is handed to the fix pass, which adds it
+to the suite before it touches production code. `probe_*` methods are red on `13afe8f` and must
+turn green. `confirms_*` methods are green and must stay green.
+
+### Verification of pass 1 findings
+
+| Id | Outcome |
+| --- | --- |
+| C-PR47-1 | Fixed. Both probes green on 16 and 17. `ownerChecked` and `noCheck` split as prescribed; an operator's own function is neither. M46 red. |
+| C-PR47-2 | Fixed for the three measured shapes (all three probes green, four `*_refuses` tests and the L19 limit test green). The new may-run test is C-PR47-4. |
+| C-PR47-3 | Fixed. W reads `privtype IN ('i', 'e')` with every manifest extension created; the test-only extension `tpi` turns the count from 0 to 1; combine fit named; shapes added. M48 red. |
+
+### Attacks from the brief
+
+| Attack | Outcome |
+| --- | --- |
+| Reach-owned `SECURITY DEFINER` wrapper over a withheld function, behind an aggregate owned outside reach | Not refused, and need not be: no rule fires (`fn_reach` is true through the owner), and the call is "permission denied for function pg_read_file" at run time, because the body runs as reach (`confirms_reach_owned_wrapper_behind_a_foreign_aggregate_is_denied_at_run_time`). Consistent for an owner whose rights the login may use. Not consistent for an owner reached WITH INHERIT FALSE, SET FALSE: C-PR47-4. |
+| Same name in two schemas | Judged apart. `public.w` granted to PUBLIC and `evil.w` revoked, same key `w(text,bool)`, one aggregate over each, both creation orders: the refusal names `public.agg_a` over `evil.w` only (`confirms_same_key_wrappers_in_two_schemas_are_judged_apart`). |
+| L19 query against a renamed wrapper | Holds. The wrapper renamed to `w2` and moved to schema `evil` after the aggregate was made: the query lists `evil.w2(text,boolean) via called by aggregate agg_w(boolean)`, and R6 refuses naming `evil.w2(text, boolean)`; both follow the oid (`confirms_renamed_and_moved_wrapper_is_listed_by_l19_and_refused`). |
+| Wrapper owned by a no-inherit, no-set member that holds EXECUTE on `pg_read_file` | Refused by the reach leg (that role is in reach and holds a withheld function): `confirms_wrapper_owned_by_a_no_inherit_no_set_member_refuses`. |
+| CI state | No checks (table above). |
+
+### Findings
+
+#### C-PR47-4 (MEDIUM): "reach may run it" counts a role whose rights the login cannot use
+
+Statement 3 sets `fn_reach` when the slot function's owner, or a grantee of EXECUTE on it, is in
+reach. Reach is every role the login is a `MEMBER` of (`SchemaVerification`, `pg_has_role(..,
+'MEMBER')`). Since PostgreSQL 16 that includes a grant `WITH INHERIT FALSE, SET FALSE`, which gives
+the login none of the role's rights and no `SET ROLE` to it. Reach is the right set for the legs
+that refuse (more roles, more refusals). It is the wrong set for `fn_reach`, which exempts: L19
+holds only when the object gives nothing a direct call does not.
+
+Example 1, grant side, measured on 16 and 17:
+
+```sql
+CREATE ROLE g NOLOGIN;
+GRANT g TO app WITH INHERIT FALSE, SET FALSE;
+CREATE FUNCTION public.w(text, boolean) RETURNS text LANGUAGE sql SECURITY DEFINER
+  AS 'SELECT pg_catalog.pg_read_file($1, 0, 200, $2)';
+REVOKE EXECUTE ON FUNCTION public.w(text, boolean) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.w(text, boolean) TO g;
+CREATE AGGREGATE public.agg_w(boolean) (sfunc = public.w, stype = text, initcond = 'PG_VERSION');
+```
+
+The runtime role's `SELECT public.w('PG_VERSION', true)` is "permission denied for function w".
+Its `SELECT public.agg_w(true)` returns `16` (or `17`). The gate verifies.
+
+Example 2, owner side, measured on 16 and 17: the same `g` and `public.w` (granted to `g` only),
+plus `public.w1(text, boolean)` `SECURITY DEFINER` with body `SELECT public.w($1, $2)`, revoked
+from PUBLIC and owned by `g`, as the `sfunc` of `public.agg_w1`. Both direct calls are denied. The
+aggregate runs `w1` as `g`, `w1` calls `w` as `g` (granted), `w` reads the file as the superuser.
+The gate verifies: `fn_reach` is true through the owner.
+
+Probes (red on both pins):
+`probe_wrapper_granted_only_to_a_no_inherit_no_set_member_passes_and_reads_a_file`,
+`probe_wrapper_owned_by_a_no_inherit_no_set_member_chains_to_a_file_read`.
+
+Fix (inside the may-run test of R6, which the builder of R6 wrote; a correction of one condition,
+not a new mechanism):
+- `function-grants-3.sql`, the `fn_reach` expression of all three branches: the owner and each
+  non-PUBLIC grantee count only when the login may use that role's rights:
+  `pg_catalog.pg_has_role(<login oid>, x, 'USAGE') OR pg_catalog.pg_has_role(<login oid>, x,
+  'SET')`. PUBLIC stays as today. Bind the login oid (`FunctionGrantsSql.callers`; update
+  `STATEMENT_THREE_BINDS` and the bind comment). The usable flags and every refusing leg keep
+  reach as it is.
+- `FunctionGrantsSql.CallerFact` javadoc and `SECURITY-NOTES.md` (L19 and "Objects that call a
+  function for you"): "a role in reach" becomes "a role whose rights the login may use (inherited,
+  or reachable by `SET ROLE`)".
+- The generator proves zero rows on every clean database of each pin, as for R5 to R7.
+- Tests (both pins): `aggregate_over_a_wrapper_granted_to_a_no_inherit_no_set_member_refuses`,
+  `aggregate_over_a_wrapper_owned_by_a_no_inherit_no_set_member_refuses`, and
+  `aggregate_over_a_wrapper_granted_to_an_inherited_group_is_the_stated_limit` (verifies: the
+  login may call it directly). The two probes above turn green.
+- Mutation: go back to reach membership for `fn_reach`; the two refusal tests go red.
+
+Rejected alternative: refuse every grant `WITH INHERIT FALSE, SET FALSE` in reach. It is a valid
+way to give a role nothing; the defect is only that the exemption reads it as something.
+
+#### C-PR47-5 (LOW): a zero width character in a schema name hides in the refusal
+
+The fix gives each slot function a schema-qualified label, so the operator can tell `evil.w` from
+`public.w`. The label is built with `concat(nspname, '.', proname, ...)`, unquoted, and the message
+escape (`LogText.escape`) escapes C0 and C1 controls and U+2028/U+2029 only. A schema made with
+`CREATE SCHEMA U&"public\200B"` (public followed by U+200B, zero width space) gives a refusal that
+reads, on screen and in a log viewer, `whose transfn is function public.w(text, boolean)`. The
+gate still refuses; the operator is pointed at the wrong object. The object labels of statement 3
+are built the same way.
+
+Probe (red on both pins): `probe_refusal_label_hides_a_zero_width_character_in_the_schema_name`.
+
+Fix:
+- `LogText.escape`: also escape every character whose `Character.getType` is `FORMAT` (U+200B to
+  U+200F, U+202A to U+202E, U+2060 to U+2064, U+FEFF and the rest of Cf) and every lone surrogate,
+  as `\uXXXX`.
+- `function-grants-3.sql`: build `fn_label` and the object labels with `pg_catalog.quote_ident` on
+  the schema and the name, so a name that is not plain lowercase shows in quotes, as
+  `regprocedure` prints it.
+- Tests: `LogText` unit test `escapes_format_characters` (U+200B, U+202E, U+FEFF); the probe turns
+  green.
+- Mutation: drop the `FORMAT` branch; the probe and the unit test go red.
+
+#### C-PR47-6 (INFO): the L19 note over-states the second half of the audit query
+
+SECURITY-NOTES says the second half "lists every wrapper an aggregate, operator or language calls,
+granted or not". Its operator branch reads `oprrest` and `oprjoin` only. An operator over a revoked
+wrapper (`CREATE OPERATOR public.### (LEFTARG = text, RIGHTARG = boolean, FUNCTION = public.w)`)
+is not listed (`confirms_l19_second_half_omits_an_operator_function`, green). The omission opens
+nothing: an operator's function is checked as the caller, so a granted wrapper is in the first
+half and a revoked one is denied. Only the sentence is wrong.
+
+Fix: `SECURITY-NOTES.md`: "every wrapper in a slot R6 reads (the eight aggregate slots, an
+operator's estimators, a language's handler, inline handler and validator)". No code change; the
+confirm test stays green.
+
+### Integration surface
+
+Unchanged from pass 1, with one addition: the may-run test is now a path of its own, and it must
+use the rights the login holds, not the roles it is a member of (C-PR47-4).
+
+Security review, pass 2.
