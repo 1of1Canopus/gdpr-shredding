@@ -1429,15 +1429,19 @@ release.
 Example: `CREATE FUNCTION public.export_blob(o oid, f text) ... LANGUAGE sql SECURITY DEFINER AS
 'SELECT pg_catalog.lo_export(o, f)'`, owned by a superuser and granted to PUBLIC, passes and
 writes files. Hosted products ship many such functions, so refusing them all would refuse ordinary
-platforms. One case is not this limit: a wrapper that neither PUBLIC nor a role in reach may
-execute, owned outside reach, and named in a slot of an object R6 judges (an aggregate's support
-function, a language's validator). Its body runs as its owner and nobody checks that reach may
-run it, so startup refuses it (R6, C-PR47-2). Example: `public.w(text, boolean)` over
-`pg_read_file`, revoked from PUBLIC, as the `sfunc` of a public aggregate. A wrapper reach may
-execute stays this limit: the object gives nothing a direct call does not. Audit them with this
-query. It walks group membership, so a wrapper granted to a group of a `NOINHERIT` login is
-listed too. Its second half lists every wrapper an aggregate, operator or language calls, granted
-or not:
+platforms. One case is not this limit: a wrapper that neither PUBLIC nor a role whose rights the
+login may use (inherited, or reachable by `SET ROLE`) may execute, not owned by such a role, and
+named in a slot of an object R6 judges (an aggregate's support function, a language's validator).
+Its body runs as its owner and nobody checks that reach may run it, so startup refuses it (R6,
+C-PR47-2). Example: `public.w(text, boolean)` over `pg_read_file`, revoked from PUBLIC, as the
+`sfunc` of a public aggregate. Membership alone is not enough (C-PR47-4): a PostgreSQL 16 grant
+`GRANT g TO app WITH INHERIT FALSE, SET FALSE` gives the login none of `g`'s rights, so a wrapper
+granted only to `g`, or owned by `g`, refuses the same way. A wrapper the login may execute stays
+this limit: the object gives nothing a direct call does not. Audit them with this query. It walks
+group membership, so a wrapper granted to a group of a `NOINHERIT` login is listed too. Its second
+half lists every wrapper in a slot R6 reads (the eight aggregate slots, an operator's estimators, a
+language's handler, inline handler and validator), granted or not. An operator's own function is
+not listed: the server checks it as the caller (C-PR47-6):
 
 <!-- l19-audit-query -->
 ```sql
@@ -1506,8 +1510,12 @@ hand-made aggregate over ordinary functions (`sfunc = pg_catalog.int4pl`) verifi
 runs no code of its own. The manifest records each contrib aggregate's support functions, so a
 contrib aggregate re-created over another support function (`citext`'s `min` over
 `citext_larger`) is not as shipped. A slot function that is `SECURITY DEFINER`, in any language,
-and that reach may not run as itself (no EXECUTE for PUBLIC or a role in reach, owner outside
-reach) also refuses: its body runs as its owner (C-PR47-2). The manifest's support keys carry no
+and that reach may not run as itself also refuses: its body runs as its owner (C-PR47-2). "May
+run as itself" means EXECUTE for PUBLIC, or EXECUTE for or ownership by a role whose rights the
+login may use (inherited, or reachable by `SET ROLE`); a role reached only `WITH INHERIT FALSE, SET
+FALSE` does not count (C-PR47-4). The refusal labels quote a schema or name that is not plain
+lowercase, and the message escapes invisible format characters such as U+200B, so a look-alike
+schema cannot read as `public` (C-PR47-5). The manifest's support keys carry no
 schema (`transfn=citext_larger(citext,citext)`), so R5b cannot tell `evil.citext_larger` from the
 shipped `public.citext_larger`. R6 can: statement 3 gives it each slot function's
 schema-qualified name and rights mode, and the refusal names `evil.citext_larger`. A same-key

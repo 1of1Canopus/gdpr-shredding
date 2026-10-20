@@ -12,6 +12,7 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.OptionalLong;
+import java.util.Set;
 
 /**
  * Runs the three statements of the function-grants leg (C-PR45-3) and returns their rows as facts.
@@ -77,8 +78,10 @@ final class FunctionGrantsSql {
    * 1-based position in the branch's slot list ({@link FunctionGrants#SLOTS}). {@code fnLabel} is
    * the slot function's schema-qualified name: {@code fnKey} has no schema, as the manifest's
    * support column has none. {@code fnDefiner} is its rights mode; {@code fnReach} is true when
-   * reach may run it as itself: PUBLIC or a role in reach holds EXECUTE on it, or its owner is in
-   * reach (C-PR47-2).
+   * reach may run it as itself (C-PR47-2): PUBLIC holds EXECUTE on it, or a role whose rights the
+   * login may use (inherited, or reachable by {@code SET ROLE}) holds EXECUTE on it or owns it.
+   * Membership alone does not count (C-PR47-4): a grant {@code WITH INHERIT FALSE, SET FALSE} gives
+   * the login none of the role's rights.
    */
   record CallerFact(
       String kind,
@@ -187,15 +190,30 @@ final class FunctionGrantsSql {
     return out;
   }
 
-  /** The number of binds of statement 3: each is the reach oids. */
-  static final int STATEMENT_THREE_BINDS = 8;
+  /** The number of binds of statement 3. */
+  static final int STATEMENT_THREE_BINDS = 11;
 
-  /** Statement 3: the caller objects (design revision 5, rule R6). */
-  static List<CallerFact> callers(Connection c, long[] reachOids) throws SQLException {
+  /**
+   * The binds of statement 3 that take the login oid, one per branch (C-PR47-4); every other bind
+   * takes the reach oids.
+   */
+  static final Set<Integer> STATEMENT_THREE_LOGIN_BINDS = Set.of(4, 7, 11);
+
+  /**
+   * Statement 3: the caller objects (design revision 5, rule R6).
+   *
+   * @param loginOid the login role, whose usable rights decide {@code fnReach} (C-PR47-4)
+   */
+  static List<CallerFact> callers(Connection c, long[] reachOids, long loginOid)
+      throws SQLException {
     var out = new ArrayList<CallerFact>();
     try (PreparedStatement ps = c.prepareStatement(statementThree())) {
       for (int i = 1; i <= STATEMENT_THREE_BINDS; i++) {
-        ps.setArray(i, c.createArrayOf("oid", boxed(reachOids)));
+        if (STATEMENT_THREE_LOGIN_BINDS.contains(i)) {
+          ps.setLong(i, loginOid);
+        } else {
+          ps.setArray(i, c.createArrayOf("oid", boxed(reachOids)));
+        }
       }
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {

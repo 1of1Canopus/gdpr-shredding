@@ -7,13 +7,19 @@
 -- Runs inside the gate's pinned window. House dialect: every name qualified, no CTE.
 -- Each row also carries three facts on its slot function (C-PR47-2): its schema-qualified
 -- name (a support key in the manifest has no schema, so this is what tells evil.f(x) from
--- public.f(x)), its rights mode, and whether reach may run it as itself: PUBLIC or a role in
--- reach holds EXECUTE on it, or its owner is in reach (then its body runs as reach anyway).
--- Binds: 1 to 8 are all the reach oids (_oid), in text order: aggregate usable, aggregate
--- slot (two), operator slot (two), language usable, language slot (two).
+-- public.f(x)), its rights mode, and whether reach may run it as itself: PUBLIC holds EXECUTE
+-- on it, or a role whose rights the login may use (inherited, or reachable by SET ROLE) holds
+-- EXECUTE on it or owns it (then its body runs with rights the login has anyway). Membership
+-- alone is not enough (C-PR47-4): a PostgreSQL 16 grant WITH INHERIT FALSE, SET FALSE gives the
+-- login none of the role's rights. The refusing legs keep reach as it is. CASE, not OR, so that
+-- oid 0 (PUBLIC) never reaches pg_has_role. Labels are quoted (C-PR47-5): a name that is not
+-- plain lowercase shows in quotes, as regprocedure prints it.
+-- Binds, in text order (11): aggregate usable, aggregate slot owner and grantee (reach oids,
+-- _oid), aggregate login (oid); operator slot owner and grantee, operator login; language
+-- usable, language slot owner and grantee, language login.
 SELECT 'agg'::pg_catalog.text AS kind,
        p.oid AS oid,
-       pg_catalog.concat(n.nspname, '.', p.proname, '(',
+       pg_catalog.concat(pg_catalog.quote_ident(n.nspname), '.', pg_catalog.quote_ident(p.proname), '(',
                          pg_catalog.pg_get_function_identity_arguments(p.oid), ')') AS label,
        p.proowner AS owner,
        pg_catalog.pg_get_userbyid(p.proowner)::pg_catalog.text AS owner_name,
@@ -29,16 +35,22 @@ SELECT 'agg'::pg_catalog.text AS kind,
          (SELECT pg_catalog.string_agg(t.typname::pg_catalog.text, ',' ORDER BY arg.ordinality)
             FROM pg_catalog.unnest(f.proargtypes::pg_catalog._oid) WITH ORDINALITY AS arg
             JOIN pg_catalog.pg_type AS t ON (t.oid OPERATOR(pg_catalog.=) arg.arg)), ')') AS fn_key,
-       pg_catalog.concat(fs.nspname, '.', f.proname, '(',
+       pg_catalog.concat(pg_catalog.quote_ident(fs.nspname), '.', pg_catalog.quote_ident(f.proname), '(',
                          pg_catalog.pg_get_function_identity_arguments(f.oid), ')') AS fn_label,
        f.prosecdef AS fn_definer,
-       ((f.proowner OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))
+       ((CASE WHEN f.proowner OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid)
+              THEN (pg_catalog.pg_has_role(me.login, f.proowner, 'USAGE')
+                    OR pg_catalog.pg_has_role(me.login, f.proowner, 'SET'))
+              ELSE false END)
         OR EXISTS (SELECT 1 FROM pg_catalog.aclexplode(CASE WHEN f.proacl IS NULL
                                                          THEN pg_catalog.acldefault('f', f.proowner)
                                                          ELSE f.proacl END) AS h
                     WHERE (h.privilege_type OPERATOR(pg_catalog.=) 'EXECUTE')
-                      AND ((h.grantee OPERATOR(pg_catalog.=) 0::pg_catalog.oid)
-                           OR (h.grantee OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))))) AS fn_reach
+                      AND (CASE WHEN h.grantee OPERATOR(pg_catalog.=) 0::pg_catalog.oid THEN true
+                                WHEN h.grantee OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid)
+                                THEN (pg_catalog.pg_has_role(me.login, h.grantee, 'USAGE')
+                                      OR pg_catalog.pg_has_role(me.login, h.grantee, 'SET'))
+                                ELSE false END))) AS fn_reach
   FROM pg_catalog.pg_aggregate AS a
   JOIN pg_catalog.pg_proc AS p ON (p.oid OPERATOR(pg_catalog.=) a.aggfnoid)
   JOIN pg_catalog.pg_namespace AS n ON (n.oid OPERATOR(pg_catalog.=) p.pronamespace)
@@ -59,6 +71,7 @@ SELECT 'agg'::pg_catalog.text AS kind,
   -- A slot the aggregate leaves empty is oid 0, which no function has: the join drops it.
   JOIN pg_catalog.pg_proc AS f ON (f.oid OPERATOR(pg_catalog.=) s.s)
   JOIN pg_catalog.pg_namespace AS fs ON (fs.oid OPERATOR(pg_catalog.=) f.pronamespace)
+  CROSS JOIN (SELECT ?::pg_catalog.oid AS login) AS me
 UNION ALL
 -- Operators have no ACL: anyone who can name one can use it.
 SELECT 'opr', o.oid, o.oid::pg_catalog.regoperator::pg_catalog.text, o.oprowner,
@@ -67,16 +80,22 @@ SELECT 'opr', o.oid, o.oid::pg_catalog.regoperator::pg_catalog.text, o.oprowner,
          (SELECT pg_catalog.string_agg(t.typname::pg_catalog.text, ',' ORDER BY arg.ordinality)
             FROM pg_catalog.unnest(f.proargtypes::pg_catalog._oid) WITH ORDINALITY AS arg
             JOIN pg_catalog.pg_type AS t ON (t.oid OPERATOR(pg_catalog.=) arg.arg)), ')'),
-       pg_catalog.concat(fs.nspname, '.', f.proname, '(',
+       pg_catalog.concat(pg_catalog.quote_ident(fs.nspname), '.', pg_catalog.quote_ident(f.proname), '(',
                          pg_catalog.pg_get_function_identity_arguments(f.oid), ')'),
        f.prosecdef,
-       ((f.proowner OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))
+       ((CASE WHEN f.proowner OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid)
+              THEN (pg_catalog.pg_has_role(me.login, f.proowner, 'USAGE')
+                    OR pg_catalog.pg_has_role(me.login, f.proowner, 'SET'))
+              ELSE false END)
         OR EXISTS (SELECT 1 FROM pg_catalog.aclexplode(CASE WHEN f.proacl IS NULL
                                                          THEN pg_catalog.acldefault('f', f.proowner)
                                                          ELSE f.proacl END) AS h
                     WHERE (h.privilege_type OPERATOR(pg_catalog.=) 'EXECUTE')
-                      AND ((h.grantee OPERATOR(pg_catalog.=) 0::pg_catalog.oid)
-                           OR (h.grantee OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid)))))
+                      AND (CASE WHEN h.grantee OPERATOR(pg_catalog.=) 0::pg_catalog.oid THEN true
+                                WHEN h.grantee OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid)
+                                THEN (pg_catalog.pg_has_role(me.login, h.grantee, 'USAGE')
+                                      OR pg_catalog.pg_has_role(me.login, h.grantee, 'SET'))
+                                ELSE false END)))
   FROM pg_catalog.pg_operator AS o
   CROSS JOIN pg_catalog.unnest(
          pg_catalog.array_append(pg_catalog.array_append(pg_catalog.array_append(
@@ -84,9 +103,10 @@ SELECT 'opr', o.oid, o.oid::pg_catalog.regoperator::pg_catalog.text, o.oprowner,
            o.oprjoin::pg_catalog.oid)) WITH ORDINALITY AS s
   JOIN pg_catalog.pg_proc AS f ON (f.oid OPERATOR(pg_catalog.=) s.s)
   JOIN pg_catalog.pg_namespace AS fs ON (fs.oid OPERATOR(pg_catalog.=) f.pronamespace)
+  CROSS JOIN (SELECT ?::pg_catalog.oid AS login) AS me
 UNION ALL
 -- A language is usable by a role that is not a superuser only when it is trusted.
-SELECT 'lang', l.oid, l.lanname::pg_catalog.text, l.lanowner,
+SELECT 'lang', l.oid, pg_catalog.quote_ident(l.lanname), l.lanowner,
        pg_catalog.pg_get_userbyid(l.lanowner)::pg_catalog.text,
        (l.lanpltrusted
         AND EXISTS (SELECT 1
@@ -101,16 +121,22 @@ SELECT 'lang', l.oid, l.lanname::pg_catalog.text, l.lanowner,
          (SELECT pg_catalog.string_agg(t.typname::pg_catalog.text, ',' ORDER BY arg.ordinality)
             FROM pg_catalog.unnest(f.proargtypes::pg_catalog._oid) WITH ORDINALITY AS arg
             JOIN pg_catalog.pg_type AS t ON (t.oid OPERATOR(pg_catalog.=) arg.arg)), ')'),
-       pg_catalog.concat(fs.nspname, '.', f.proname, '(',
+       pg_catalog.concat(pg_catalog.quote_ident(fs.nspname), '.', pg_catalog.quote_ident(f.proname), '(',
                          pg_catalog.pg_get_function_identity_arguments(f.oid), ')'),
        f.prosecdef,
-       ((f.proowner OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))
+       ((CASE WHEN f.proowner OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid)
+              THEN (pg_catalog.pg_has_role(me.login, f.proowner, 'USAGE')
+                    OR pg_catalog.pg_has_role(me.login, f.proowner, 'SET'))
+              ELSE false END)
         OR EXISTS (SELECT 1 FROM pg_catalog.aclexplode(CASE WHEN f.proacl IS NULL
                                                          THEN pg_catalog.acldefault('f', f.proowner)
                                                          ELSE f.proacl END) AS h
                     WHERE (h.privilege_type OPERATOR(pg_catalog.=) 'EXECUTE')
-                      AND ((h.grantee OPERATOR(pg_catalog.=) 0::pg_catalog.oid)
-                           OR (h.grantee OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid)))))
+                      AND (CASE WHEN h.grantee OPERATOR(pg_catalog.=) 0::pg_catalog.oid THEN true
+                                WHEN h.grantee OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid)
+                                THEN (pg_catalog.pg_has_role(me.login, h.grantee, 'USAGE')
+                                      OR pg_catalog.pg_has_role(me.login, h.grantee, 'SET'))
+                                ELSE false END)))
   FROM pg_catalog.pg_language AS l
   CROSS JOIN pg_catalog.unnest(
          pg_catalog.array_append(pg_catalog.array_append(pg_catalog.array_append(
@@ -118,4 +144,5 @@ SELECT 'lang', l.oid, l.lanname::pg_catalog.text, l.lanowner,
          WITH ORDINALITY AS s
   JOIN pg_catalog.pg_proc AS f ON (f.oid OPERATOR(pg_catalog.=) s.s)
   JOIN pg_catalog.pg_namespace AS fs ON (fs.oid OPERATOR(pg_catalog.=) f.pronamespace)
+  CROSS JOIN (SELECT ?::pg_catalog.oid AS login) AS me
  ORDER BY 1, 2, 7

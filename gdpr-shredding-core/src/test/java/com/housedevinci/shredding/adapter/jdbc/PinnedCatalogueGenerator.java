@@ -62,6 +62,12 @@ final class PinnedCatalogueGenerator {
 
   private static final Comparator<String> C_ORDER = PinnedCatalogue.C_ORDER;
 
+  /**
+   * The login oid statement 3 takes (C-PR47-4). The generator passes no reach, so no CASE branch
+   * calls pg_has_role; oid 10 is the bootstrap superuser, which every cluster has.
+   */
+  private static final long BOOTSTRAP_SUPERUSER = 10L;
+
   private PinnedCatalogueGenerator() {}
 
   /** {@code major outDir}: starts the pinned image of {@code major}, writes its four files. */
@@ -335,7 +341,8 @@ final class PinnedCatalogueGenerator {
     Map<Long, String> supports;
     try (Connection c = connect(pg, db)) {
       pin(c);
-      supports = FunctionGrants.supports(FunctionGrantsSql.callers(c, new long[0]));
+      supports =
+          FunctionGrants.supports(FunctionGrantsSql.callers(c, new long[0], BOOTSTRAP_SUPERUSER));
       for (var f : FunctionGrantsSql.executes(c, new long[0], new long[0])) {
         if (f.nativeCode() && f.extension().equals(ext)) {
           byOid.computeIfAbsent(f.oid(), k -> new ArrayList<>()).add(f);
@@ -521,7 +528,7 @@ final class PinnedCatalogueGenerator {
       for (String line : FunctionGrants.judgeCore(facts, catalogue)) {
         throw new Refused(db + ": R7 " + line);
       }
-      var callers = FunctionGrantsSql.callers(c, new long[0]);
+      var callers = FunctionGrantsSql.callers(c, new long[0], BOOTSTRAP_SUPERUSER);
       for (var r :
           FunctionGrants.judgeCallers(callers, facts, catalogue, List.of(), java.util.Set.of())) {
         throw new Refused(db + ": R6 " + r.label() + " " + r.slot() + " " + r.function());

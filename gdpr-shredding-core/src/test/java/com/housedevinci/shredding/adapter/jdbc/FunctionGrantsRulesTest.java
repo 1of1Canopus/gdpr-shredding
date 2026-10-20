@@ -803,7 +803,8 @@ class FunctionGrantsRulesTest {
     var row = judgeCallers(wrapper("agg", OWNER, 1, true, false)).get(0);
     assertThat(FunctionGrantMessages.caller(row, catalogue()))
         .contains("whose transfn is function public.w(text)")
-        .contains("SECURITY DEFINER function that neither PUBLIC nor a role in reach may execute");
+        .contains(
+            "SECURITY DEFINER function that neither PUBLIC nor a role whose rights the login may use may execute");
   }
 
   @Test

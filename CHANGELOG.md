@@ -28,8 +28,10 @@ All notable changes to this project. The format follows
   when a role outside reach owns it; a language or an operator is judged whoever owns it,
   because the server checks nothing on those slots (C-PR47-1). A slot function that is a
   `SECURITY DEFINER` wrapper reach may not execute itself also refuses, even in another schema
-  under the shipped key (C-PR47-2). A
-  hand-made aggregate over ordinary functions no longer refuses. The extension manifest gains a
+  under the shipped key (C-PR47-2). "May execute" counts only roles whose rights the login may
+  use: a role granted `WITH INHERIT FALSE, SET FALSE` does not count (C-PR47-4). Refusal labels
+  quote the schema and name, and every message escapes invisible format characters such as
+  U+200B (C-PR47-5). A hand-made aggregate over ordinary functions no longer refuses. The extension manifest gains a
   seventh column, the support functions of each contrib aggregate.
 - **C-PR45-3-17 (MEDIUM): a core function rewritten in place passed.** `CREATE OR REPLACE` keeps
   the oid of `pg_catalog.lower(text)` while it changes its language, library and symbol. A new

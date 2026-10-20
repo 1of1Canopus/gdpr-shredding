@@ -173,7 +173,8 @@ final class FunctionGrants {
     for (long oid : reach.oids()) {
       reachOids.add(oid);
     }
-    List<FunctionGrantsSql.CallerFact> callers = FunctionGrantsSql.callers(c, reach.oids());
+    List<FunctionGrantsSql.CallerFact> callers =
+        FunctionGrantsSql.callers(c, reach.oids(), reach.loginOid());
     var lines = new ArrayList<String>();
     for (ExecuteRow row : judgeExecutes(facts, catalogue, accepted, reachOids, supports(callers))) {
       long g = row.grantee();
@@ -564,9 +565,10 @@ final class FunctionGrants {
 
   /**
    * C-PR47-2: the slot function is {@code SECURITY DEFINER}, in any language, and reach may not run
-   * it as itself (no EXECUTE for PUBLIC or a role in reach, owner outside reach). Its body runs as
-   * its owner, and on the slots R6 judges nobody checks that reach may execute it. A wrapper reach
-   * may execute stays limit L19: the object then gives nothing a direct call does not.
+   * it as itself (no EXECUTE for PUBLIC or for a role whose rights the login may use, and no such
+   * role owns it; C-PR47-4: a role reached WITH INHERIT FALSE, SET FALSE is not one). Its body runs
+   * as its owner, and on the slots R6 judges nobody checks that reach may execute it. A wrapper
+   * reach may execute stays limit L19: the object then gives nothing a direct call does not.
    */
   static boolean revokedDefiner(FunctionGrantsSql.CallerFact c) {
     return c.fnDefiner() && !c.fnReach();

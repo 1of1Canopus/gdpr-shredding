@@ -1286,7 +1286,8 @@ abstract class FunctionGrantsCases {
   private static final String REVOKE_W =
       "REVOKE EXECUTE ON FUNCTION public.w(text, boolean) FROM PUBLIC";
   private static final String W_REASON =
-      "a SECURITY DEFINER function that neither PUBLIC nor a role in reach may execute";
+      "a SECURITY DEFINER function that neither PUBLIC nor a role whose rights the login may"
+          + " use may execute";
 
   @Test
   void aggregate_over_a_revoked_security_definer_wrapper_refuses() throws SQLException {
@@ -1376,6 +1377,114 @@ abstract class FunctionGrantsCases {
         "CREATE AGGREGATE public.agg_w(boolean) (sfunc = public.w, stype = text,"
             + " initcond = 'PG_VERSION')");
     verifies(db.app());
+  }
+
+  // ------------------------------- C-PR47-4: reach may run it only with rights the login may use
+
+  private static final String AGG_W =
+      "CREATE AGGREGATE public.agg_w(boolean) (sfunc = public.w, stype = text,"
+          + " initcond = 'PG_VERSION')";
+
+  @Test
+  void aggregate_over_a_wrapper_granted_to_a_no_inherit_no_set_member_refuses()
+      throws SQLException {
+    // A grant WITH INHERIT FALSE, SET FALSE gives the login none of g's rights: a direct call is
+    // denied, so the aggregate gives more than a direct call and R6 refuses it.
+    var db = db();
+    String g = group("fg_nis" + major);
+    exec(
+        db.su(),
+        "GRANT " + g + " TO " + APP + " WITH INHERIT FALSE, SET FALSE",
+        DEFINER_W,
+        REVOKE_W,
+        "GRANT EXECUTE ON FUNCTION public.w(text, boolean) TO " + g,
+        AGG_W);
+    assertThatThrownBy(() -> scalar(db.app(), "SELECT public.w('PG_VERSION', true)"))
+        .hasMessageContaining("permission denied for function w");
+    refuses(
+        db.app(),
+        "aggregate public.agg_w(boolean)",
+        "whose transfn is function public.w(text, boolean)",
+        W_REASON);
+  }
+
+  @Test
+  void aggregate_over_a_wrapper_owned_by_a_no_inherit_no_set_member_refuses() throws SQLException {
+    // The owner side: w1 runs as g, which the login cannot use, and calls w, granted to g only.
+    var db = db();
+    String g = group("fg_nio" + major);
+    exec(
+        db.su(),
+        "GRANT " + g + " TO " + APP + " WITH INHERIT FALSE, SET FALSE",
+        DEFINER_W,
+        REVOKE_W,
+        "GRANT EXECUTE ON FUNCTION public.w(text, boolean) TO " + g,
+        "CREATE FUNCTION public.w1(text, boolean) RETURNS text LANGUAGE sql SECURITY DEFINER"
+            + " AS 'SELECT public.w($1, $2)'",
+        "REVOKE EXECUTE ON FUNCTION public.w1(text, boolean) FROM PUBLIC",
+        "ALTER FUNCTION public.w1(text, boolean) OWNER TO " + g,
+        "CREATE AGGREGATE public.agg_w1(boolean) (sfunc = public.w1, stype = text,"
+            + " initcond = 'PG_VERSION')");
+    refuses(
+        db.app(),
+        "aggregate public.agg_w1(boolean)",
+        "whose transfn is function public.w1(text, boolean)",
+        W_REASON);
+  }
+
+  @Test
+  void aggregate_over_a_wrapper_granted_to_an_inherited_group_is_the_stated_limit()
+      throws SQLException {
+    // L19: the login inherits g's rights and may call w directly, so the aggregate gives nothing
+    // more.
+    var db = db();
+    String g = group("fg_inh" + major);
+    exec(
+        db.su(),
+        "GRANT " + g + " TO " + APP + " WITH INHERIT TRUE, SET FALSE",
+        DEFINER_W,
+        REVOKE_W,
+        "GRANT EXECUTE ON FUNCTION public.w(text, boolean) TO " + g,
+        AGG_W);
+    assertThat(scalar(db.app(), "SELECT public.w('PG_VERSION', true)"))
+        .startsWith(Integer.toString(major));
+    verifies(db.app());
+  }
+
+  @Test
+  void aggregate_over_a_wrapper_granted_to_a_set_only_group_is_the_stated_limit()
+      throws SQLException {
+    // L19 through SET ROLE: the login may become g and call w directly.
+    var db = db();
+    String g = group("fg_set" + major);
+    exec(
+        db.su(),
+        "GRANT " + g + " TO " + APP + " WITH INHERIT FALSE, SET TRUE",
+        DEFINER_W,
+        REVOKE_W,
+        "GRANT EXECUTE ON FUNCTION public.w(text, boolean) TO " + g,
+        AGG_W);
+    verifies(db.app());
+  }
+
+  @Test
+  void refusal_quotes_a_schema_and_object_name_that_is_not_plain_lowercase() throws SQLException {
+    // C-PR47-5: labels go through quote_ident, so "Evil" and "Agg" show as regprocedure prints
+    // them, and a look-alike of public.w cannot read as public.w.
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE SCHEMA \"Evil\"",
+        "CREATE FUNCTION \"Evil\".w(text, boolean) RETURNS text LANGUAGE sql SECURITY DEFINER"
+            + " AS 'SELECT pg_catalog.pg_read_file($1, 0, 200, $2)'",
+        "REVOKE EXECUTE ON FUNCTION \"Evil\".w(text, boolean) FROM PUBLIC",
+        "CREATE AGGREGATE public.\"Agg\"(boolean) (sfunc = \"Evil\".w, stype = text,"
+            + " initcond = 'PG_VERSION')");
+    refuses(
+        db.app(),
+        "aggregate public.\"Agg\"(boolean)",
+        "whose transfn is function \"Evil\".w(text, boolean)",
+        W_REASON);
   }
 
   @Test
