@@ -1519,8 +1519,11 @@ slot on 16 and 17: the three `pg_stat_reset_*(oid)` functions and `pg_ls_tmpdir(
 typmod, analyze, subscript), range canonical and subtype-diff functions, operator class support
 functions, access method handlers, conversions, text search parsers and templates, foreign-data
 wrapper handlers and validators, transforms, triggers and event triggers. Each slot takes or
-returns `cstring` or `internal`, or has a shape that no withheld built-in fits. A test counts the
-fits on each pin and expects zero, so a pin bump that adds one turns the build red. A cast is not
+returns `cstring` or `internal`, or has a shape that no withheld function, built-in or shipped
+extension, fits. A test counts the fits on each pin, with every manifest extension created, and
+expects zero, so a pin bump that adds one turns the build red. Two slots R6 reads have fits, and
+the test names them: the four validator fits above, and `dblink_connect_u(text, text)` in the
+aggregate combine slot `(s, s) -> s`, which R6 refuses. A cast is not
 in this list: a withheld function may fit a new cast (`lo_import(text)` returns `oid`; not tried), but the
 server checks EXECUTE on a cast's function as the caller (measured), as for an operator's.
 

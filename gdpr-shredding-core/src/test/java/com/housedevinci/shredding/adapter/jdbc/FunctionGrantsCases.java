@@ -70,6 +70,16 @@ abstract class FunctionGrantsCases {
             "CREATE FUNCTION tp_similarity(text, text) RETURNS real"
                 + " AS '$libdir/pg_trgm', 'similarity' LANGUAGE c STRICT;\n"),
         EXT_DIR + "tp--1.0.sql");
+    // A test-only extension that withholds one function with an internal argument (C-PR47-3).
+    pg.copyFileToContainer(
+        Transferable.of("default_version = '1.0'\nrelocatable = true\n"), EXT_DIR + "tpi.control");
+    pg.copyFileToContainer(
+        Transferable.of(
+            "CREATE FUNCTION tpi_sel(internal, oid, internal, integer) RETURNS float8"
+                + " AS 'eqsel' LANGUAGE internal STRICT;\n"
+                + "REVOKE EXECUTE ON FUNCTION tpi_sel(internal, oid, internal, integer)"
+                + " FROM PUBLIC;\n"),
+        EXT_DIR + "tpi--1.0.sql");
     // A test-only update script to a pgstattuple version no manifest lists (R5v).
     pg.copyFileToContainer(Transferable.of("SELECT 1;\n"), EXT_DIR + "pgstattuple--1.5--1.9.sql");
   }
@@ -1500,38 +1510,84 @@ abstract class FunctionGrantsCases {
   }
 
   /**
-   * The count behind "refused by signature", kept live on each pin: no withheld initdb function
-   * takes or returns cstring or internal, returns trigger or event_trigger, or fits a combine,
-   * btree compare, range subdiff or FDW validator shape. The validator shape (oid) fits four: R6
-   * judges that slot. A pin bump that adds a fit turns this red.
+   * W as the count tests read it: every function the server or a shipped extension records without
+   * PUBLIC EXECUTE in pg_init_privs (privtype 'i' or 'e'), C-PR47-3.
+   */
+  private static final String W =
+      "FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_init_privs i ON i.objoid = p.oid"
+          + " AND i.classoid = 'pg_catalog.pg_proc'::pg_catalog.regclass"
+          + " AND i.privtype IN ('i', 'e')"
+          + " WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(i.initprivs) y"
+          + " WHERE y.grantee = 0)";
+
+  /**
+   * The shapes of every slot statement 3 does not read: cstring or internal in or out (type I/O,
+   * analyze, subscript, access method, conversion, text search, FDW handler), a cstring[] argument
+   * (typmod input), trigger and event_trigger, a btree compare {@code (T, T) -> int4/bool/float8},
+   * an FDW validator {@code (text[], oid)}, a hash {@code (T) -> int4}, an extended hash {@code (T,
+   * int8) -> int8} and a btree equal-image {@code (oid) -> bool}.
+   */
+  private static final String UNREAD_SHAPES =
+      "SELECT pg_catalog.count(*) "
+          + W
+          + " AND (p.prorettype IN ('cstring'::pg_catalog.regtype, 'internal'::pg_catalog.regtype,"
+          + " 'trigger'::pg_catalog.regtype, 'event_trigger'::pg_catalog.regtype)"
+          + " OR p.proargtypes::pg_catalog.oid[] && '{2275,2281,1263}'::pg_catalog.oid[]"
+          + " OR (p.pronargs = 2 AND p.proargtypes[0] = p.proargtypes[1]"
+          + " AND p.prorettype IN ('int4'::pg_catalog.regtype, 'bool'::pg_catalog.regtype,"
+          + " 'float8'::pg_catalog.regtype))"
+          + " OR (p.pronargs = 2 AND p.proargtypes[0] = 'text[]'::pg_catalog.regtype)"
+          + " OR (p.pronargs = 1 AND p.prorettype = 'int4'::pg_catalog.regtype)"
+          + " OR (p.pronargs = 2 AND p.proargtypes[1] = 'int8'::pg_catalog.regtype"
+          + " AND p.prorettype = 'int8'::pg_catalog.regtype)"
+          + " OR (p.pronargs = 1 AND p.proargtypes[0] = 'oid'::pg_catalog.regtype"
+          + " AND p.prorettype = 'bool'::pg_catalog.regtype))";
+
+  private static String fits(String shape) {
+    return "SELECT pg_catalog.string_agg(p.oid::pg_catalog.regprocedure::pg_catalog.text, ';'"
+        + " ORDER BY p.proname) "
+        + W
+        + " AND "
+        + shape;
+  }
+
+  /**
+   * The count behind "refused by signature", kept live on each pin with every manifest extension
+   * created: no withheld function, built-in or shipped by an extension, fits a slot statement 3
+   * does not read. Two read slots have fits, asserted by name: the validator {@code (oid)} fits
+   * four built-ins, and the aggregate combine {@code (s, s) -> s} fits {@code dblink_connect_u}. R6
+   * judges both. A pin bump that adds a fit turns this red.
    */
   @Test
-  void withheld_built_ins_fit_no_refused_slot_shape_and_four_fit_the_validator()
-      throws SQLException {
+  void withheld_functions_fit_no_unread_slot_shape() throws SQLException {
     var db = db();
-    String w =
-        "FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_init_privs i ON i.objoid = p.oid"
-            + " AND i.classoid = 'pg_catalog.pg_proc'::pg_catalog.regclass AND i.privtype = 'i'"
-            + " WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(i.initprivs) y"
-            + " WHERE y.grantee = 0)";
-    String refusedShapes =
-        "SELECT pg_catalog.count(*) "
-            + w
-            + " AND (p.prorettype IN ('cstring'::pg_catalog.regtype, 'internal'::pg_catalog.regtype,"
-            + " 'trigger'::pg_catalog.regtype, 'event_trigger'::pg_catalog.regtype)"
-            + " OR p.proargtypes::pg_catalog.oid[] && '{2275,2281}'::pg_catalog.oid[]"
-            + " OR (p.pronargs = 2 AND p.proargtypes[0] = p.proargtypes[1]"
-            + " AND (p.prorettype IN ('int4'::pg_catalog.regtype, 'bool'::pg_catalog.regtype,"
-            + " 'float8'::pg_catalog.regtype) OR p.prorettype = p.proargtypes[0]))"
-            + " OR (p.pronargs = 2 AND p.proargtypes[0] = 'text[]'::pg_catalog.regtype))";
-    assertThat(scalar(db.su(), refusedShapes)).isEqualTo("0");
-    String validators =
-        "SELECT pg_catalog.string_agg(p.proname::text, ',' ORDER BY p.proname) "
-            + w
-            + " AND p.pronargs = 1 AND p.proargtypes[0] = 'oid'::pg_catalog.regtype";
-    assertThat(scalar(db.su(), validators))
+    for (String ext : PinnedCatalogue.forMajor(major).orElseThrow().installableExtensions()) {
+      exec(db.su(), "CREATE EXTENSION IF NOT EXISTS \"" + ext + "\" CASCADE");
+    }
+    assertThat(scalar(db.su(), UNREAD_SHAPES)).isEqualTo("0");
+    assertThat(
+            scalar(
+                db.su(), fits("p.pronargs = 1 AND p.proargtypes[0] = 'oid'::pg_catalog.regtype")))
         .isEqualTo(
-            "pg_ls_tmpdir,pg_stat_reset_single_function_counters,"
-                + "pg_stat_reset_single_table_counters,pg_stat_reset_subscription_stats");
+            "pg_ls_tmpdir(oid);pg_stat_reset_single_function_counters(oid);"
+                + "pg_stat_reset_single_table_counters(oid);pg_stat_reset_subscription_stats(oid)");
+    assertThat(
+            scalar(
+                db.su(),
+                fits(
+                    "p.pronargs = 2 AND p.proargtypes[0] = p.proargtypes[1]"
+                        + " AND p.prorettype = p.proargtypes[0]")))
+        .isEqualTo("dblink_connect_u(text,text)");
+  }
+
+  @Test
+  void count_test_sees_an_extension_withheld_function_with_an_internal_argument()
+      throws SQLException {
+    // C-PR47-3: the count reads the extension part of W too, so a pin bump that ships such a
+    // function in a contrib extension turns the guard red.
+    var db = db();
+    assertThat(scalar(db.su(), UNREAD_SHAPES)).isEqualTo("0");
+    exec(db.su(), "CREATE EXTENSION tpi");
+    assertThat(scalar(db.su(), UNREAD_SHAPES)).isEqualTo("1");
   }
 }
