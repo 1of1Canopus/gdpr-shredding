@@ -91,14 +91,23 @@ final class FunctionGrants {
           List.of("handler", "inline", "validator"));
 
   /**
-   * True when the server calls the slot's function with the object owner's EXECUTE checked, or with
-   * none: the slots R6 judges. Measured on both pins (revision 5, round 5 review): an operator's
-   * {@code oprcode} is checked as the caller ({@code permission denied for function}); aggregate
-   * support functions are checked as the owner; language handlers, inline handlers and validators,
-   * and operator estimators, are called with no check at all.
+   * True when the server checks EXECUTE on the slot's function as the object's owner: every
+   * aggregate slot (by the server's source, and measured for the eight on both pins). R6 skips such
+   * a slot when the owner is in reach: the check then runs as reach.
    */
-  static boolean ownerOrNobody(String kind, int slot) {
-    return !(kind.equals("opr") && slot == 1);
+  static boolean ownerChecked(String kind, int slot) {
+    return kind.equals("agg") && slot >= 1;
+  }
+
+  /**
+   * True when the server calls the slot's function with no EXECUTE check at all: a language's
+   * handler, inline handler and validator, and an operator's estimators ({@code oprrest}, {@code
+   * oprjoin}). Measured on both pins (revision 5, round 5 review). R6 judges such a slot whoever
+   * owns the object (C-PR47-1): the owner's rights play no part. An operator's {@code oprcode} is
+   * neither: the server checks it as the caller ({@code permission denied for function}).
+   */
+  static boolean noCheck(String kind, int slot) {
+    return kind.equals("lang") || (kind.equals("opr") && slot != 1);
   }
 
   static void check(
@@ -505,10 +514,11 @@ final class FunctionGrants {
   }
 
   /**
-   * R6: a caller object that reach or PUBLIC may use, owned by a role outside reach, whose slot
-   * runs with the owner's EXECUTE checked or with none, and whose slot function falls under leg 1
-   * to 6. An object owned by a role in reach is skipped: its owner checks run as reach, and the
-   * other legs judge what reach holds. One row per (object, slot), in (kind, object, slot) order.
+   * R6: a caller object that reach or PUBLIC may use, whose slot function falls under leg 1 to 6.
+   * An owner-checked slot ({@link #ownerChecked}) is judged only when the owner is outside reach:
+   * with the owner in reach the check runs as reach, and the other legs judge what reach holds. A
+   * no-check slot ({@link #noCheck}) is judged whoever owns the object (C-PR47-1). One row per
+   * (object, slot), in (kind, object, slot) order.
    */
   static List<CallerRow> judgeCallers(
       List<FunctionGrantsSql.CallerFact> callers,
@@ -519,7 +529,7 @@ final class FunctionGrants {
     var ctx = context(facts, catalogue, supports(callers));
     var out = new ArrayList<CallerRow>();
     for (var c : callers) {
-      if (!ownerOrNobody(c.kind(), c.slot()) || !c.usable() || reach.contains(c.owner())) {
+      if (!c.usable() || !judged(c, reach)) {
         continue;
       }
       var list = ctx.byOid().get(c.fn());
@@ -548,6 +558,14 @@ final class FunctionGrants {
               f.version()));
     }
     return out;
+  }
+
+  /** Whether R6 judges this slot at all, before its function is looked at. */
+  private static boolean judged(FunctionGrantsSql.CallerFact c, Set<Long> reach) {
+    if (ownerChecked(c.kind(), c.slot())) {
+      return !reach.contains(c.owner());
+    }
+    return noCheck(c.kind(), c.slot());
   }
 
   private static String slotName(FunctionGrantsSql.CallerFact c) {

@@ -130,7 +130,10 @@ final class FunctionGrantMessages {
         + what
         + ", owned by "
         + text(row.ownerName())
-        + " outside reach, whose "
+        // Only an aggregate is judged for its owner's place (C-PR47-1): a no-check slot is judged
+        // whoever owns the object, so "outside reach" would be false for a reach-owned language.
+        + (row.kind().equals("agg") ? " outside reach" : "")
+        + ", whose "
         + text(row.slot())
         + " is function "
         + text(row.function())

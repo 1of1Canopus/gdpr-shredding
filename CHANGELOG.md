@@ -23,8 +23,10 @@ All notable changes to this project. The format follows
   EXECUTE on an aggregate's support functions as the aggregate's owner. A superuser's
   `CREATE AGGREGATE public.readall(bool) (sfunc = pg_catalog.pg_read_file, ...)` let the runtime
   role read any file. Startup now refuses, with `SHRED-SCHEMA-004`, an aggregate, trusted
-  language or operator that reach or PUBLIC may use, owned outside reach, whose support
-  function, validator, handler or estimator falls under the function-grants rules (R6). A
+  language or operator that reach or PUBLIC may use, whose support function, validator,
+  handler or estimator falls under the function-grants rules (R6). An aggregate is judged only
+  when a role outside reach owns it; a language or an operator is judged whoever owns it,
+  because the server checks nothing on those slots (C-PR47-1). A
   hand-made aggregate over ordinary functions no longer refuses. The extension manifest gains a
   seventh column, the support functions of each contrib aggregate.
 - **C-PR45-3-17 (MEDIUM): a core function rewritten in place passed.** `CREATE OR REPLACE` keeps

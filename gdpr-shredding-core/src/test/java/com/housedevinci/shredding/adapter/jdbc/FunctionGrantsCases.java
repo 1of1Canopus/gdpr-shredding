@@ -1209,6 +1209,39 @@ abstract class FunctionGrantsCases {
   }
 
   @Test
+  void language_owned_by_the_runtime_role_with_a_withheld_validator_refuses() throws SQLException {
+    // C-PR47-1: a validator runs with no EXECUTE check, so the owner's place plays no part.
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE TRUSTED LANGUAGE r6lang HANDLER pg_catalog.plpgsql_call_handler"
+            + " VALIDATOR pg_catalog.pg_ls_tmpdir",
+        "ALTER LANGUAGE r6lang OWNER TO " + APP);
+    var e = refusal(db.app());
+    assertThat(e)
+        .hasMessageContaining(
+            "may create functions in language r6lang, owned by " + APP + ", whose")
+        .hasMessageContaining("whose validator is function pg_catalog.pg_ls_tmpdir(")
+        .hasMessageNotContaining(APP + " outside reach");
+  }
+
+  @Test
+  void operator_owned_by_the_runtime_role_with_a_hand_made_estimator_refuses() throws SQLException {
+    // C-PR47-1: the planner calls an estimator with no EXECUTE check, whoever owns the operator.
+    var db = db();
+    String rest = handMadeCopy(db, "pg_catalog.eqsel(internal, oid, internal, integer)");
+    exec(
+        db.su(),
+        "CREATE OPERATOR public.=== (LEFTARG = text, RIGHTARG = text,"
+            + " FUNCTION = pg_catalog.texteq, RESTRICT = public.r6_copy)",
+        "ALTER OPERATOR public.=== (text, text) OWNER TO " + APP);
+    refuses(
+        db.app(),
+        "operator public.===(text,text), owned by " + APP + ", whose oprrest is function " + rest,
+        "native code created outside any extension");
+  }
+
+  @Test
   void operator_code_is_checked_as_the_caller_and_its_estimator_is_judged() throws SQLException {
     var db = db();
     String code = handMadeCopy(db, "pg_catalog.texteq(text, text)");

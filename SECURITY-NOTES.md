@@ -1462,14 +1462,18 @@ public.readall(bool) (sfunc = pg_catalog.pg_read_file, stype = text, initcond = 
 The runtime role then runs `SELECT public.readall(true)` and reads the file, although a direct
 `pg_read_file` call is "permission denied". Startup now refuses such an object with
 `SHRED-SCHEMA-004` when three things hold: PUBLIC or a role in reach may use it (EXECUTE on the
-aggregate, USAGE on a trusted language; anyone may use an operator); a role outside reach owns
-it; and the function in one of its slots falls under any rule above (in W, an alias, native
-`SECURITY DEFINER`, native code made by hand, or a shipped member not as shipped).
+aggregate, USAGE on a trusted language; anyone may use an operator); for an aggregate, a role
+outside reach owns it; and the function in one of its slots falls under any rule above (in W, an
+alias, native `SECURITY DEFINER`, native code made by hand, or a shipped member not as shipped).
 The slots judged are all eight aggregate slots (transition, final, combine, serialise,
 deserialise, and the three moving-aggregate slots), the language handler, inline handler and
 validator, and the operator's restrict and join estimators. An operator's own function is checked
-as the caller (measured), so it is left to the server. An object owned by a role in reach is not
-judged here: its owner checks run as reach, and the legs above judge what reach holds. A
+as the caller (measured), so it is left to the server. An aggregate owned by a role in reach is
+not judged here: its owner checks run as reach, and the legs above judge what reach holds. A
+language or an operator is judged whoever owns it, because the server checks nothing on those
+slots, so the owner's rights play no part. Example: a superuser makes a trusted language whose
+validator is `pg_ls_tmpdir(oid)` and gives it to the runtime role; the runtime role's `CREATE
+FUNCTION` in that language would run `pg_ls_tmpdir`, so startup refuses (C-PR47-1). A
 hand-made aggregate over ordinary functions (`sfunc = pg_catalog.int4pl`) verifies: an aggregate
 runs no code of its own. The manifest records each contrib aggregate's support functions, so a
 contrib aggregate re-created over another support function (`citext`'s `min` over

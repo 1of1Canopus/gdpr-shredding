@@ -729,6 +729,24 @@ class FunctionGrantsRulesTest {
   }
 
   @Test
+  void r6_judges_a_no_check_slot_whoever_owns_the_object() {
+    // C-PR47-1: the owner skip is for owner-checked (aggregate) slots only.
+    assertThat(FunctionGrants.ownerChecked("agg", 1)).isTrue();
+    assertThat(FunctionGrants.ownerChecked("lang", 3)).isFalse();
+    assertThat(FunctionGrants.ownerChecked("opr", 2)).isFalse();
+    assertThat(judgeCallers(caller("opr", APP, 1, 765))).isEmpty();
+    assertThat(judgeCallers(caller("opr", APP, 2, 765))).hasSize(1);
+    assertThat(judgeCallers(caller("opr", APP, 3, 765))).hasSize(1);
+    for (int slot = 1; slot <= 3; slot++) {
+      assertThat(judgeCallers(caller("lang", APP, slot, 765))).hasSize(1);
+    }
+    var row = judgeCallers(caller("lang", APP, 3, 765)).get(0);
+    assertThat(FunctionGrantMessages.caller(row, catalogue()))
+        .contains("owned by postgres, whose validator")
+        .doesNotContain("outside reach");
+  }
+
+  @Test
   void r6_skips_operator_code_and_judges_estimators_and_every_language_slot() {
     assertThat(judgeCallers(caller("opr", OWNER, 1, 765))).isEmpty();
     assertThat(judgeCallers(caller("opr", OWNER, 2, 765))).hasSize(1);
