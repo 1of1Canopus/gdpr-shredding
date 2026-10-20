@@ -396,3 +396,61 @@ Unchanged from pass 1, with one addition: the may-run test is now a path of its 
 use the rights the login holds, not the roles it is a member of (C-PR47-4).
 
 Security review, pass 2.
+
+## Pass 3 (2026-10-20)
+
+Limited pass on head 43dfc2c, findings C-PR47-4, C-PR47-5 and C-PR47-6 only.
+
+**Verdict: MERGE.** The three findings are closed. No new finding.
+
+### Numbers
+
+| Check | Result |
+|---|---|
+| `./mvnw -B clean verify` (Docker up) | core 1051, starter 319, sample 25; 0 failures, 0 skipped; coverage gates met |
+| Pass 2 probes (`CipherProbePr47Pass2Test`) | 14 of 14 green, pins 16 and 17 |
+| Pass 3 attacks (`CipherProbePr47Pass3Test`, new) | 12 of 12 green, pins 16 and 17 |
+| `LogTextTest` | 5 of 5 green |
+
+Core counts 1051: the builder's 1039 plus the 12 pass 3 runs.
+
+### Mutations, re-run by the review
+
+| Mutation | Red |
+|---|---|
+| M49: `fn_reach` back to `pg_has_role(..., 'MEMBER')` | both pass 2 probes, plus pass 3 ADMIN-only and two-hop cases, on both pins |
+| M49b (review's own): `SET` half removed, `USAGE` only | pass 3 `INHERIT FALSE, SET TRUE` case, both pins |
+| M50: format and surrogate branch removed from `LogText.escape` | pass 2 zero-width probe (both pins), 3 `LogTextTest` units |
+| M51: `quote_ident` removed from the labels | pass 3 quote and 63-byte cases, both pins |
+
+Each mutation was restored with `git checkout`; the tree was clean before the full build.
+
+### C-PR47-4 (MEDIUM): closed
+
+`fn_reach` now counts an owner or a grantee in reach only when the login holds `USAGE` or `SET`
+on it. PUBLIC is a separate `CASE` branch, so oid 0 never reaches `pg_has_role`. The login oid is
+bound once per branch (binds 4, 7, 11). Attacks, each with the grant on the EXECUTE side and on
+the owner side:
+
+- `WITH INHERIT TRUE, SET FALSE`: the login calls `w` directly. Leg 7 does not name the
+  aggregate (limit L19). Correct.
+- `WITH INHERIT FALSE, SET TRUE`: the direct call is denied, `SET ROLE g` then the call works.
+  Leg 7 does not name the aggregate. Correct.
+- `WITH ADMIN TRUE, INHERIT FALSE, SET FALSE`: direct call denied, `SET ROLE` denied, the
+  aggregate reads `PG_VERSION`. The gate refuses and names the aggregate and `public.w`. Correct.
+- Two hops (login `SET` to `a`, `a` inherits `b`, only `b` holds EXECUTE): refused. This is
+  stricter than needed (the login could `SET ROLE a` and call `w`). It fails closed, so it is
+  not a finding.
+
+### C-PR47-5 (LOW): closed
+
+Labels are built with `quote_ident`. A schema `"ev""il"` prints as `"ev""il".w(text, boolean)`,
+the same form `regprocedure` uses. A 63-byte schema name (capital plus two-byte characters) and a
+63-byte function name print whole: the label is `text`, so quoting adds two bytes and truncates
+nothing. `LogText.escape` escapes Cf characters and lone surrogates per UTF-16 unit; the pass 2
+zero-width probe is green.
+
+### C-PR47-6 (INFO): closed
+
+SECURITY-NOTES L19 now lists the slots the audit query reads and says an operator's own function
+is not listed because the server checks it as the caller. The text matches the query.
