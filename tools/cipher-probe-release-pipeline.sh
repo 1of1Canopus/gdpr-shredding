@@ -1359,6 +1359,36 @@ probe_sources_jar_assertion_is_extension_only_not_path_based() {
 }
 
 
+# ---------------------------------------------------------------------------
+# C-PR46-1 - the pinned-file allowlist for the three .tsv families used a shell glob whose `*`
+# also matches a path separator, so an entry such as
+# .../adapter/jdbc/pg-initdb-withheld-x/y/evil.tsv rode in on the name family. Runs the real step
+# body against a synthetic sources jar that is otherwise clean and carries that one entry.
+# WEAK = the step passed (exit 0); FIXED = it refused.
+# ---------------------------------------------------------------------------
+probe_sources_jar_pinned_tsv_glob_matches_a_path_separator() {
+  command -v zip >/dev/null 2>&1 || { echo "        (skipped: zip not installed)" >&2; return 0; }
+  local body work rc d
+  body="$(step_body "$CI" 'Confirm each sources jar holds sources, resources and the licence texts only')"
+  [ -n "$body" ] || return 0
+  work="$(mktemp -d)"
+  d=com/housedevinci/shredding/adapter/jdbc
+  mkdir -p "$work/gdpr-shredding-core/target" "$work/gdpr-shredding-spring-boot-starter/target" \
+           "$work/src/$d/pg-initdb-withheld-x/y" "$work/src/META-INF"
+  : > "$work/src/com/housedevinci/shredding/Foo.java" 2>/dev/null || { mkdir -p "$work/src/com/housedevinci/shredding"; : > "$work/src/com/housedevinci/shredding/Foo.java"; }
+  : > "$work/src/META-INF/LICENSE"
+  : > "$work/src/META-INF/NOTICE"
+  : > "$work/src/$d/pg-initdb-withheld-x/y/evil.tsv"
+  ( cd "$work/src" && zip -q -r "$work/gdpr-shredding-core/target/gdpr-shredding-core-0.1.0-sources.jar" . ) >/dev/null 2>&1
+  cp "$work/gdpr-shredding-core/target/gdpr-shredding-core-0.1.0-sources.jar" \
+     "$work/gdpr-shredding-spring-boot-starter/target/gdpr-shredding-spring-boot-starter-0.1.0-sources.jar"
+  ( cd "$work" && bash -c "$body" ) >/dev/null 2>&1
+  rc=$?
+  rm -rf "$work"
+  [ "$rc" -eq 0 ]
+}
+
+
 echo "the security review release-pipeline probes  (WEAK = finding still open)"
 echo
 probe probe_multiline_version_accepted                       "M4 newline in the version input passes validation"   probe_multiline_version_accepted
@@ -1430,6 +1460,7 @@ probe probe_licence_carve_out_can_outlive_its_dependency     "a dead licence car
 probe probe_release_dryrun_skips_the_tests                   "the dry run asserts on jars a release never makes"  probe_release_dryrun_skips_the_tests
 probe probe_sources_jar_contents_are_never_asserted          "nothing asserts what a sources jar contains"        probe_sources_jar_contents_are_never_asserted
 probe probe_sources_jar_allowlist_is_extension_only          "RP-3 the sources-jar check is extension-only"       probe_sources_jar_assertion_is_extension_only_not_path_based
+probe probe_sources_jar_pinned_tsv_glob_crosses_dirs        "C-PR46-1 pinned .tsv glob matches a path separator" probe_sources_jar_pinned_tsv_glob_matches_a_path_separator
 
 # ===========================================================================
 # Keyless CVE gate (backported from stripe-einvoice ebbbd33): probes for the OSV-Scanner
