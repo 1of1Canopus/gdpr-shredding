@@ -74,7 +74,11 @@ final class FunctionGrantsSql {
 
   /**
    * One row of statement 3: one (caller object, slot, support function). {@code slot} is the
-   * 1-based position in the branch's slot list ({@link FunctionGrants#SLOTS}).
+   * 1-based position in the branch's slot list ({@link FunctionGrants#SLOTS}). {@code fnLabel} is
+   * the slot function's schema-qualified name: {@code fnKey} has no schema, as the manifest's
+   * support column has none. {@code fnDefiner} is its rights mode; {@code fnReach} is true when
+   * reach may run it as itself: PUBLIC or a role in reach holds EXECUTE on it, or its owner is in
+   * reach (C-PR47-2).
    */
   record CallerFact(
       String kind,
@@ -85,7 +89,10 @@ final class FunctionGrantsSql {
       boolean usable,
       int slot,
       long fn,
-      String fnKey) {}
+      String fnKey,
+      String fnLabel,
+      boolean fnDefiner,
+      boolean fnReach) {}
 
   static int major(Connection c) throws SQLException {
     try (PreparedStatement ps =
@@ -180,12 +187,16 @@ final class FunctionGrantsSql {
     return out;
   }
 
+  /** The number of binds of statement 3: each is the reach oids. */
+  static final int STATEMENT_THREE_BINDS = 8;
+
   /** Statement 3: the caller objects (design revision 5, rule R6). */
   static List<CallerFact> callers(Connection c, long[] reachOids) throws SQLException {
     var out = new ArrayList<CallerFact>();
     try (PreparedStatement ps = c.prepareStatement(statementThree())) {
-      ps.setArray(1, c.createArrayOf("oid", boxed(reachOids)));
-      ps.setArray(2, c.createArrayOf("oid", boxed(reachOids)));
+      for (int i = 1; i <= STATEMENT_THREE_BINDS; i++) {
+        ps.setArray(i, c.createArrayOf("oid", boxed(reachOids)));
+      }
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           out.add(
@@ -198,7 +209,10 @@ final class FunctionGrantsSql {
                   rs.getBoolean(6),
                   rs.getInt(7),
                   rs.getLong(8),
-                  text(rs, 9)));
+                  text(rs, 9),
+                  text(rs, 10),
+                  rs.getBoolean(11),
+                  rs.getBoolean(12)));
         }
       }
     }

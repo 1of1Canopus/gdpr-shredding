@@ -696,7 +696,18 @@ class FunctionGrantsRulesTest {
 
   private static FunctionGrantsSql.CallerFact caller(String kind, long owner, int slot, long fn) {
     return new FunctionGrantsSql.CallerFact(
-        kind, 30_000, "public.agg(boolean)", owner, "postgres", true, slot, fn, "k(text)");
+        kind,
+        30_000,
+        "public.agg(boolean)",
+        owner,
+        "postgres",
+        true,
+        slot,
+        fn,
+        "k(text)",
+        "public.k(text)",
+        false,
+        true);
   }
 
   private static List<FunctionGrants.CallerRow> judgeCallers(FunctionGrantsSql.CallerFact c) {
@@ -723,7 +734,18 @@ class FunctionGrantsRulesTest {
     assertThat(
             judgeCallers(
                 new FunctionGrantsSql.CallerFact(
-                    "agg", 30_000, "a", OWNER, "postgres", false, 1, 765, "k(text)")))
+                    "agg",
+                    30_000,
+                    "a",
+                    OWNER,
+                    "postgres",
+                    false,
+                    1,
+                    765,
+                    "k(text)",
+                    "public.k(text)",
+                    false,
+                    true)))
         .isEmpty();
     assertThat(unusable.usable()).isTrue();
   }
@@ -744,6 +766,44 @@ class FunctionGrantsRulesTest {
     assertThat(FunctionGrantMessages.caller(row, catalogue()))
         .contains("owned by postgres, whose validator")
         .doesNotContain("outside reach");
+  }
+
+  private static FunctionGrantsSql.CallerFact wrapper(
+      String kind, long owner, int slot, boolean definer, boolean reachMayRun) {
+    return new FunctionGrantsSql.CallerFact(
+        kind,
+        30_000,
+        "public.agg(boolean)",
+        owner,
+        "postgres",
+        true,
+        slot,
+        99_999,
+        "w(text)",
+        "public.w(text)",
+        definer,
+        reachMayRun);
+  }
+
+  @Test
+  void r6_refuses_a_slot_function_that_is_a_revoked_security_definer_wrapper() {
+    // C-PR47-2: statement 2 has no row for the wrapper (oid 99999); its own facts decide.
+    assertThat(judgeCallers(wrapper("agg", OWNER, 1, true, false)))
+        .singleElement()
+        .satisfies(
+            r -> {
+              assertThat(r.leg()).isEqualTo(7);
+              assertThat(r.function()).isEqualTo("public.w(text)");
+            });
+    assertThat(judgeCallers(wrapper("lang", APP, 3, true, false))).hasSize(1);
+    assertThat(judgeCallers(wrapper("agg", OWNER, 1, true, true))).isEmpty();
+    assertThat(judgeCallers(wrapper("agg", OWNER, 1, false, false))).isEmpty();
+    assertThat(judgeCallers(wrapper("agg", APP, 1, true, false))).isEmpty();
+    assertThat(judgeCallers(wrapper("opr", OWNER, 1, true, false))).isEmpty();
+    var row = judgeCallers(wrapper("agg", OWNER, 1, true, false)).get(0);
+    assertThat(FunctionGrantMessages.caller(row, catalogue()))
+        .contains("whose transfn is function public.w(text)")
+        .contains("SECURITY DEFINER function that neither PUBLIC nor a role in reach may execute");
   }
 
   @Test
@@ -781,9 +841,12 @@ class FunctionGrantsRulesTest {
   void supports_joins_each_aggregate_slot_in_order_and_ignores_other_objects() {
     var rows =
         List.of(
-            new FunctionGrantsSql.CallerFact("agg", 1, "a", 10, "p", true, 3, 5, "c(x,x)"),
-            new FunctionGrantsSql.CallerFact("agg", 1, "a", 10, "p", true, 1, 4, "t(x,y)"),
-            new FunctionGrantsSql.CallerFact("opr", 2, "o", 10, "p", true, 1, 6, "e(x,x)"));
+            new FunctionGrantsSql.CallerFact(
+                "agg", 1, "a", 10, "p", true, 3, 5, "c(x,x)", "s.f(x)", false, true),
+            new FunctionGrantsSql.CallerFact(
+                "agg", 1, "a", 10, "p", true, 1, 4, "t(x,y)", "s.f(x)", false, true),
+            new FunctionGrantsSql.CallerFact(
+                "opr", 2, "o", 10, "p", true, 1, 6, "e(x,x)", "s.f(x)", false, true));
     assertThat(FunctionGrants.supports(rows))
         .isEqualTo(Map.of(1L, "transfn=t(x,y);combinefn=c(x,x)"));
   }

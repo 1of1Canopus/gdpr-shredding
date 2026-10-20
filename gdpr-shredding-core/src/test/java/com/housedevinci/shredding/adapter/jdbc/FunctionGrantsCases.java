@@ -515,6 +515,33 @@ abstract class FunctionGrantsCases {
   }
 
   @Test
+  void published_security_definer_audit_query_lists_a_revoked_wrapper_an_aggregate_calls()
+      throws Exception {
+    // C-PR47-2: the second half of the L19 query lists a wrapper nobody may execute directly.
+    var db = db();
+    exec(
+        db.su(),
+        DEFINER_W,
+        REVOKE_W,
+        "CREATE AGGREGATE public.agg_w(boolean) (sfunc = public.w, stype = text,"
+            + " initcond = 'PG_VERSION')");
+    String notes = Files.readString(Path.of("../SECURITY-NOTES.md"));
+    Matcher m =
+        Pattern.compile("<!-- l19-audit-query -->\\s*```sql\\n(.*?)```", Pattern.DOTALL)
+            .matcher(notes);
+    assertThat(m.find()).isTrue();
+    var listed = new ArrayList<String>();
+    try (var c = db.su().getConnection();
+        var s = c.createStatement();
+        var rs = s.executeQuery(m.group(1).replace("'app'", "'" + APP + "'"))) {
+      while (rs.next()) {
+        listed.add(rs.getString("function") + " via " + rs.getString("executable_via"));
+      }
+    }
+    assertThat(listed).contains("w(text,boolean) via called by aggregate agg_w(boolean)");
+  }
+
+  @Test
   void withheld_function_in_a_schema_without_usage_refuses() throws SQLException {
     var db = db();
     exec(
@@ -1239,6 +1266,106 @@ abstract class FunctionGrantsCases {
         db.app(),
         "operator public.===(text,text), owned by " + APP + ", whose oprrest is function " + rest,
         "native code created outside any extension");
+  }
+
+  // ------------------------------------------- C-PR47-2: revoked SECURITY DEFINER wrappers
+
+  private static final String DEFINER_W =
+      "CREATE FUNCTION public.w(text, boolean) RETURNS text LANGUAGE sql SECURITY DEFINER"
+          + " AS 'SELECT pg_catalog.pg_read_file($1, 0, 200, $2)'";
+  private static final String REVOKE_W =
+      "REVOKE EXECUTE ON FUNCTION public.w(text, boolean) FROM PUBLIC";
+  private static final String W_REASON =
+      "a SECURITY DEFINER function that neither PUBLIC nor a role in reach may execute";
+
+  @Test
+  void aggregate_over_a_revoked_security_definer_wrapper_refuses() throws SQLException {
+    var db = db();
+    exec(
+        db.su(),
+        DEFINER_W,
+        REVOKE_W,
+        "CREATE AGGREGATE public.agg_w(boolean) (sfunc = public.w, stype = text,"
+            + " initcond = 'PG_VERSION')");
+    assertThat(scalar(db.app(), "SELECT public.agg_w(true)")).startsWith(Integer.toString(major));
+    refuses(
+        db.app(),
+        "aggregate public.agg_w(boolean)",
+        "whose transfn is function public.w(text, boolean)",
+        W_REASON);
+  }
+
+  @Test
+  void core_aggregate_rewritten_over_a_revoked_wrapper_refuses() throws SQLException {
+    // Oid 2518 and the symbol aggregate_dummy stay, so R7 is silent; R6 sees the wrapper.
+    var db = db();
+    exec(
+        db.su(),
+        DEFINER_W,
+        REVOKE_W,
+        "CREATE FUNCTION public.tobool(text) RETURNS boolean LANGUAGE sql AS 'SELECT true'",
+        "CREATE OR REPLACE AGGREGATE pg_catalog.bool_or(boolean) (sfunc = public.w,"
+            + " stype = text, initcond = 'PG_VERSION', finalfunc = public.tobool)");
+    refuses(
+        db.app(),
+        "aggregate pg_catalog.bool_or(boolean)",
+        "whose transfn is function public.w(text, boolean)",
+        W_REASON);
+  }
+
+  @Test
+  void contrib_aggregate_over_a_same_key_wrapper_in_another_schema_refuses() throws SQLException {
+    // The manifest key citext_larger(citext,citext) has no schema, so R5b sees the shipped
+    // support set; statement 3's schema-qualified name and rights mode tell the wrapper apart.
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE EXTENSION citext",
+        "CREATE SCHEMA evil",
+        "CREATE FUNCTION evil.citext_larger(public.citext, public.citext) RETURNS public.citext"
+            + " LANGUAGE sql STRICT SECURITY DEFINER"
+            + " AS 'SELECT pg_catalog.pg_read_file($2::text)::public.citext'",
+        "REVOKE EXECUTE ON FUNCTION evil.citext_larger(public.citext, public.citext) FROM PUBLIC",
+        "ALTER EXTENSION citext DROP AGGREGATE public.max(public.citext)",
+        "DROP AGGREGATE public.max(public.citext)",
+        "CREATE AGGREGATE public.max(public.citext) (sfunc = evil.citext_larger,"
+            + " stype = public.citext, combinefunc = evil.citext_larger)",
+        "ALTER EXTENSION citext ADD AGGREGATE public.max(public.citext)");
+    refuses(
+        db.app(),
+        "aggregate public.max(public.citext)",
+        "whose transfn is function evil.citext_larger(",
+        "whose combinefn is function evil.citext_larger(",
+        W_REASON);
+  }
+
+  @Test
+  void trusted_language_with_a_revoked_security_definer_validator_refuses() throws SQLException {
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE FUNCTION public.v(pg_catalog.oid) RETURNS void LANGUAGE sql SECURITY DEFINER"
+            + " AS 'SELECT 1'",
+        "REVOKE EXECUTE ON FUNCTION public.v(pg_catalog.oid) FROM PUBLIC",
+        "CREATE TRUSTED LANGUAGE r6lang HANDLER pg_catalog.plpgsql_call_handler"
+            + " VALIDATOR public.v");
+    refuses(
+        db.app(),
+        "may create functions in language r6lang",
+        "whose validator is function public.v(oid)",
+        W_REASON);
+  }
+
+  @Test
+  void aggregate_over_a_public_security_definer_wrapper_is_the_stated_limit() throws SQLException {
+    // L19: reach may call the wrapper directly, so the aggregate gives nothing more.
+    var db = db();
+    exec(
+        db.su(),
+        DEFINER_W,
+        "CREATE AGGREGATE public.agg_w(boolean) (sfunc = public.w, stype = text,"
+            + " initcond = 'PG_VERSION')");
+    verifies(db.app());
   }
 
   @Test

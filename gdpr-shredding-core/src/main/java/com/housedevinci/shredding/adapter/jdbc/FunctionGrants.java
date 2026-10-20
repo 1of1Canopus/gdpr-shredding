@@ -514,9 +514,10 @@ final class FunctionGrants {
   }
 
   /**
-   * R6: a caller object that reach or PUBLIC may use, whose slot function falls under leg 1 to 6.
-   * An owner-checked slot ({@link #ownerChecked}) is judged only when the owner is outside reach:
-   * with the owner in reach the check runs as reach, and the other legs judge what reach holds. A
+   * R6: a caller object that reach or PUBLIC may use, whose slot function falls under leg 1 to 6,
+   * or is a {@code SECURITY DEFINER} function reach may not run as itself (leg 7, C-PR47-2). An
+   * owner-checked slot ({@link #ownerChecked}) is judged only when the owner is outside reach: with
+   * the owner in reach the check runs as reach, and the other legs judge what reach holds. A
    * no-check slot ({@link #noCheck}) is judged whoever owns the object (C-PR47-1). One row per
    * (object, slot), in (kind, object, slot) order.
    */
@@ -532,12 +533,13 @@ final class FunctionGrants {
       if (!c.usable() || !judged(c, reach)) {
         continue;
       }
-      var list = ctx.byOid().get(c.fn());
-      if (list == null) {
-        continue; // not native, no shipped record, not in the baseline: code reach could write
+      // A function statement 2 has no row for is not native, has no shipped record and is not in
+      // the baseline. It runs with the caller's rights unless it is a revoked definer wrapper.
+      var fact = Optional.ofNullable(ctx.byOid().get(c.fn())).map(list -> list.get(0));
+      Optional<Verdict> v = fact.flatMap(f -> verdict(f, ctx, accepted));
+      if (v.isEmpty() && revokedDefiner(c)) {
+        v = Optional.of(new Verdict(7, 0, "", ""));
       }
-      var f = list.get(0);
-      Optional<Verdict> v = verdict(f, ctx, accepted);
       if (v.isEmpty()) {
         continue;
       }
@@ -549,15 +551,25 @@ final class FunctionGrants {
               c.label(),
               slotName(c),
               c.ownerName(),
-              f.label(),
+              fact.map(FunctionGrantsSql.ExecuteFact::label).orElse(c.fnLabel()),
               verdict.leg(),
               verdict.sub(),
               verdict.ref(),
               verdict.sameAs(),
-              f.extension(),
-              f.version()));
+              fact.map(FunctionGrantsSql.ExecuteFact::extension).orElse(""),
+              fact.map(FunctionGrantsSql.ExecuteFact::version).orElse("")));
     }
     return out;
+  }
+
+  /**
+   * C-PR47-2: the slot function is {@code SECURITY DEFINER}, in any language, and reach may not run
+   * it as itself (no EXECUTE for PUBLIC or a role in reach, owner outside reach). Its body runs as
+   * its owner, and on the slots R6 judges nobody checks that reach may execute it. A wrapper reach
+   * may execute stays limit L19: the object then gives nothing a direct call does not.
+   */
+  static boolean revokedDefiner(FunctionGrantsSql.CallerFact c) {
+    return c.fnDefiner() && !c.fnReach();
   }
 
   /** Whether R6 judges this slot at all, before its function is looked at. */

@@ -154,6 +154,9 @@ final class FunctionGrantMessages {
       case 3 -> "native code that runs with the rights of its owner";
       case 4 -> "native code created outside any extension";
       case 5 -> "code that PostgreSQL or a shipped extension withholds from PUBLIC";
+      case 7 ->
+          "a SECURITY DEFINER function that neither PUBLIC nor a role in reach may execute, whose"
+              + " body runs with its owner's rights";
       default ->
           row.sub() == 1
               ? "a member of extension "

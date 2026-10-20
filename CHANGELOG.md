@@ -26,7 +26,9 @@ All notable changes to this project. The format follows
   language or operator that reach or PUBLIC may use, whose support function, validator,
   handler or estimator falls under the function-grants rules (R6). An aggregate is judged only
   when a role outside reach owns it; a language or an operator is judged whoever owns it,
-  because the server checks nothing on those slots (C-PR47-1). A
+  because the server checks nothing on those slots (C-PR47-1). A slot function that is a
+  `SECURITY DEFINER` wrapper reach may not execute itself also refuses, even in another schema
+  under the shipped key (C-PR47-2). A
   hand-made aggregate over ordinary functions no longer refuses. The extension manifest gains a
   seventh column, the support functions of each contrib aggregate.
 - **C-PR45-3-17 (MEDIUM): a core function rewritten in place passed.** `CREATE OR REPLACE` keeps

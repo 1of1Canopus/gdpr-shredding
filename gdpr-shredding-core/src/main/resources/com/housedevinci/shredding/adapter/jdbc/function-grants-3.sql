@@ -5,7 +5,12 @@
 -- Facts only: Java decides which slots run with the owner's rights, or with no EXECUTE
 -- check, and judges their functions (FunctionGrants).
 -- Runs inside the gate's pinned window. House dialect: every name qualified, no CTE.
--- Binds: 1 and 2 reach oids (_oid), for the aggregate and the language branch.
+-- Each row also carries three facts on its slot function (C-PR47-2): its schema-qualified
+-- name (a support key in the manifest has no schema, so this is what tells evil.f(x) from
+-- public.f(x)), its rights mode, and whether reach may run it as itself: PUBLIC or a role in
+-- reach holds EXECUTE on it, or its owner is in reach (then its body runs as reach anyway).
+-- Binds: 1 to 8 are all the reach oids (_oid), in text order: aggregate usable, aggregate
+-- slot (two), operator slot (two), language usable, language slot (two).
 SELECT 'agg'::pg_catalog.text AS kind,
        p.oid AS oid,
        pg_catalog.concat(n.nspname, '.', p.proname, '(',
@@ -23,7 +28,17 @@ SELECT 'agg'::pg_catalog.text AS kind,
        pg_catalog.concat(f.proname, '(',
          (SELECT pg_catalog.string_agg(t.typname::pg_catalog.text, ',' ORDER BY arg.ordinality)
             FROM pg_catalog.unnest(f.proargtypes::pg_catalog._oid) WITH ORDINALITY AS arg
-            JOIN pg_catalog.pg_type AS t ON (t.oid OPERATOR(pg_catalog.=) arg.arg)), ')') AS fn_key
+            JOIN pg_catalog.pg_type AS t ON (t.oid OPERATOR(pg_catalog.=) arg.arg)), ')') AS fn_key,
+       pg_catalog.concat(fs.nspname, '.', f.proname, '(',
+                         pg_catalog.pg_get_function_identity_arguments(f.oid), ')') AS fn_label,
+       f.prosecdef AS fn_definer,
+       ((f.proowner OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))
+        OR EXISTS (SELECT 1 FROM pg_catalog.aclexplode(CASE WHEN f.proacl IS NULL
+                                                         THEN pg_catalog.acldefault('f', f.proowner)
+                                                         ELSE f.proacl END) AS h
+                    WHERE (h.privilege_type OPERATOR(pg_catalog.=) 'EXECUTE')
+                      AND ((h.grantee OPERATOR(pg_catalog.=) 0::pg_catalog.oid)
+                           OR (h.grantee OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))))) AS fn_reach
   FROM pg_catalog.pg_aggregate AS a
   JOIN pg_catalog.pg_proc AS p ON (p.oid OPERATOR(pg_catalog.=) a.aggfnoid)
   JOIN pg_catalog.pg_namespace AS n ON (n.oid OPERATOR(pg_catalog.=) p.pronamespace)
@@ -43,6 +58,7 @@ SELECT 'agg'::pg_catalog.text AS kind,
                WITH ORDINALITY AS s
   -- A slot the aggregate leaves empty is oid 0, which no function has: the join drops it.
   JOIN pg_catalog.pg_proc AS f ON (f.oid OPERATOR(pg_catalog.=) s.s)
+  JOIN pg_catalog.pg_namespace AS fs ON (fs.oid OPERATOR(pg_catalog.=) f.pronamespace)
 UNION ALL
 -- Operators have no ACL: anyone who can name one can use it.
 SELECT 'opr', o.oid, o.oid::pg_catalog.regoperator::pg_catalog.text, o.oprowner,
@@ -50,13 +66,24 @@ SELECT 'opr', o.oid, o.oid::pg_catalog.regoperator::pg_catalog.text, o.oprowner,
        pg_catalog.concat(f.proname, '(',
          (SELECT pg_catalog.string_agg(t.typname::pg_catalog.text, ',' ORDER BY arg.ordinality)
             FROM pg_catalog.unnest(f.proargtypes::pg_catalog._oid) WITH ORDINALITY AS arg
-            JOIN pg_catalog.pg_type AS t ON (t.oid OPERATOR(pg_catalog.=) arg.arg)), ')')
+            JOIN pg_catalog.pg_type AS t ON (t.oid OPERATOR(pg_catalog.=) arg.arg)), ')'),
+       pg_catalog.concat(fs.nspname, '.', f.proname, '(',
+                         pg_catalog.pg_get_function_identity_arguments(f.oid), ')'),
+       f.prosecdef,
+       ((f.proowner OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))
+        OR EXISTS (SELECT 1 FROM pg_catalog.aclexplode(CASE WHEN f.proacl IS NULL
+                                                         THEN pg_catalog.acldefault('f', f.proowner)
+                                                         ELSE f.proacl END) AS h
+                    WHERE (h.privilege_type OPERATOR(pg_catalog.=) 'EXECUTE')
+                      AND ((h.grantee OPERATOR(pg_catalog.=) 0::pg_catalog.oid)
+                           OR (h.grantee OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid)))))
   FROM pg_catalog.pg_operator AS o
   CROSS JOIN pg_catalog.unnest(
          pg_catalog.array_append(pg_catalog.array_append(pg_catalog.array_append(
            '{}'::pg_catalog._oid, o.oprcode::pg_catalog.oid), o.oprrest::pg_catalog.oid),
            o.oprjoin::pg_catalog.oid)) WITH ORDINALITY AS s
   JOIN pg_catalog.pg_proc AS f ON (f.oid OPERATOR(pg_catalog.=) s.s)
+  JOIN pg_catalog.pg_namespace AS fs ON (fs.oid OPERATOR(pg_catalog.=) f.pronamespace)
 UNION ALL
 -- A language is usable by a role that is not a superuser only when it is trusted.
 SELECT 'lang', l.oid, l.lanname::pg_catalog.text, l.lanowner,
@@ -73,11 +100,22 @@ SELECT 'lang', l.oid, l.lanname::pg_catalog.text, l.lanowner,
        pg_catalog.concat(f.proname, '(',
          (SELECT pg_catalog.string_agg(t.typname::pg_catalog.text, ',' ORDER BY arg.ordinality)
             FROM pg_catalog.unnest(f.proargtypes::pg_catalog._oid) WITH ORDINALITY AS arg
-            JOIN pg_catalog.pg_type AS t ON (t.oid OPERATOR(pg_catalog.=) arg.arg)), ')')
+            JOIN pg_catalog.pg_type AS t ON (t.oid OPERATOR(pg_catalog.=) arg.arg)), ')'),
+       pg_catalog.concat(fs.nspname, '.', f.proname, '(',
+                         pg_catalog.pg_get_function_identity_arguments(f.oid), ')'),
+       f.prosecdef,
+       ((f.proowner OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))
+        OR EXISTS (SELECT 1 FROM pg_catalog.aclexplode(CASE WHEN f.proacl IS NULL
+                                                         THEN pg_catalog.acldefault('f', f.proowner)
+                                                         ELSE f.proacl END) AS h
+                    WHERE (h.privilege_type OPERATOR(pg_catalog.=) 'EXECUTE')
+                      AND ((h.grantee OPERATOR(pg_catalog.=) 0::pg_catalog.oid)
+                           OR (h.grantee OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid)))))
   FROM pg_catalog.pg_language AS l
   CROSS JOIN pg_catalog.unnest(
          pg_catalog.array_append(pg_catalog.array_append(pg_catalog.array_append(
            '{}'::pg_catalog._oid, l.lanplcallfoid), l.laninline), l.lanvalidator))
          WITH ORDINALITY AS s
   JOIN pg_catalog.pg_proc AS f ON (f.oid OPERATOR(pg_catalog.=) s.s)
+  JOIN pg_catalog.pg_namespace AS fs ON (fs.oid OPERATOR(pg_catalog.=) f.pronamespace)
  ORDER BY 1, 2, 7

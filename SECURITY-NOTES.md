@@ -1429,8 +1429,15 @@ release.
 Example: `CREATE FUNCTION public.export_blob(o oid, f text) ... LANGUAGE sql SECURITY DEFINER AS
 'SELECT pg_catalog.lo_export(o, f)'`, owned by a superuser and granted to PUBLIC, passes and
 writes files. Hosted products ship many such functions, so refusing them all would refuse ordinary
-platforms. Audit them with this query. It walks group membership, so a wrapper granted to a group
-of a `NOINHERIT` login is listed too:
+platforms. One case is not this limit: a wrapper that neither PUBLIC nor a role in reach may
+execute, owned outside reach, and named in a slot of an object R6 judges (an aggregate's support
+function, a language's validator). Its body runs as its owner and nobody checks that reach may
+run it, so startup refuses it (R6, C-PR47-2). Example: `public.w(text, boolean)` over
+`pg_read_file`, revoked from PUBLIC, as the `sfunc` of a public aggregate. A wrapper reach may
+execute stays this limit: the object gives nothing a direct call does not. Audit them with this
+query. It walks group membership, so a wrapper granted to a group of a `NOINHERIT` login is
+listed too. Its second half lists every wrapper an aggregate, operator or language calls, granted
+or not:
 
 <!-- l19-audit-query -->
 ```sql
@@ -1451,6 +1458,27 @@ SELECT p.oid::regprocedure                                  AS function,
  WHERE p.prosecdef
    AND x.privilege_type = 'EXECUTE'
    AND (x.grantee = 0 OR pg_has_role('app', x.grantee, 'MEMBER'))
+UNION ALL
+SELECT p.oid::regprocedure, l.lanname, p.proowner::regrole, o.rolsuper,
+       pg_has_role(p.proowner, 'pg_read_server_files', 'MEMBER')
+    OR pg_has_role(p.proowner, 'pg_write_server_files', 'MEMBER')
+    OR pg_has_role(p.proowner, 'pg_execute_server_program', 'MEMBER'),
+       'called by ' || c.caller
+  FROM pg_proc p
+  JOIN pg_language l ON l.oid = p.prolang
+  JOIN pg_roles o    ON o.oid = p.proowner
+  JOIN (SELECT 'aggregate ' || a.aggfnoid::regprocedure::text AS caller,
+               unnest(ARRAY[a.aggtransfn::oid, a.aggfinalfn, a.aggcombinefn, a.aggserialfn,
+                            a.aggdeserialfn, a.aggmtransfn, a.aggminvtransfn,
+                            a.aggmfinalfn]) AS fn
+          FROM pg_aggregate a
+        UNION ALL
+        SELECT 'operator ' || r.oid::regoperator::text, unnest(ARRAY[r.oprrest::oid, r.oprjoin])
+          FROM pg_operator r
+        UNION ALL
+        SELECT 'language ' || g.lanname, unnest(ARRAY[g.lanplcallfoid, g.laninline, g.lanvalidator])
+          FROM pg_language g) c ON c.fn = p.oid
+ WHERE p.prosecdef
  ORDER BY 1, 6;
 ```
 
@@ -1477,7 +1505,14 @@ FUNCTION` in that language would run `pg_ls_tmpdir`, so startup refuses (C-PR47-
 hand-made aggregate over ordinary functions (`sfunc = pg_catalog.int4pl`) verifies: an aggregate
 runs no code of its own. The manifest records each contrib aggregate's support functions, so a
 contrib aggregate re-created over another support function (`citext`'s `min` over
-`citext_larger`) is not as shipped. Four withheld built-ins fit a language validator's `(oid)`
+`citext_larger`) is not as shipped. A slot function that is `SECURITY DEFINER`, in any language,
+and that reach may not run as itself (no EXECUTE for PUBLIC or a role in reach, owner outside
+reach) also refuses: its body runs as its owner (C-PR47-2). The manifest's support keys carry no
+schema (`transfn=citext_larger(citext,citext)`), so R5b cannot tell `evil.citext_larger` from the
+shipped `public.citext_larger`. R6 can: statement 3 gives it each slot function's
+schema-qualified name and rights mode, and the refusal names `evil.citext_larger`. A same-key
+function in another schema gains nothing otherwise: native outside an extension it is R4, inside
+one it is R5, and plain SQL runs with the caller's rights. Four withheld built-ins fit a language validator's `(oid)`
 slot on 16 and 17: the three `pg_stat_reset_*(oid)` functions and `pg_ls_tmpdir(oid)`.
 
 **Paths the server refuses by signature.** Type input and output (and receive, send,
@@ -1521,6 +1556,7 @@ functions to their admin role; the reach leg already refuses those roles. Not me
 | the same function rewritten to language `c` | `CREATE OR REPLACE ... LANGUAGE c` over `pg_file_write_v1_1` | refused |
 | operator, cast or view over a withheld function | `CREATE OPERATOR ... FUNCTION = lo_export` | refused by the server |
 | `SECURITY DEFINER` SQL wrapper | attack above | limit L19 |
+| the same wrapper revoked from PUBLIC, as an aggregate's `sfunc` | `public.w(text, boolean)` over `pg_read_file` | refused (R6) |
 | catalogue made unreadable | `REVOKE SELECT ON pg_init_privs FROM PUBLIC` | `005` |
 
 ### The health endpoint publishes the posture
