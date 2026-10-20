@@ -17,6 +17,7 @@ import java.sql.Statement;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Objects;
 import javax.sql.DataSource;
 import org.slf4j.Logger;
@@ -690,8 +691,26 @@ public final class JdbcSupport {
    *     this method logs. {@code SHRED-SCHEMA-007} is never downgraded.
    */
   public static SchemaVerdict verifySchema(DataSource ds, boolean allowPrivilegedRuntimeRole) {
+    return verifySchema(ds, allowPrivilegedRuntimeRole, List.of());
+  }
+
+  /**
+   * As {@link #verifySchema(DataSource, boolean)}, with the third-party extensions whose native
+   * functions the function-grants leg trusts as shipped (C-PR45-3, limit L20 in SECURITY-NOTES).
+   * Empty is the secure default: a native function of an extension the pinned manifest does not
+   * know refuses. Each entry is trimmed; a blank entry, or the name of an extension the pinned
+   * PostgreSQL image ships, refuses with {@code SHRED-CONFIG-001}. A non-empty list logs a WARN at
+   * every call.
+   *
+   * @param acceptedThirdPartyExtensions extension names, exactly as in {@code pg_extension}
+   */
+  public static SchemaVerdict verifySchema(
+      DataSource ds,
+      boolean allowPrivilegedRuntimeRole,
+      List<String> acceptedThirdPartyExtensions) {
+    List<String> accepted = acceptedExtensions(acceptedThirdPartyExtensions);
     try (Connection c = ds.getConnection()) {
-      return logVerdict(SchemaVerification.verify(c, ds, allowPrivilegedRuntimeRole));
+      return logVerdict(SchemaVerification.verify(c, ds, allowPrivilegedRuntimeRole, accepted));
     } catch (SQLException e) {
       throw new ShreddingException(
           ErrorCodes.SCHEMA_UNVERIFIABLE,
@@ -701,6 +720,15 @@ public final class JdbcSupport {
               + "). Unverifiable is not clean, so this is a refusal.",
           e);
     }
+  }
+
+  /** Normalised, and a WARN at every call while not empty (C-PR45-3, revision 4). */
+  private static List<String> acceptedExtensions(List<String> names) {
+    List<String> accepted = AcceptedExtensions.normalise(names);
+    if (!accepted.isEmpty()) {
+      log.warn(AcceptedExtensions.warning(accepted));
+    }
+    return accepted;
   }
 
   /**
@@ -742,6 +770,18 @@ public final class JdbcSupport {
    */
   public static SchemaVerdict initializeAndVerifySchema(
       DataSource ds, boolean allowPrivilegedRuntimeRole) {
+    return initializeAndVerifySchema(ds, allowPrivilegedRuntimeRole, List.of());
+  }
+
+  /**
+   * As {@link #initializeAndVerifySchema(DataSource, boolean)}, with the accepted third-party
+   * extensions of {@link #verifySchema(DataSource, boolean, List)}.
+   */
+  public static SchemaVerdict initializeAndVerifySchema(
+      DataSource ds,
+      boolean allowPrivilegedRuntimeRole,
+      List<String> acceptedThirdPartyExtensions) {
+    List<String> accepted = acceptedExtensions(acceptedThirdPartyExtensions);
     try (Connection c = ds.getConnection()) {
       boolean previous = c.getAutoCommit();
       c.setAutoCommit(false);
@@ -769,7 +809,8 @@ public final class JdbcSupport {
         // The caller's transaction, which has just run the DDL under the script's advisory lock:
         // not read-only and not a fresh snapshot, and it must not be made either (C-13-4).
         SchemaVerdict verdict =
-            SchemaVerification.verifyInCallersTransaction(c, ds, allowPrivilegedRuntimeRole);
+            SchemaVerification.verifyInCallersTransaction(
+                c, ds, allowPrivilegedRuntimeRole, accepted);
         c.commit();
         return logVerdict(verdict);
       } catch (RuntimeException e) {

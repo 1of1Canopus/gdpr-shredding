@@ -7,6 +7,36 @@ All notable changes to this project. The format follows
 ## [Unreleased]
 
 ### Security
+- **C-PR45-3 (MEDIUM): EXECUTE on a function the server ships withheld passed the gate.**
+  `GRANT EXECUTE ON FUNCTION pg_catalog.lo_export(oid, text) TO shredding_app` let the runtime
+  role write any file as the server's user, and startup reported it unprivileged. Startup now
+  refuses with `SHRED-SCHEMA-004` when the login role, any role it can reach, or PUBLIC holds
+  EXECUTE on a function the server or a shipped extension withholds, on a native alias of one, on
+  native `SECURITY DEFINER` code, on native code made by hand outside an extension, or on an
+  extension member that is no longer as shipped. The record is compared with pinned files for
+  PostgreSQL 16 and 17 in the core jar; another major, a rewritten baseline signature or an
+  extension version the files do not list refuses with `SHRED-SCHEMA-005`. New property
+  `shredding.jdbc.accepted-third-party-extensions` (empty by default, WARN at every startup when
+  set) trusts the native functions of a named third-party extension such as `vector`. See
+  SECURITY-NOTES, "Functions the server ships withheld, and native code".
+- **C-PR45-3-15 (MEDIUM): an aggregate handed out a withheld function.** PostgreSQL checks
+  EXECUTE on an aggregate's support functions as the aggregate's owner. A superuser's
+  `CREATE AGGREGATE public.readall(bool) (sfunc = pg_catalog.pg_read_file, ...)` let the runtime
+  role read any file. Startup now refuses, with `SHRED-SCHEMA-004`, an aggregate, trusted
+  language or operator that reach or PUBLIC may use, whose support function, validator,
+  handler or estimator falls under the function-grants rules (R6). An aggregate is judged only
+  when a role outside reach owns it; a language or an operator is judged whoever owns it,
+  because the server checks nothing on those slots (C-PR47-1). A slot function that is a
+  `SECURITY DEFINER` wrapper reach may not execute itself also refuses, even in another schema
+  under the shipped key (C-PR47-2). "May execute" counts only roles whose rights the login may
+  use: a role granted `WITH INHERIT FALSE, SET FALSE` does not count (C-PR47-4). Refusal labels
+  quote the schema and name, and every message escapes invisible format characters such as
+  U+200B (C-PR47-5). A hand-made aggregate over ordinary functions no longer refuses. The extension manifest gains a
+  seventh column, the support functions of each contrib aggregate.
+- **C-PR45-3-17 (MEDIUM): a core function rewritten in place passed.** `CREATE OR REPLACE` keeps
+  the oid of `pg_catalog.lower(text)` while it changes its language, library and symbol. A new
+  pinned file per major, `pg-core-native-<major>.tsv`, records every core native function;
+  a rewritten, missing or unrecorded one refuses with `SHRED-SCHEMA-005` (R7).
 - **C-PR-1d (LOW): core stayed silent in the weaker privileged mode.**
   `JdbcSupport.verifySchema(ds, true)` and `initializeAndVerifySchema(ds, true)` accepted a
   privileged runtime role and logged nothing. The javadoc left the WARN to the caller, so a team

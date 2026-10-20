@@ -1369,6 +1369,207 @@ and earlier the parameter-grant catalogue does not exist, so startup refuses wit
 `SHRED-SCHEMA-005`. Managed services (RDS, Cloud SQL, Azure) are not yet tried: their master logins
 usually carry CREATEROLE and are refused, so use a dedicated runtime login.
 
+### Functions the server ships withheld, and native code (C-PR45-3)
+
+PostgreSQL ships about 62 functions with EXECUTE withheld from PUBLIC (for example
+`lo_export(oid, text)`, which writes any file as the server's operating-system user). A superuser
+may grant them one at a time. Startup verification now refuses with `SHRED-SCHEMA-004` when the
+login role, any role it can reach, or PUBLIC holds EXECUTE on:
+
+- a function in **W**, the withheld set: every function whose shipped record (`pg_init_privs`)
+  gives no EXECUTE to PUBLIC, plus every function of the pinned initdb baseline. Example:
+  `GRANT EXECUTE ON FUNCTION pg_catalog.lo_export(oid, text) TO shredding_app` refuses. A shipped
+  grant to a predefined role excuses nothing: `pgstattuple` ships to `pg_stat_scan_tables`, and
+  that role in reach refuses (leg 1);
+- an **alias**: a caller-rights native function with the same C symbol as a caller-rights function
+  in W, whatever the library path says (leg 2). A core function (oid below 16384, in no extension)
+  in language `internal` is compared with the initdb part of W only; a core function in language
+  `c` is compared with all of W, because `CREATE OR REPLACE` keeps the oid and can change the code;
+- any native `SECURITY DEFINER` function outside W (leg 3);
+- a native function made by hand outside any extension (R3). Remedy: revoke EXECUTE from PUBLIC
+  and from every role in reach. Never put it into an extension with `ALTER EXTENSION ... ADD`: the
+  manifest check below refuses that too;
+- a member of a shipped extension that is no longer as shipped (R5): it runs code the pinned
+  manifest records as withheld for the installed version (R5a), or its name, symbol or rights mode
+  is not in the manifest for that version (R5b).
+
+The record itself is checked against files in the jar, generated from the pinned images by
+`tools/generate-pinned-catalogue.sh`: the initdb baseline (R0 signature, R1 content), no initdb
+record names PUBLIC or a role created after initdb (R2), no extension record spells PUBLIC (R4).
+A server major with no pinned files (PostgreSQL 18 on this release), a baseline oid with another
+signature (R0), or a shipped extension at a version the manifest does not list (R5v) refuses with
+`SHRED-SCHEMA-005`: unverifiable is not clean, and `allow-privileged-runtime-role` does not relax
+it. A grant made after startup is seen at the next start, like every other leg.
+
+**Third-party extensions (limit L20).** A native function of an extension the pinned image does
+not ship (for example `vector` or `postgis`), that reach or PUBLIC may execute, refuses until the
+operator lists it: `shredding.jdbc.accepted-third-party-extensions=vector`. A non-empty list WARNs
+at every startup. Each entry is trimmed; a blank entry, or the name of an extension the image
+ships (`adminpack`, `AdminPack`), refuses to start. What the list trusts: (a) every native
+function of an accepted extension as shipped, including one an admin re-creates or adds later;
+legs 1 to 3 and R5a still apply, so a member over a withheld contrib symbol still refuses, and the
+remedy is to revoke EXECUTE from PUBLIC and reach, not to accept. (b) Inside a shipped extension
+the library file is not compared: a hand-built library that exports a symbol the manifest lists as
+PUBLIC, under the same name, passes. Both need a superuser who writes a library file, which already
+owns the server. A third-party script that grants a dangerous caller-rights function to PUBLIC is
+trusted as shipped.
+
+**Extensions the image lists but cannot install.** `plperl`, `plperlu`, `plpython3u`, `pltcl`,
+`pltclu` and their transforms fail to install on the pinned images (no language runtime). They are
+judged like third-party extensions. On a distribution server that has Perl or Python they are the
+refusal operators meet most often; accept them by name with the property above.
+
+**pg_upgrade.** It keeps each extension at its old version. A version the manifest lists verifies
+as a fresh install would. A version that is only an update source (for example
+`pg_stat_statements` 1.3 on 17) refuses with `005` and the remedy
+`ALTER EXTENSION pg_stat_statements UPDATE`. A version newer than the manifest needs a module
+release.
+
+**Limit L19: SQL and PL/pgSQL `SECURITY DEFINER` wrappers.** A wrapper with a body is not judged.
+Example: `CREATE FUNCTION public.export_blob(o oid, f text) ... LANGUAGE sql SECURITY DEFINER AS
+'SELECT pg_catalog.lo_export(o, f)'`, owned by a superuser and granted to PUBLIC, passes and
+writes files. Hosted products ship many such functions, so refusing them all would refuse ordinary
+platforms. One case is not this limit: a wrapper that neither PUBLIC nor a role whose rights the
+login may use (inherited, or reachable by `SET ROLE`) may execute, not owned by such a role, and
+named in a slot of an object R6 judges (an aggregate's support function, a language's validator).
+Its body runs as its owner and nobody checks that reach may run it, so startup refuses it (R6,
+C-PR47-2). Example: `public.w(text, boolean)` over `pg_read_file`, revoked from PUBLIC, as the
+`sfunc` of a public aggregate. Membership alone is not enough (C-PR47-4): a PostgreSQL 16 grant
+`GRANT g TO app WITH INHERIT FALSE, SET FALSE` gives the login none of `g`'s rights, so a wrapper
+granted only to `g`, or owned by `g`, refuses the same way. A wrapper the login may execute stays
+this limit: the object gives nothing a direct call does not. Audit them with this query. It walks
+group membership, so a wrapper granted to a group of a `NOINHERIT` login is listed too. Its second
+half lists every wrapper in a slot R6 reads (the eight aggregate slots, an operator's estimators, a
+language's handler, inline handler and validator), granted or not. An operator's own function is
+not listed: the server checks it as the caller (C-PR47-6):
+
+<!-- l19-audit-query -->
+```sql
+-- replace 'app' with the login role; run as any role that can read the catalogue
+SELECT p.oid::regprocedure                                  AS function,
+       l.lanname                                            AS language,
+       p.proowner::regrole                                  AS owner,
+       o.rolsuper                                           AS owner_is_superuser,
+       pg_has_role(p.proowner, 'pg_read_server_files', 'MEMBER')
+    OR pg_has_role(p.proowner, 'pg_write_server_files', 'MEMBER')
+    OR pg_has_role(p.proowner, 'pg_execute_server_program', 'MEMBER')
+                                                            AS owner_reaches_server_file_roles,
+       CASE WHEN x.grantee = 0 THEN 'PUBLIC' ELSE x.grantee::regrole::text END AS executable_via
+  FROM pg_proc p
+  JOIN pg_language l ON l.oid = p.prolang
+  JOIN pg_roles o    ON o.oid = p.proowner
+ CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) x
+ WHERE p.prosecdef
+   AND x.privilege_type = 'EXECUTE'
+   AND (x.grantee = 0 OR pg_has_role('app', x.grantee, 'MEMBER'))
+UNION ALL
+SELECT p.oid::regprocedure, l.lanname, p.proowner::regrole, o.rolsuper,
+       pg_has_role(p.proowner, 'pg_read_server_files', 'MEMBER')
+    OR pg_has_role(p.proowner, 'pg_write_server_files', 'MEMBER')
+    OR pg_has_role(p.proowner, 'pg_execute_server_program', 'MEMBER'),
+       'called by ' || c.caller
+  FROM pg_proc p
+  JOIN pg_language l ON l.oid = p.prolang
+  JOIN pg_roles o    ON o.oid = p.proowner
+  JOIN (SELECT 'aggregate ' || a.aggfnoid::regprocedure::text AS caller,
+               unnest(ARRAY[a.aggtransfn::oid, a.aggfinalfn, a.aggcombinefn, a.aggserialfn,
+                            a.aggdeserialfn, a.aggmtransfn, a.aggminvtransfn,
+                            a.aggmfinalfn]) AS fn
+          FROM pg_aggregate a
+        UNION ALL
+        SELECT 'operator ' || r.oid::regoperator::text, unnest(ARRAY[r.oprrest::oid, r.oprjoin])
+          FROM pg_operator r
+        UNION ALL
+        SELECT 'language ' || g.lanname, unnest(ARRAY[g.lanplcallfoid, g.laninline, g.lanvalidator])
+          FROM pg_language g) c ON c.fn = p.oid
+ WHERE p.prosecdef
+ ORDER BY 1, 6;
+```
+
+**Objects that call a function for you (R6).** Some catalogue objects name a function that the
+server calls on your behalf. For an aggregate, the server checks EXECUTE on its support functions
+as the aggregate's owner, not as the caller. For a language validator, a language handler and an
+operator's estimators, it checks nothing. Example: a superuser runs `CREATE AGGREGATE
+public.readall(bool) (sfunc = pg_catalog.pg_read_file, stype = text, initcond = 'PG_VERSION')`.
+The runtime role then runs `SELECT public.readall(true)` and reads the file, although a direct
+`pg_read_file` call is "permission denied". Startup now refuses such an object with
+`SHRED-SCHEMA-004` when three things hold: PUBLIC or a role in reach may use it (EXECUTE on the
+aggregate, USAGE on a trusted language; anyone may use an operator); for an aggregate, a role
+outside reach owns it; and the function in one of its slots falls under any rule above (in W, an
+alias, native `SECURITY DEFINER`, native code made by hand, or a shipped member not as shipped).
+The slots judged are all eight aggregate slots (transition, final, combine, serialise,
+deserialise, and the three moving-aggregate slots), the language handler, inline handler and
+validator, and the operator's restrict and join estimators. An operator's own function is checked
+as the caller (measured), so it is left to the server. An aggregate owned by a role in reach is
+not judged here: its owner checks run as reach, and the legs above judge what reach holds. A
+language or an operator is judged whoever owns it, because the server checks nothing on those
+slots, so the owner's rights play no part. Example: a superuser makes a trusted language whose
+validator is `pg_ls_tmpdir(oid)` and gives it to the runtime role; the runtime role's `CREATE
+FUNCTION` in that language would run `pg_ls_tmpdir`, so startup refuses (C-PR47-1). A
+hand-made aggregate over ordinary functions (`sfunc = pg_catalog.int4pl`) verifies: an aggregate
+runs no code of its own. The manifest records each contrib aggregate's support functions, so a
+contrib aggregate re-created over another support function (`citext`'s `min` over
+`citext_larger`) is not as shipped. A slot function that is `SECURITY DEFINER`, in any language,
+and that reach may not run as itself also refuses: its body runs as its owner (C-PR47-2). "May
+run as itself" means EXECUTE for PUBLIC, or EXECUTE for or ownership by a role whose rights the
+login may use (inherited, or reachable by `SET ROLE`); a role reached only `WITH INHERIT FALSE, SET
+FALSE` does not count (C-PR47-4). The refusal labels quote a schema or name that is not plain
+lowercase, and the message escapes invisible format characters such as U+200B, so a look-alike
+schema cannot read as `public` (C-PR47-5). The manifest's support keys carry no
+schema (`transfn=citext_larger(citext,citext)`), so R5b cannot tell `evil.citext_larger` from the
+shipped `public.citext_larger`. R6 can: statement 3 gives it each slot function's
+schema-qualified name and rights mode, and the refusal names `evil.citext_larger`. A same-key
+function in another schema gains nothing otherwise: native outside an extension it is R4, inside
+one it is R5, and plain SQL runs with the caller's rights. Four withheld built-ins fit a language validator's `(oid)`
+slot on 16 and 17: the three `pg_stat_reset_*(oid)` functions and `pg_ls_tmpdir(oid)`.
+
+**Paths the server refuses by signature.** Type input and output (and receive, send,
+typmod, analyze, subscript), range canonical and subtype-diff functions, operator class support
+functions, access method handlers, conversions, text search parsers and templates, foreign-data
+wrapper handlers and validators, transforms, triggers and event triggers. Each slot takes or
+returns `cstring` or `internal`, or has a shape that no withheld function, built-in or shipped
+extension, fits. A test counts the fits on each pin, with every manifest extension created, and
+expects zero, so a pin bump that adds one turns the build red. Two slots R6 reads have fits, and
+the test names them: the four validator fits above, and `dblink_connect_u(text, text)` in the
+aggregate combine slot `(s, s) -> s`, which R6 refuses. A cast is not
+in this list: a withheld function may fit a new cast (`lo_import(text)` returns `oid`; not tried), but the
+server checks EXECUTE on a cast's function as the caller (measured), as for an operator's.
+
+**Core functions rewritten in place (R7).** `CREATE OR REPLACE FUNCTION` keeps a function's oid
+and may change its language, library and symbol. Example: a superuser rewrites
+`pg_catalog.lower(text)` as `LANGUAGE c AS '$libdir/pg_trgm', 'similarity'`. A fourth pinned file
+per major, `pg-core-native-<major>.tsv`, records every native function below oid 16384 in no
+extension: signature, language, symbol, library, rights mode. It is keyed by signature, not oid,
+because initdb gives some functions their oids at run time, so an oid is not a stable key.
+A recorded function that is missing or differs, or a native function below oid 16384 in no
+extension that the file does not list, refuses with `SHRED-SCHEMA-005`. What the other legs saw
+is listed after it as "also seen". Limit: a core function in SQL that is rewritten as `SECURITY
+DEFINER` is the wrapper of limit L19, not R7.
+
+**Outside this check.** `pg_logical_emit_message` is PUBLIC by default and lets any role append to
+the WAL; a loop of large messages fills the WAL disk. Watch WAL size, or revoke it from PUBLIC (the
+gate accepts that). `lo_compat_privileges = on` is a setting, not a grant: every role then reads
+and writes every large object. Keep it `off`, the default. Managed services may grant withheld
+functions to their admin role; the reach leg already refuses those roles. Not measured.
+
+| Path | Example | Outcome |
+|---|---|---|
+| grant to the runtime role, the login role, a group (INHERIT or not), PUBLIC | `GRANT EXECUTE ON FUNCTION pg_read_file(text) TO grp` | refused |
+| every withheld overload, and one a later release adds | `pg_read_file(text, bigint, bigint)` | refused (read from the server) |
+| shipped grant to a predefined role in reach | `pgstattuple` to `pg_stat_scan_tables` | refused |
+| default privileges laundered into a shipped record | `ALTER DEFAULT PRIVILEGES ... TO app`, then `CREATE EXTENSION dblink` | refused |
+| alias of a withheld symbol, any library spelling or a copy of the library | `LANGUAGE internal AS 'be_lo_export'` | refused |
+| native `SECURITY DEFINER` copy of any function | `get_raw_page_1_9` | refused |
+| record rewritten by `ALTER EXTENSION ADD`/`DROP` | `ADD` then `DROP` of `lo_export` | refused |
+| contrib member re-created and added back | `pg_get_wal_record_info` over its own symbol | refused (R5a) |
+| older extension version shipped PUBLIC | `pgstattuple` 1.4 | verifies |
+| core internal function sharing a contrib symbol | `pg_rotate_logfile_old()` on 16 | verifies |
+| the same function rewritten to language `c` | `CREATE OR REPLACE ... LANGUAGE c` over `pg_file_write_v1_1` | refused |
+| operator, cast or view over a withheld function | `CREATE OPERATOR ... FUNCTION = lo_export` | refused by the server |
+| `SECURITY DEFINER` SQL wrapper | attack above | limit L19 |
+| the same wrapper revoked from PUBLIC, as an aggregate's `sfunc` | `public.w(text, boolean)` over `pg_read_file` | refused (R6) |
+| catalogue made unreadable | `REVOKE SELECT ON pg_init_privs FROM PUBLIC` | `005` |
+
 ### The health endpoint publishes the posture
 
 `/actuator/health` gains two details from the gate's verdict rather than re-deriving them:
