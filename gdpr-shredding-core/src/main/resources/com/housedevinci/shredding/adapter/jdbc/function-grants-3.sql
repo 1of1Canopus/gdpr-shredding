@@ -38,7 +38,7 @@ SELECT 'agg'::pg_catalog.text AS kind,
        pg_catalog.concat(pg_catalog.quote_ident(fs.nspname), '.', pg_catalog.quote_ident(f.proname), '(',
                          pg_catalog.pg_get_function_identity_arguments(f.oid), ')') AS fn_label,
        f.prosecdef AS fn_definer,
-       ((CASE WHEN f.proowner OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid)
+       ((CASE WHEN (f.proowner OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))
               THEN (pg_catalog.pg_has_role(me.login, f.proowner, 'USAGE')
                     OR pg_catalog.pg_has_role(me.login, f.proowner, 'SET'))
               ELSE false END)
@@ -46,8 +46,8 @@ SELECT 'agg'::pg_catalog.text AS kind,
                                                          THEN pg_catalog.acldefault('f', f.proowner)
                                                          ELSE f.proacl END) AS h
                     WHERE (h.privilege_type OPERATOR(pg_catalog.=) 'EXECUTE')
-                      AND (CASE WHEN h.grantee OPERATOR(pg_catalog.=) 0::pg_catalog.oid THEN true
-                                WHEN h.grantee OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid)
+                      AND (CASE WHEN (h.grantee OPERATOR(pg_catalog.=) 0::pg_catalog.oid) THEN true
+                                WHEN (h.grantee OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))
                                 THEN (pg_catalog.pg_has_role(me.login, h.grantee, 'USAGE')
                                       OR pg_catalog.pg_has_role(me.login, h.grantee, 'SET'))
                                 ELSE false END))) AS fn_reach
@@ -83,7 +83,7 @@ SELECT 'opr', o.oid, o.oid::pg_catalog.regoperator::pg_catalog.text, o.oprowner,
        pg_catalog.concat(pg_catalog.quote_ident(fs.nspname), '.', pg_catalog.quote_ident(f.proname), '(',
                          pg_catalog.pg_get_function_identity_arguments(f.oid), ')'),
        f.prosecdef,
-       ((CASE WHEN f.proowner OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid)
+       ((CASE WHEN (f.proowner OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))
               THEN (pg_catalog.pg_has_role(me.login, f.proowner, 'USAGE')
                     OR pg_catalog.pg_has_role(me.login, f.proowner, 'SET'))
               ELSE false END)
@@ -91,8 +91,8 @@ SELECT 'opr', o.oid, o.oid::pg_catalog.regoperator::pg_catalog.text, o.oprowner,
                                                          THEN pg_catalog.acldefault('f', f.proowner)
                                                          ELSE f.proacl END) AS h
                     WHERE (h.privilege_type OPERATOR(pg_catalog.=) 'EXECUTE')
-                      AND (CASE WHEN h.grantee OPERATOR(pg_catalog.=) 0::pg_catalog.oid THEN true
-                                WHEN h.grantee OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid)
+                      AND (CASE WHEN (h.grantee OPERATOR(pg_catalog.=) 0::pg_catalog.oid) THEN true
+                                WHEN (h.grantee OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))
                                 THEN (pg_catalog.pg_has_role(me.login, h.grantee, 'USAGE')
                                       OR pg_catalog.pg_has_role(me.login, h.grantee, 'SET'))
                                 ELSE false END)))
@@ -124,7 +124,7 @@ SELECT 'lang', l.oid, pg_catalog.quote_ident(l.lanname), l.lanowner,
        pg_catalog.concat(pg_catalog.quote_ident(fs.nspname), '.', pg_catalog.quote_ident(f.proname), '(',
                          pg_catalog.pg_get_function_identity_arguments(f.oid), ')'),
        f.prosecdef,
-       ((CASE WHEN f.proowner OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid)
+       ((CASE WHEN (f.proowner OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))
               THEN (pg_catalog.pg_has_role(me.login, f.proowner, 'USAGE')
                     OR pg_catalog.pg_has_role(me.login, f.proowner, 'SET'))
               ELSE false END)
@@ -132,8 +132,8 @@ SELECT 'lang', l.oid, pg_catalog.quote_ident(l.lanname), l.lanowner,
                                                          THEN pg_catalog.acldefault('f', f.proowner)
                                                          ELSE f.proacl END) AS h
                     WHERE (h.privilege_type OPERATOR(pg_catalog.=) 'EXECUTE')
-                      AND (CASE WHEN h.grantee OPERATOR(pg_catalog.=) 0::pg_catalog.oid THEN true
-                                WHEN h.grantee OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid)
+                      AND (CASE WHEN (h.grantee OPERATOR(pg_catalog.=) 0::pg_catalog.oid) THEN true
+                                WHEN (h.grantee OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))
                                 THEN (pg_catalog.pg_has_role(me.login, h.grantee, 'USAGE')
                                       OR pg_catalog.pg_has_role(me.login, h.grantee, 'SET'))
                                 ELSE false END)))
