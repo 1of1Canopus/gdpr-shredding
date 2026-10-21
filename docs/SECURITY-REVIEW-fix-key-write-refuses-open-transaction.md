@@ -109,3 +109,42 @@ Attempt closed without a finding: a server transaction opened by a raw
 `BEGIN` on a connection in auto-commit. No Spring path hands such a
 connection to a second caller on the same thread; only a pool that leaks
 an open transaction does, and that is outside this module.
+
+## Pass 2, 2026-10-21
+
+Head reviewed: 186748f. **Verdict: MERGE WITH FIXES** (R50-4, R50-5).
+
+| Id | Status | Evidence |
+|---|---|---|
+| R50-1 | open LOW, written limit for 0.2.1 by the owner's decision | lazy proxy probes stay red; the register row stays open |
+| R50-2 | fixed | `probe_initialize_schema_inside_a_caller_transaction_commits_the_caller_rows` green 3 runs of 3; code `SHRED-SCHEMA-008` asserted |
+| R50-3 | fixed | `every_key_write_is_refused_before_any_statement_and_lock`, `a_read_inside_the_caller_transaction_still_works` green 3 of 3 |
+| R50-4 | new, LOW | red 3 of 3, below |
+| R50-5 | new, INFO | below |
+
+**R50-4 (LOW): `initializeAndVerifySchema` commits the caller's transaction.**
+Same control, one more path; not part of R50-1, because a plain
+`TransactionAwareDataSourceProxy` reaches it. Example: startup with
+`shredding.jdbc.initialize-schema=true` inside a caller transaction that
+already inserted a row; the method turns auto-commit off, runs the DDL and
+verification, and commits that row. Probe:
+`probe_initialize_and_verify_schema_inside_a_caller_transaction_commits_the_caller_rows`
+(internal probe file `CipherProbePr50bTest`, red on 186748f: 1 row
+committed, expected 0). Fix, in `JdbcSupport.initializeAndVerifySchema(DataSource, boolean, List)`,
+right after `ds.getConnection()` and before `getAutoCommit` is saved:
+`if (!c.getAutoCommit()) { throw schemaStepInCallerTransaction(); }`.
+Add the probe to `CipherProbePr50Test`. A failed verification there also
+calls `c.rollback()`; the same check stops that rolling back the caller's work.
+
+**R50-5 (INFO): the R50-1 limit is not written where users read it.**
+SECURITY-NOTES row M13 says the lazy proxy is "accepted", and M21/M21w say
+the caller's transaction is never committed. Example: a team reads M13,
+puts the lazy proxy outside the transaction-aware one, and loses its
+rollback. Fix: add row M21x to SECURITY-NOTES: "`LazyConnectionDataSourceProxy`
+around `TransactionAwareDataSourceProxy` (wrong order per Spring's javadoc):
+not detected in 0.2.1; key writes, reads and the schema step can commit the
+caller's transaction. Put the transaction-aware proxy outermost (C-R50-1)."
+Same sentence in `upgrading-0.2.1.md` next to the key-write paragraph.
+
+Tests run: `CipherProbePr50Test` (branch) plus `CipherProbePr50bTest`
+(mine), three runs, results identical each run.
