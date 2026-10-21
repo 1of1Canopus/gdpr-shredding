@@ -20,6 +20,12 @@ All notable changes to this project. The format follows
   committed the application's rows. It now refuses a connection with auto-commit off with
   `SHRED-SCHEMA-008`, before any statement. With `shredding.jdbc.initialize-schema=true` this
   can appear at startup; `docs/index.md` says so.
+- **R50-4 (LOW): the startup schema path committed the application's own transaction.**
+  `JdbcSupport.initializeAndVerifySchema` now refuses a connection with auto-commit off with
+  `SHRED-SCHEMA-008`, before any statement.
+- **R50-5 (INFO): documented limit.** A `LazyConnectionDataSourceProxy` outside a
+  `TransactionAwareDataSourceProxy` is not detected; SECURITY-NOTES row M21x and
+  `docs/upgrading-0.2.1.md` say to put the transaction-aware proxy outermost.
 - **C-PR45-3 (MEDIUM): EXECUTE on a function the server ships withheld passed the gate.**
   `GRANT EXECUTE ON FUNCTION pg_catalog.lo_export(oid, text) TO shredding_app` let the runtime
   role write any file as the server's user, and startup reported it unprivileged. Startup now

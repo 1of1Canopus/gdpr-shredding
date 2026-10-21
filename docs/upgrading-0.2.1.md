@@ -69,6 +69,10 @@ this fix the module committed the order row, and your later rollback could not u
 key write fails and your rollback works. Give the module's stores a plain `DataSource` (the
 starter's default does), or request the key before you open your transaction.
 
+One limit. A `LazyConnectionDataSourceProxy` wrapped around a `TransactionAwareDataSourceProxy` (the
+wrong order, per Spring's own javadoc) is not detected in 0.2.1: key writes, reads and the schema
+step can commit your transaction. Put the transaction-aware proxy outermost.
+
 Two smaller changes come with it:
 
 - Verification sets its read-only `REPEATABLE READ` transaction with SQL (`SET TRANSACTION`)

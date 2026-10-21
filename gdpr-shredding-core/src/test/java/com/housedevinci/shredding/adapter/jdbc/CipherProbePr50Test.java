@@ -186,4 +186,33 @@ class CipherProbePr50Test {
         .describedAs("initializeSchema committed a transaction it did not begin")
         .isEqualTo(before);
   }
+
+  /** initializeAndVerifySchema (the startup path) opens its own transaction too (R50-4). */
+  @Test
+  void probe_initialize_and_verify_schema_inside_a_caller_transaction_commits_the_caller_rows()
+      throws SQLException {
+    var aware = new TransactionAwareDataSourceProxy(ownerDs);
+    var tx = new TransactionTemplate(new DataSourceTransactionManager(ownerDs));
+    long before = rows(ownerDs, "caller_mark");
+    ShreddingException refused = null;
+    try {
+      tx.executeWithoutResult(
+          status -> {
+            try (var st = DataSourceUtils.getConnection(ownerDs).createStatement()) {
+              st.execute("INSERT INTO public.caller_mark VALUES (54)");
+            } catch (SQLException e) {
+              throw new IllegalStateException(e);
+            }
+            JdbcSupport.initializeAndVerifySchema(aware, true);
+            status.setRollbackOnly();
+          });
+    } catch (ShreddingException e) {
+      refused = e;
+    }
+    assertThat(rows(ownerDs, "caller_mark"))
+        .describedAs("initializeAndVerifySchema committed a transaction it did not begin")
+        .isEqualTo(before);
+    assertThat(refused).describedAs("refused").isNotNull();
+    assertThat(refused.code()).isEqualTo("SHRED-SCHEMA-008");
+  }
 }

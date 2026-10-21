@@ -817,6 +817,9 @@ public final class JdbcSupport {
       List<String> acceptedThirdPartyExtensions) {
     List<String> accepted = acceptedExtensions(acceptedThirdPartyExtensions);
     try (Connection c = ds.getConnection()) {
+      if (!c.getAutoCommit()) {
+        throw schemaStepInCallerTransaction();
+      }
       boolean previous = c.getAutoCommit();
       c.setAutoCommit(false);
       try {
