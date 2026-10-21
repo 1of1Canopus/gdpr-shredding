@@ -1657,7 +1657,9 @@ refused restore attached as suppressed, never replaced by an isolation code.
 `SHRED-SCHEMA-008` is the only `SHRED-SCHEMA-*` code that is never a startup condition and never
 means "re-apply the script": it means the connection was in auto-commit, or something moved
 `search_path` inside the erasure's transaction. The erasure's whole transaction rolls back — no key
-destroyed, no index half-cleared, no record appended.
+destroyed, no index half-cleared, no record appended. One exception to "never a startup condition":
+with `shredding.jdbc.initialize-schema=true`, the schema step run on a connection already inside the
+application's own transaction is refused with this code (R50-2), before any statement.
 
 **The window is one statement wide, and that is a property, not a style.** The erasure's own
 `UPDATE` runs outside it, on the path the transaction arrived with, with every name in it qualified

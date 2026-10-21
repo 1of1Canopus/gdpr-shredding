@@ -183,10 +183,15 @@ public final class JdbcSupport {
 
   /**
    * The schema step only: DDL on a database nothing has verified yet, so there is no identity to
-   * compare with. Never used for a store.
+   * compare with. Never used for a store. A connection that arrives with auto-commit off is inside
+   * a transaction this class did not begin and is refused untouched with {@code SHRED-SCHEMA-008}
+   * (R50-2), as a key write is.
    */
   private static void inUncheckedTransaction(DataSource ds, SqlWork<Void> work) {
     try (Connection c = ds.getConnection()) {
+      if (!c.getAutoCommit()) {
+        throw schemaStepInCallerTransaction();
+      }
       inTransaction(c, work);
     } catch (SQLException e) {
       throw unavailable(e);
@@ -280,6 +285,15 @@ public final class JdbcSupport {
             + " TransactionAwareDataSourceProxy inside @Transactional. The key write was not"
             + " performed: nothing was created, recorded or rotated, and the caller's transaction"
             + " was left untouched.");
+  }
+
+  private static ShreddingException schemaStepInCallerTransaction() {
+    return new ShreddingException(
+        ErrorCodes.SCHEMA_NAME_ISOLATION,
+        "shredding: the schema step runs in its own transaction and must not commit the caller's;"
+            + " the connection arrived inside a transaction (auto-commit off), for example through"
+            + " TransactionAwareDataSourceProxy inside @Transactional. The schema step was not"
+            + " performed: nothing was created, and the caller's transaction was left untouched.");
   }
 
   private static ShreddingException notReadCommitted(String why, Throwable cause) {
