@@ -74,21 +74,56 @@ final class FunctionGrants {
    * row is its 1-based position here.
    */
   static final Map<String, List<String>> SLOTS =
-      Map.of(
-          "agg",
-          List.of(
-              "transfn",
-              "finalfn",
-              "combinefn",
-              "serialfn",
-              "deserialfn",
-              "mtransfn",
-              "minvtransfn",
-              "mfinalfn"),
-          "opr",
-          List.of("oprcode", "oprrest", "oprjoin"),
-          "lang",
-          List.of("handler", "inline", "validator"));
+      Map.ofEntries(
+          Map.entry(
+              "agg",
+              List.of(
+                  "transfn",
+                  "finalfn",
+                  "combinefn",
+                  "serialfn",
+                  "deserialfn",
+                  "mtransfn",
+                  "minvtransfn",
+                  "mfinalfn")),
+          Map.entry("opr", List.of("oprcode", "oprrest", "oprjoin")),
+          Map.entry("lang", List.of("handler", "inline", "validator")),
+          // C-RC021-2: the no-check slots (trigger-slots addendum Rev 2).
+          Map.entry("trg", List.of("function")),
+          Map.entry("evt", List.of("function")),
+          Map.entry(
+              "typ",
+              List.of(
+                  "input",
+                  "output",
+                  "receive",
+                  "send",
+                  "typmod_in",
+                  "typmod_out",
+                  "analyze",
+                  "subscript")),
+          Map.entry("rng", List.of("canonical", "subdiff")),
+          Map.entry("amp", List.of("support")),
+          Map.entry("am", List.of("handler")),
+          Map.entry("tsp", List.of("start", "gettoken", "end", "headline", "lextypes")),
+          Map.entry("tst", List.of("init", "lexize")),
+          Map.entry("fdw", List.of("handler", "validator")),
+          Map.entry("cnv", List.of("function")),
+          Map.entry("trf", List.of("fromsql", "tosql")),
+          Map.entry("sup", List.of("support")));
+
+  /**
+   * The kinds statement 3 reads for C-RC021-2: every slot runs with no EXECUTE check, so R6 judges
+   * each row whoever owns the object and whatever reach may use.
+   */
+  static final Set<String> NO_CHECK_KINDS =
+      Set.of("trg", "evt", "typ", "rng", "amp", "am", "tsp", "tst", "fdw", "cnv", "trf", "sup");
+
+  /**
+   * The kinds whose function can never be called directly (ruling 4): EXECUTE on it only lets reach
+   * attach it, so the verdict never reads its ACL and leg 7 does not apply.
+   */
+  static final Set<String> ATTACH_ONLY_KINDS = Set.of("trg", "evt");
 
   /**
    * True when the server checks EXECUTE on the slot's function as the object's owner: every
@@ -107,7 +142,9 @@ final class FunctionGrants {
    * neither: the server checks it as the caller ({@code permission denied for function}).
    */
   static boolean noCheck(String kind, int slot) {
-    return kind.equals("lang") || (kind.equals("opr") && slot != 1);
+    return kind.equals("lang")
+        || (kind.equals("opr") && slot != 1)
+        || NO_CHECK_KINDS.contains(kind);
   }
 
   static void check(
@@ -176,6 +213,9 @@ final class FunctionGrants {
     List<FunctionGrantsSql.CallerFact> callers =
         FunctionGrantsSql.callers(c, reach.oids(), reach.loginOid());
     var lines = new ArrayList<String>();
+    for (String fn : judgeHandMade(facts)) {
+      lines.add(FunctionGrantMessages.handMade(fn));
+    }
     for (ExecuteRow row : judgeExecutes(facts, catalogue, accepted, reachOids, supports(callers))) {
       long g = row.grantee();
       lines.add(
@@ -336,6 +376,10 @@ final class FunctionGrants {
         continue;
       }
       Verdict verdict = v.orElseThrow();
+      if (verdict.leg() == 4) {
+        // Leg 4 does not depend on grants (C-RC021-2): judgeHandMade gives its one line.
+        continue;
+      }
       for (var g : grantees) {
         long grantee = g.grantee().orElseThrow();
         out.add(
@@ -392,6 +436,26 @@ final class FunctionGrants {
       return Optional.of(new Verdict(4, 0, "", ""));
     }
     return index.r5a(f).or(() -> index.r5b(f, accepted));
+  }
+
+  /**
+   * Leg 4 closure (C-RC021-2, ruling 2): every native function made by hand (oid 16384 or above, in
+   * no extension, not an aggregate) refuses whatever its ACL, wherever it is attached or not. A
+   * trigger, a type or another no-check slot runs it with no EXECUTE check, so a revoke does not
+   * protect it. One label per function, in oid order; statement 2 lists every native function, with
+   * or without a grantee, so this needs no reach.
+   */
+  static List<String> judgeHandMade(List<FunctionGrantsSql.ExecuteFact> facts) {
+    var out = new TreeMap<Long, String>();
+    for (var f : facts) {
+      if (f.nativeCode()
+          && !f.kind().equals("a")
+          && f.oid() >= FunctionGrantsSql.FIRST_NORMAL_OID
+          && f.extension().isEmpty()) {
+        out.putIfAbsent(f.oid(), f.label());
+      }
+    }
+    return List.copyOf(out.values());
   }
 
   static boolean inW(FunctionGrantsSql.ExecuteFact f, Set<Long> baselineOids) {
@@ -538,7 +602,7 @@ final class FunctionGrants {
       // the baseline. It runs with the caller's rights unless it is a revoked definer wrapper.
       var fact = Optional.ofNullable(ctx.byOid().get(c.fn())).map(list -> list.get(0));
       Optional<Verdict> v = fact.flatMap(f -> verdict(f, ctx, accepted));
-      if (v.isEmpty() && revokedDefiner(c)) {
+      if (v.isEmpty() && revokedDefiner(c) && !ATTACH_ONLY_KINDS.contains(c.kind())) {
         v = Optional.of(new Verdict(7, 0, "", ""));
       }
       if (v.isEmpty()) {
