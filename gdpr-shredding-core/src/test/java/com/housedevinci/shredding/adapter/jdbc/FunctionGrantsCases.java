@@ -447,7 +447,7 @@ abstract class FunctionGrantsCases {
         held("public.a2(text)"),
         held("public.a3(text)"),
         held("public.a4(text)"),
-        held("public.b1(text, text)"));
+        "function public.b1(text, text) is native code made by hand outside any extension");
   }
 
   @Test
@@ -623,9 +623,7 @@ abstract class FunctionGrantsCases {
     exec(
         db.su(),
         "CREATE FUNCTION public.w(text) RETURNS text LANGUAGE c STRICT AS '$libdir/dblink', 'dblink_connect'");
-    refuses(
-        db.app(),
-        "PUBLIC " + held("public.w(text)") + ", native code created outside any extension");
+    refuses(db.app(), "function public.w(text) is native code made by hand outside any extension");
   }
 
   @Test
@@ -1497,7 +1495,12 @@ abstract class FunctionGrantsCases {
     // O1: oprcode runs with the caller's EXECUTE checked, so R6 leaves it to the server.
     assertThatThrownBy(() -> scalar(db.app(), "SELECT 'a'::text OPERATOR(public.===) 'a'"))
         .hasMessageContaining("permission denied for function r6_copy");
-    verifies(db.app());
+    // C-RC021-2: the copy is native code made by hand, refused whatever its grants (leg 4);
+    // the operator itself still gives no R6 line, because oprcode is checked as the caller.
+    assertThat(refusal(db.app()))
+        .hasMessageContaining(
+            "function public.r6_copy(text, text) is native code made by hand outside any extension")
+        .hasMessageNotContaining("operator public.===");
     var other = db();
     String rest = handMadeCopy(other, "pg_catalog.eqsel(internal, oid, internal, integer)");
     exec(
@@ -1698,5 +1701,542 @@ abstract class FunctionGrantsCases {
     assertThat(scalar(db.su(), UNREAD_SHAPES)).isEqualTo("0");
     exec(db.su(), "CREATE EXTENSION tpi");
     assertThat(scalar(db.su(), UNREAD_SHAPES)).isEqualTo("1");
+  }
+
+  // ------------------------------------------------- C-RC021-2: no-check slots (addendum Rev 2)
+
+  /** A hand-made native trigger function, EXECUTE revoked: only leg 4 and R6 can see it. */
+  private static final String H_TRG =
+      "CREATE FUNCTION public.h_trg() RETURNS trigger LANGUAGE internal"
+          + " AS 'suppress_redundant_updates_trigger'|REVOKE EXECUTE ON FUNCTION public.h_trg()"
+          + " FROM PUBLIC";
+
+  private static final String H_TRG_LABEL = "public.h_trg()";
+
+  private static String leg4(String fn) {
+    return "function " + fn + " is native code made by hand outside any extension";
+  }
+
+  private static String slotLine(String slot, String what, String fn) {
+    return "function " + fn + " as the " + slot + " of " + what;
+  }
+
+  private static void plant(Db db, String statements) throws SQLException {
+    exec(db.su(), statements.split("\\|"));
+  }
+
+  @Test
+  void revoked_hand_made_native_attached_nowhere_refuses_leg_4() throws SQLException {
+    var db = db();
+    plant(db, H_TRG);
+    refuses(db.app(), leg4(H_TRG_LABEL));
+  }
+
+  /**
+   * T1 to T12 and the reach rule: every trigger of the database is judged, whatever its kind, its
+   * table, its state or the table's owner. Each case plants the path, then the trigger.
+   */
+  @ParameterizedTest(name = "{0}")
+  @org.junit.jupiter.params.provider.CsvSource(
+      delimiter = ';',
+      value = {
+        "T1 row trigger; CREATE TABLE public.t (id int)|GRANT INSERT, UPDATE ON public.t TO "
+            + APP
+            + "|CREATE TRIGGER x BEFORE UPDATE ON public.t FOR EACH ROW EXECUTE FUNCTION"
+            + " public.h_trg(); x on public.t",
+        "T2 statement trigger; CREATE TABLE public.t (id int)|GRANT INSERT ON public.t TO "
+            + APP
+            + "|CREATE TRIGGER x AFTER INSERT ON public.t FOR EACH STATEMENT EXECUTE FUNCTION"
+            + " public.h_trg(); x on public.t",
+        "T3 truncate trigger; CREATE TABLE public.t (id int)|GRANT TRUNCATE ON public.t TO "
+            + APP
+            + "|CREATE TRIGGER x BEFORE TRUNCATE ON public.t FOR EACH STATEMENT EXECUTE FUNCTION"
+            + " public.h_trg(); x on public.t",
+        "T4 constraint trigger; CREATE TABLE public.t (id int)|GRANT INSERT ON public.t TO "
+            + APP
+            + "|CREATE CONSTRAINT TRIGGER x AFTER INSERT ON public.t DEFERRABLE INITIALLY DEFERRED"
+            + " FOR EACH ROW EXECUTE FUNCTION public.h_trg(); x on public.t",
+        "T5 column update grant; CREATE TABLE public.t (id int, c int)|GRANT UPDATE (c) ON public.t"
+            + " TO "
+            + APP
+            + "|CREATE TRIGGER x BEFORE UPDATE OF c ON public.t FOR EACH ROW EXECUTE FUNCTION"
+            + " public.h_trg(); x on public.t",
+        "T6 partition through parent; CREATE TABLE public.p (id int) PARTITION BY RANGE (id)"
+            + "|CREATE TABLE public.p1 PARTITION OF public.p FOR VALUES FROM (0) TO (10)"
+            + "|GRANT INSERT ON public.p TO "
+            + APP
+            + "|CREATE TRIGGER x BEFORE INSERT ON public.p1 FOR EACH ROW EXECUTE FUNCTION"
+            + " public.h_trg(); x on public.p1",
+        "T7 inheritance child; CREATE TABLE public.h (id int)|CREATE TABLE public.hc ()"
+            + " INHERITS (public.h)|GRANT SELECT, UPDATE ON public.h TO "
+            + APP
+            + "|CREATE TRIGGER x BEFORE UPDATE ON public.hc FOR EACH ROW EXECUTE FUNCTION"
+            + " public.h_trg(); x on public.hc",
+        "T8 rule target; CREATE TABLE public.r2 (id int)|CREATE TABLE public.r1 (id int)"
+            + "|CREATE RULE rr AS ON INSERT TO public.r1 DO INSTEAD INSERT INTO public.r2"
+            + " VALUES (NEW.id)|GRANT INSERT ON public.r1 TO "
+            + APP
+            + "|CREATE TRIGGER x BEFORE INSERT ON public.r2 FOR EACH ROW EXECUTE FUNCTION"
+            + " public.h_trg(); x on public.r2",
+        "T9 view base table; CREATE TABLE public.b1 (id int)|CREATE VIEW public.v1 AS SELECT id"
+            + " FROM public.b1|GRANT INSERT ON public.v1 TO "
+            + APP
+            + "|CREATE TRIGGER x BEFORE INSERT ON public.b1 FOR EACH ROW EXECUTE FUNCTION"
+            + " public.h_trg(); x on public.b1",
+        "T10 instead of on a view; CREATE VIEW public.v2 AS SELECT 1 AS id|GRANT INSERT ON"
+            + " public.v2 TO "
+            + APP
+            + "|CREATE TRIGGER x INSTEAD OF INSERT ON public.v2 FOR EACH ROW EXECUTE FUNCTION"
+            + " public.h_trg(); x on public.v2",
+        "T11a before on fk cascade target; CREATE TABLE public.fp (id int PRIMARY KEY)"
+            + "|CREATE TABLE public.fc (id int REFERENCES public.fp ON DELETE CASCADE)"
+            + "|GRANT SELECT, DELETE ON public.fp TO "
+            + APP
+            + "|CREATE TRIGGER x BEFORE DELETE ON public.fc FOR EACH ROW EXECUTE FUNCTION"
+            + " public.h_trg(); x on public.fc",
+        "T11b after on fk cascade target; CREATE TABLE public.fp (id int PRIMARY KEY)"
+            + "|CREATE TABLE public.fc (id int REFERENCES public.fp ON DELETE CASCADE)"
+            + "|GRANT SELECT, DELETE ON public.fp TO "
+            + APP
+            + "|CREATE TRIGGER x AFTER DELETE ON public.fc FOR EACH ROW EXECUTE FUNCTION"
+            + " public.h_trg(); x on public.fc",
+        "T12a disabled trigger; CREATE TABLE public.t (id int)|GRANT INSERT ON public.t TO "
+            + APP
+            + "|CREATE TRIGGER x BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION"
+            + " public.h_trg()|ALTER TABLE public.t DISABLE TRIGGER x; x on public.t",
+        "T12b replica trigger; CREATE TABLE public.t (id int)|GRANT INSERT ON public.t TO "
+            + APP
+            + "|CREATE TRIGGER x BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION"
+            + " public.h_trg()|ALTER TABLE public.t ENABLE REPLICA TRIGGER x; x on public.t",
+        "T12c always trigger; CREATE TABLE public.t (id int)|GRANT INSERT ON public.t TO "
+            + APP
+            + "|CREATE TRIGGER x BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION"
+            + " public.h_trg()|ALTER TABLE public.t ENABLE ALWAYS TRIGGER x; x on public.t",
+        "rule 2 table the runtime role cannot reach; CREATE TABLE public.t (id int)"
+            + "|CREATE TRIGGER x BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION"
+            + " public.h_trg(); x on public.t",
+        "rule 2 table owned by the runtime role; CREATE TABLE public.t (id int)|ALTER TABLE"
+            + " public.t OWNER TO "
+            + APP
+            + "|CREATE TRIGGER x BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION"
+            + " public.h_trg(); x on public.t"
+      })
+  void trigger_over_hand_made_native_refuses(String path, String setup, String trigger)
+      throws SQLException {
+    var db = db();
+    plant(db, H_TRG);
+    plant(db, setup);
+    refuses(db.app(), leg4(H_TRG_LABEL), slotLine("function", "trigger " + trigger, H_TRG_LABEL));
+  }
+
+  @Test
+  void trigger_reached_through_noinherit_group_grant_refuses() throws SQLException {
+    var db = db();
+    String grp = group("rc021_grp");
+    plant(db, H_TRG);
+    exec(
+        db.su(),
+        "CREATE TABLE public.t (id int)",
+        "GRANT INSERT ON public.t TO " + grp,
+        "CREATE TRIGGER x BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION public.h_trg()");
+    exec(db.su(), "GRANT " + grp + " TO " + APP);
+    refuses(db.app(), slotLine("function", "trigger x on public.t", H_TRG_LABEL));
+  }
+
+  @Test
+  void after_trigger_on_fk_cascade_target_runs_as_caller() throws SQLException {
+    // Control (T11b, review M2): the AFTER trigger function of a cascade runs as the caller.
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE TABLE public.who (u text)",
+        "CREATE FUNCTION public.mark() RETURNS trigger LANGUAGE plpgsql AS"
+            + " $$BEGIN INSERT INTO public.who VALUES (current_user); RETURN OLD; END$$",
+        "CREATE TABLE public.fp (id int PRIMARY KEY)",
+        "CREATE TABLE public.fc (id int REFERENCES public.fp ON DELETE CASCADE)",
+        "INSERT INTO public.fp VALUES (1)",
+        "INSERT INTO public.fc VALUES (1)",
+        "GRANT SELECT, DELETE ON public.fp TO " + APP,
+        "GRANT INSERT ON public.who TO " + APP,
+        "CREATE TRIGGER x AFTER DELETE ON public.fc FOR EACH ROW EXECUTE FUNCTION public.mark()");
+    exec(db.app(), "DELETE FROM public.fp");
+    assertThat(scalar(db.su(), "SELECT u FROM public.who")).isEqualTo(APP);
+  }
+
+  @Test
+  void revoked_and_public_sql_definer_trigger_get_the_same_verdict() throws SQLException {
+    // Ruling 4: the trg verdict never reads the function's ACL. A non-native definer trigger
+    // function is judged on the owner-context page, not here.
+    String definer =
+        "CREATE FUNCTION public.aud() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS"
+            + " $$BEGIN RETURN NEW; END$$";
+    String trigger =
+        "CREATE TABLE public.t (id int)|GRANT INSERT ON public.t TO "
+            + APP
+            + "|CREATE TRIGGER x BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION"
+            + " public.aud()";
+    var revoked = db();
+    plant(revoked, definer + "|REVOKE EXECUTE ON FUNCTION public.aud() FROM PUBLIC|" + trigger);
+    verifies(revoked.app());
+    var open = db();
+    plant(open, definer + "|" + trigger);
+    verifies(open.app());
+  }
+
+  @Test
+  void plpgsql_invoker_trigger_verifies() throws SQLException {
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE FUNCTION public.inv() RETURNS trigger LANGUAGE plpgsql AS"
+            + " $$BEGIN RETURN NEW; END$$",
+        "REVOKE EXECUTE ON FUNCTION public.inv() FROM PUBLIC",
+        "CREATE TABLE public.t (id int)",
+        "GRANT INSERT ON public.t TO " + APP,
+        "CREATE TRIGGER x BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION public.inv()");
+    verifies(db.app());
+  }
+
+  @Test
+  void trigger_attached_by_runtime_role_to_its_temp_table_over_public_hand_made_native_refuses()
+      throws SQLException {
+    // P1 (review M4): the runtime role attaches the trigger itself. The gate refuses TEMP too;
+    // the lines asserted here are the ones this mechanism adds.
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE FUNCTION public.h_trg() RETURNS trigger LANGUAGE internal"
+            + " AS 'suppress_redundant_updates_trigger'",
+        "GRANT TEMP ON DATABASE " + db.name() + " TO " + APP);
+    try (var c = db.app().getConnection();
+        var st = c.createStatement()) {
+      st.execute("CREATE TEMP TABLE tt (id int)");
+      st.execute(
+          "CREATE TRIGGER x BEFORE INSERT ON tt FOR EACH ROW EXECUTE FUNCTION public.h_trg()");
+      refuses(db.app(), leg4(H_TRG_LABEL), "as the function of trigger x on pg_temp_");
+    }
+  }
+
+  @Test
+  void shipped_contrib_triggers_attached_verify() throws SQLException {
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE EXTENSION moddatetime",
+        "CREATE EXTENSION insert_username",
+        "CREATE EXTENSION autoinc",
+        "CREATE EXTENSION refint",
+        "CREATE EXTENSION tcn",
+        "CREATE EXTENSION lo",
+        "CREATE TABLE public.t (id int, m timestamp, u text, n int, l public.lo)",
+        "GRANT INSERT, UPDATE ON public.t TO " + APP,
+        "CREATE SEQUENCE public.s",
+        "CREATE TRIGGER a BEFORE UPDATE ON public.t FOR EACH ROW EXECUTE FUNCTION"
+            + " public.moddatetime(m)",
+        "CREATE TRIGGER b BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION"
+            + " public.insert_username(u)",
+        "CREATE TRIGGER c BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION"
+            + " public.autoinc(n, 's')",
+        "CREATE TRIGGER d BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION"
+            + " public.check_primary_key('id', 't', 'id')",
+        "CREATE TRIGGER e AFTER INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION"
+            + " public.triggered_change_notification()",
+        "CREATE TRIGGER f BEFORE UPDATE OR DELETE ON public.t FOR EACH ROW EXECUTE FUNCTION"
+            + " public.lo_manage(l)",
+        "CREATE TRIGGER g BEFORE UPDATE ON public.t FOR EACH ROW EXECUTE FUNCTION"
+            + " pg_catalog.suppress_redundant_updates_trigger()");
+    verifies(db.app());
+  }
+
+  @Test
+  void foreign_key_internal_triggers_verify() throws SQLException {
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE TABLE public.fp (id int PRIMARY KEY)",
+        "CREATE TABLE public.fc (id int REFERENCES public.fp ON DELETE CASCADE ON UPDATE SET NULL)",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON public.fp, public.fc TO " + APP);
+    verifies(db.app());
+  }
+
+  /** E1, one per event, and the disabled state. */
+  @ParameterizedTest
+  @ValueSource(strings = {"ddl_command_start", "ddl_command_end", "sql_drop", "table_rewrite"})
+  void event_trigger_over_hand_made_native_refuses(String event) throws SQLException {
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE FUNCTION public.h_evt() RETURNS event_trigger LANGUAGE internal"
+            + " AS 'pg_backend_pid'",
+        "REVOKE EXECUTE ON FUNCTION public.h_evt() FROM PUBLIC",
+        "CREATE EVENT TRIGGER x ON " + event + " EXECUTE FUNCTION public.h_evt()");
+    refuses(
+        db.app(),
+        leg4("public.h_evt()"),
+        slotLine("function", "event trigger x on " + event, "public.h_evt()"));
+  }
+
+  @Test
+  void disabled_event_trigger_refuses() throws SQLException {
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE FUNCTION public.h_evt() RETURNS event_trigger LANGUAGE internal"
+            + " AS 'pg_backend_pid'",
+        "REVOKE EXECUTE ON FUNCTION public.h_evt() FROM PUBLIC",
+        "CREATE EVENT TRIGGER x ON ddl_command_start EXECUTE FUNCTION public.h_evt()",
+        "ALTER EVENT TRIGGER x DISABLE");
+    refuses(
+        db.app(), slotLine("function", "event trigger x on ddl_command_start", "public.h_evt()"));
+  }
+
+  @Test
+  void event_trigger_fires_for_role_with_no_create_or_temp() throws SQLException {
+    // E2: a PL/pgSQL spy, EXECUTE revoked, raises with the current user. The runtime role has
+    // neither CREATE nor TEMP; the spy's error comes first, so it ran before the refusal.
+    var db = db();
+    exec(
+        db.su(),
+        "REVOKE TEMP ON DATABASE " + db.name() + " FROM PUBLIC",
+        "CREATE FUNCTION public.spy_evt() RETURNS event_trigger LANGUAGE plpgsql AS"
+            + " $$BEGIN RAISE EXCEPTION 'spy ran as %', current_user; END$$",
+        "REVOKE EXECUTE ON FUNCTION public.spy_evt() FROM PUBLIC",
+        "CREATE EVENT TRIGGER x ON ddl_command_start EXECUTE FUNCTION public.spy_evt()");
+    assertThatThrownBy(() -> exec(db.app(), "CREATE TABLE public.zz (i int)"))
+        .hasMessageContaining("spy ran as " + APP);
+    assertThatThrownBy(() -> exec(db.app(), "CREATE TEMP TABLE zz (i int)"))
+        .hasMessageContaining("spy ran as " + APP);
+  }
+
+  /** N1: operator class support functions are called with no EXECUTE check. */
+  @Test
+  void opclass_support_function_hand_made_refuses() throws SQLException {
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE FUNCTION public.h_cmp(int, int) RETURNS int LANGUAGE internal IMMUTABLE STRICT"
+            + " AS 'btint4cmp'",
+        "REVOKE EXECUTE ON FUNCTION public.h_cmp(int, int) FROM PUBLIC",
+        "CREATE OPERATOR CLASS public.h_ops FOR TYPE int USING btree AS OPERATOR 1 <,"
+            + " OPERATOR 2 <=, OPERATOR 3 =, OPERATOR 4 >=, OPERATOR 5 >,"
+            + " FUNCTION 1 public.h_cmp(int, int)");
+    refuses(
+        db.app(),
+        leg4("public.h_cmp(integer, integer)"),
+        "function public.h_cmp(integer, integer) as the support of operator family public.h_ops");
+  }
+
+  @Test
+  void revoked_sql_definer_btree_comparator_refuses_leg_7() throws SQLException {
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE FUNCTION public.s_cmp(int, int) RETURNS int LANGUAGE sql IMMUTABLE STRICT"
+            + " SECURITY DEFINER AS 'SELECT pg_catalog.btint4cmp($1, $2)'",
+        "REVOKE EXECUTE ON FUNCTION public.s_cmp(int, int) FROM PUBLIC",
+        "CREATE OPERATOR CLASS public.s_ops FOR TYPE int USING btree AS OPERATOR 1 <,"
+            + " OPERATOR 2 <=, OPERATOR 3 =, OPERATOR 4 >=, OPERATOR 5 >,"
+            + " FUNCTION 1 public.s_cmp(int, int)");
+    refuses(
+        db.app(),
+        "function public.s_cmp(integer, integer) as the support of operator family public.s_ops",
+        "a SECURITY DEFINER function");
+  }
+
+  /** N2: the eight function columns of a base type, all hand-made. */
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "input:public.h_in(cstring)",
+        "output:public.h_out(public.h_t)",
+        "receive:public.h_recv(internal)",
+        "send:public.h_send(public.h_t)",
+        "typmod_in:public.h_tmi(cstring[])",
+        "typmod_out:public.h_tmo(integer)",
+        "analyze:public.h_an(internal)",
+        "subscript:public.h_sub(internal)"
+      })
+  void type_function_hand_made_refuses(String slotAndFunction) throws SQLException {
+    var db = db();
+    String[] parts = {
+      "CREATE TYPE public.h_t",
+      "CREATE FUNCTION public.h_in(cstring) RETURNS public.h_t LANGUAGE internal IMMUTABLE STRICT"
+          + " AS 'int4in'",
+      "CREATE FUNCTION public.h_out(public.h_t) RETURNS cstring LANGUAGE internal IMMUTABLE STRICT"
+          + " AS 'int4out'",
+      "CREATE FUNCTION public.h_recv(internal) RETURNS public.h_t LANGUAGE internal IMMUTABLE"
+          + " STRICT AS 'int4recv'",
+      "CREATE FUNCTION public.h_send(public.h_t) RETURNS bytea LANGUAGE internal IMMUTABLE STRICT"
+          + " AS 'int4send'",
+      "CREATE FUNCTION public.h_tmi(cstring[]) RETURNS int LANGUAGE internal IMMUTABLE STRICT"
+          + " AS 'varchartypmodin'",
+      "CREATE FUNCTION public.h_tmo(int) RETURNS cstring LANGUAGE internal IMMUTABLE STRICT"
+          + " AS 'varchartypmodout'",
+      "CREATE FUNCTION public.h_an(internal) RETURNS boolean LANGUAGE internal STRICT"
+          + " AS 'array_typanalyze'",
+      "CREATE FUNCTION public.h_sub(internal) RETURNS internal LANGUAGE internal IMMUTABLE STRICT"
+          + " AS 'raw_array_subscript_handler'",
+      "CREATE TYPE public.h_t (INPUT = public.h_in, OUTPUT = public.h_out, RECEIVE = public.h_recv,"
+          + " SEND = public.h_send, TYPMOD_IN = public.h_tmi, TYPMOD_OUT = public.h_tmo,"
+          + " ANALYZE = public.h_an, SUBSCRIPT = public.h_sub, ELEMENT = int4,"
+          + " INTERNALLENGTH = 4, PASSEDBYVALUE, ALIGNMENT = int4)"
+    };
+    exec(db.su(), parts);
+    exec(db.su(), "REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC");
+    String slot = slotAndFunction.substring(0, slotAndFunction.indexOf(':'));
+    String fn = slotAndFunction.substring(slotAndFunction.indexOf(':') + 1);
+    refuses(db.app(), slotLine(slot, "type public.h_t", fn));
+  }
+
+  /** N3a, N3b: range canonical and subdiff. */
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "canonical:public.h_canon(public.h_rc)",
+        "subdiff:public.h_diff(integer, integer)"
+      })
+  void range_function_hand_made_refuses(String slotAndFunction) throws SQLException {
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE TYPE public.h_rc",
+        "CREATE FUNCTION public.h_canon(public.h_rc) RETURNS public.h_rc LANGUAGE internal"
+            + " IMMUTABLE STRICT AS 'int4range_canonical'",
+        "CREATE FUNCTION public.h_diff(int, int) RETURNS float8 LANGUAGE internal IMMUTABLE STRICT"
+            + " AS 'int4range_subdiff'",
+        "CREATE TYPE public.h_rc AS RANGE (SUBTYPE = int4, CANONICAL = public.h_canon,"
+            + " SUBTYPE_DIFF = public.h_diff)",
+        "REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC");
+    String slot = slotAndFunction.substring(0, slotAndFunction.indexOf(':'));
+    String fn = slotAndFunction.substring(slotAndFunction.indexOf(':') + 1);
+    refuses(db.app(), slotLine(slot, "range type public.h_rc", fn));
+  }
+
+  /** N3c, N3d: the remaining no-check slots, one hand-made native function each. */
+  @ParameterizedTest(name = "{0}")
+  @org.junit.jupiter.params.provider.CsvSource(
+      delimiter = ';',
+      value = {
+        "fdw handler; CREATE FUNCTION public.h_fh() RETURNS fdw_handler LANGUAGE c"
+            + " AS '$libdir/file_fdw', 'file_fdw_handler'|CREATE FOREIGN DATA WRAPPER h_w HANDLER"
+            + " public.h_fh; handler; foreign-data wrapper h_w; public.h_fh()",
+        "fdw validator; CREATE FUNCTION public.h_fv(text[], oid) RETURNS boolean LANGUAGE internal"
+            + " AS 'postgresql_fdw_validator'|CREATE FOREIGN DATA WRAPPER h_w VALIDATOR"
+            + " public.h_fv; validator; foreign-data wrapper h_w; public.h_fv(text[], oid)",
+        "am handler; CREATE FUNCTION public.h_amh(internal) RETURNS index_am_handler"
+            + " LANGUAGE internal AS 'bthandler'|CREATE ACCESS METHOD h_am TYPE INDEX HANDLER"
+            + " public.h_amh; handler; access method h_am; public.h_amh(internal)",
+        "ts parser start; CREATE FUNCTION public.h_ps(internal, int) RETURNS internal"
+            + " LANGUAGE internal STRICT AS 'prsd_start'|CREATE TEXT SEARCH PARSER public.h_p"
+            + " (START = public.h_ps, GETTOKEN = pg_catalog.prsd_nexttoken, END = pg_catalog.prsd_end,"
+            + " LEXTYPES = pg_catalog.prsd_lextype); start; text search parser public.h_p;"
+            + " public.h_ps(internal, integer)",
+        "ts template lexize; CREATE FUNCTION public.h_lx(internal, internal, internal, internal)"
+            + " RETURNS internal LANGUAGE internal STRICT AS 'dsimple_lexize'|CREATE TEXT SEARCH"
+            + " TEMPLATE public.h_tt (LEXIZE = public.h_lx); lexize; text search template"
+            + " public.h_tt; public.h_lx(internal, internal, internal, internal)",
+        "conversion; CREATE FUNCTION public.h_cv(int, int, cstring, internal, int, boolean)"
+            + " RETURNS int LANGUAGE c STRICT AS '$libdir/utf8_and_iso8859_1', 'utf8_to_iso8859_1'"
+            + "|CREATE CONVERSION public.h_c FOR 'UTF8' TO 'LATIN1' FROM public.h_cv; function;"
+            + " conversion public.h_c; public.h_cv(integer, integer, cstring, internal, integer,"
+            + " boolean)",
+        "transform; CREATE FUNCTION public.h_fs(internal) RETURNS internal LANGUAGE internal"
+            + " IMMUTABLE STRICT AS 'prsd_lextype'|CREATE TRANSFORM FOR int LANGUAGE plpgsql (FROM SQL WITH"
+            + " FUNCTION public.h_fs(internal)); fromsql; transform integer for language plpgsql;"
+            + " public.h_fs(internal)",
+        "planner support; CREATE FUNCTION public.h_su(internal) RETURNS internal LANGUAGE internal"
+            + " AS 'textlike_support'|CREATE FUNCTION public.f(text) RETURNS boolean LANGUAGE sql"
+            + " SUPPORT public.h_su AS 'SELECT true'; support; function public.f(text);"
+            + " public.h_su(internal)"
+      })
+  void other_no_check_slot_hand_made_refuses(
+      String path, String setup, String slot, String what, String fn) throws SQLException {
+    var db = db();
+    plant(db, setup + "|REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC");
+    refuses(db.app(), leg4(fn), slotLine(slot, what, fn));
+  }
+
+  /** T13, X1 to X7: the server checks EXECUTE as the runtime role for its own statement. */
+  @ParameterizedTest(name = "{0}")
+  @org.junit.jupiter.params.provider.CsvSource(
+      delimiter = ';',
+      value = {
+        "X1 default; CREATE TABLE public.t (id int, d int DEFAULT public.spyx(1)); INSERT INTO"
+            + " public.t (id) VALUES (1)",
+        "X2 generated column; CREATE TABLE public.t (id int, g int GENERATED ALWAYS AS"
+            + " (public.spyx(id)) STORED); INSERT INTO public.t (id) VALUES (1)",
+        "X3 check; CREATE TABLE public.t (id int CHECK (public.spyx(id) > -1)); INSERT INTO"
+            + " public.t VALUES (1)",
+        "X4 domain check; CREATE DOMAIN public.dd AS int CHECK (public.spyx(VALUE) > -1)"
+            + "|CREATE TABLE public.t (id public.dd); INSERT INTO public.t VALUES (1)",
+        "X5a index expression; CREATE TABLE public.t (id int)|CREATE INDEX ON public.t"
+            + " (public.spyx(id)); INSERT INTO public.t VALUES (1)",
+        "X5b partial index predicate; CREATE TABLE public.t (id int)|CREATE INDEX ON public.t (id)"
+            + " WHERE public.spyx(id) > 0; INSERT INTO public.t VALUES (1)",
+        "X6 policy; CREATE TABLE public.t (id int)|INSERT INTO public.t VALUES (1)|ALTER TABLE"
+            + " public.t ENABLE ROW LEVEL SECURITY|CREATE POLICY p ON public.t USING"
+            + " (public.spyx(id) > -1); SELECT count(*) FROM public.t",
+        "X7a view; CREATE TABLE public.t (id int)|CREATE VIEW public.v AS SELECT public.spyx(1) AS"
+            + " x; SELECT * FROM public.v",
+        "X7b rule action; CREATE TABLE public.t (id int)|CREATE RULE r AS ON INSERT TO public.t DO"
+            + " ALSO SELECT public.spyx(NEW.id); INSERT INTO public.t VALUES (1)",
+        "T13 trigger when; CREATE TABLE public.t (id int)|CREATE TRIGGER x BEFORE INSERT ON"
+            + " public.t FOR EACH ROW WHEN (public.spyx(NEW.id) > -1) EXECUTE FUNCTION"
+            + " pg_catalog.suppress_redundant_updates_trigger(); INSERT INTO public.t VALUES (1)"
+      })
+  void path_is_checked_as_caller_for_the_runtime_roles_own_statement(
+      String path, String setup, String statement) throws SQLException {
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE FUNCTION public.spyx(int) RETURNS int LANGUAGE plpgsql IMMUTABLE AS"
+            + " $$BEGIN RETURN $1; END$$",
+        "REVOKE EXECUTE ON FUNCTION public.spyx(int) FROM PUBLIC");
+    plant(db, setup);
+    exec(db.su(), "GRANT SELECT, INSERT ON ALL TABLES IN SCHEMA public TO " + APP);
+    assertThatThrownBy(() -> exec(db.app(), statement))
+        .hasMessageContaining("permission denied for function spyx");
+  }
+
+  /** Ruling 8: statement 3 keeps only rows the verdict can refuse. */
+  @Test
+  void statement_3_filter_drops_only_rows_the_verdict_passes() throws SQLException {
+    var db = db();
+    plant(db, H_TRG);
+    exec(
+        db.su(),
+        "CREATE EXTENSION moddatetime",
+        "CREATE FUNCTION public.inv() RETURNS trigger LANGUAGE plpgsql AS"
+            + " $$BEGIN RETURN NEW; END$$",
+        "CREATE FUNCTION public.def() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS"
+            + " $$BEGIN RETURN NEW; END$$",
+        "CREATE TABLE public.t (id int, m timestamp)",
+        "CREATE TRIGGER a BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION public.inv()",
+        "CREATE TRIGGER b BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION public.def()",
+        "CREATE TRIGGER c BEFORE UPDATE ON public.t FOR EACH ROW EXECUTE FUNCTION"
+            + " public.moddatetime(m)",
+        "CREATE TRIGGER d BEFORE UPDATE ON public.t FOR EACH ROW EXECUTE FUNCTION"
+            + " pg_catalog.suppress_redundant_updates_trigger()",
+        "CREATE TRIGGER e BEFORE UPDATE ON public.t FOR EACH ROW EXECUTE FUNCTION public.h_trg()");
+    long login =
+        Long.parseLong(
+            scalar(db.su(), "SELECT oid FROM pg_catalog.pg_roles WHERE rolname = '" + APP + "'"));
+    List<String> kept;
+    try (Connection c = pinned(db.app())) {
+      kept =
+          FunctionGrantsSql.callers(c, new long[] {login}, login).stream()
+              .filter(f -> f.kind().equals("trg"))
+              .map(FunctionGrantsSql.CallerFact::fnLabel)
+              .filter(l -> !l.startsWith("pg_catalog.\"RI_FKey"))
+              .sorted()
+              .toList();
+      c.rollback();
+    }
+    assertThat(kept)
+        .containsExactly(
+            "pg_catalog.suppress_redundant_updates_trigger()",
+            "public.def()",
+            "public.h_trg()",
+            "public.moddatetime()");
   }
 }

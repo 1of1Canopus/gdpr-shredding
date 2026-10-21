@@ -191,13 +191,13 @@ final class FunctionGrantsSql {
   }
 
   /** The number of binds of statement 3. */
-  static final int STATEMENT_THREE_BINDS = 11;
+  static final int STATEMENT_THREE_BINDS = 14;
 
   /**
    * The binds of statement 3 that take the login oid, one per branch (C-PR47-4); every other bind
    * takes the reach oids.
    */
-  static final Set<Integer> STATEMENT_THREE_LOGIN_BINDS = Set.of(4, 7, 11);
+  static final Set<Integer> STATEMENT_THREE_LOGIN_BINDS = Set.of(4, 7, 11, 14);
 
   /**
    * Statement 3: the caller objects (design revision 5, rule R6).
