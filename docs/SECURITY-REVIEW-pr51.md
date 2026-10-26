@@ -112,3 +112,76 @@ is wrong for the same reason: a non-native invoker runs as the caller and is not
 `CipherProbePr51Test`, six tests, kept with the internal review material. The fix pass adds it
 to the suite before changing production code. The two `probe_` tests are expected to turn
 green. The controls stay green.
+
+## Pass 2, 2026-10-26
+
+Head reviewed: `750980e` ("fix(core): let server-made range constructors pass the leg 4 closure").
+Limited scope: re-verify C-PR51-1 and C-PR51-2, re-run two mutations, reproduce the build numbers.
+
+### Verdict: MERGE
+
+Both pass 1 findings are closed by their probes and by measurement. Three new variants of the
+server-made rule hold on both pins. Two mutations are caught. No new finding.
+
+### Numbers on this head
+
+| What | Result |
+| --- | --- |
+| `CIPHER_PROBE_MAVEN=1 ./mvnw -B verify`, Docker up | green: core 1214, starter 319, sample 25; 0 failures, 0 errors, 0 skipped; JaCoCo gate passed. Core 1214 = the PR's 1209 plus the 5 tests of this pass's probe file, run in place and then removed from the tree |
+| Pass 1 probes (`CipherProbePr51Test`, unchanged) | 6 of 6 green. Both `probe_user_range_type_*` tests flipped from red to green |
+| Pass 2 probes (`CipherProbePr51Pass2Test`, 4 probes, 1 measurement) | 4 of 4 green on both pins |
+| Mutation M-A: `range_owned` without the `deptype = 'i'` condition | caught: 3 red (`hand_made_function_over_range_constructor_symbol_refuses_leg_4` on 16 and 17, `probe_user_multirange_constructor_replaced_in_place_refuses_leg_4`) |
+| Mutation M-B: a server-made constructor skips every leg, leg 3 included | caught: 2 red (`a_server_made_range_constructor_made_security_definer_is_still_leg_3`, `probe_user_range_type_definer_constructor_refuses_leg_3`) |
+| Extension clause restored (C-PR51-2 measurement) | 425 of 425 function-grants and probe tests green, same as the head; gate outcome identical on both pins |
+
+### C-PR51-1: verified
+
+- `probe_user_range_type_starts_default_and_revoked_on_both_pins`: `CREATE TYPE ... AS RANGE`
+  starts with default grants and with every function revoked from PUBLIC, on 16 and 17.
+- New variant, range over a domain with a named multirange
+  (`subtype = public.d8, multirange_type_name = public.dmulti`): starts on both pins. The
+  constructors carry extra normal dependencies on the domain and the array type. The internal
+  dependency on the range or multirange type is still there.
+- New variant, a constructor made SECURITY DEFINER with `ALTER FUNCTION`. `ALTER FUNCTION` does
+  not touch `pg_depend`, so `serverMade` stays true. Leg 3 still refuses it on both pins, with
+  "native code that runs with the rights of its owner".
+- New variant, `CREATE OR REPLACE` of a multirange constructor over its own symbol
+  (`multirange_constructor0`). Measured on both pins: the server deletes the internal dependency
+  on replace and keeps the normal ones. The function is then no longer server-made, and leg 4
+  names it, and only it, on both pins. A user cannot add an internal dependency through SQL.
+  Only a superuser writing `pg_depend` directly can, and that is outside the threat model.
+
+### C-PR51-2: verified
+
+- `re_created_moddatetime_trigger_refuses_r5` is in `FunctionGrantsCases` and green on both pins.
+  The statement 3 comment now gives the right reason.
+- The extension-member clause was removed, not documented. Measured whether that changes
+  anything. Method: the no-check branch of statement 3, run through `psql`, with the clause and
+  without it. Two databases on each pin: a pristine one, and one with 37 contrib extensions, five
+  contrib triggers (`moddatetime`, `insert_username`, `autoinc`, `lo_manage`,
+  `triggered_change_notification`), a range type, a foreign key, and two planted non-native
+  invoker members on trigger slots (`insert_username` re-created in plpgsql, and a plpgsql
+  function added to `plpgsql`).
+
+| Pin, database | Rows with clause | Rows without | Rows new without old |
+| --- | --- | --- | --- |
+| 16, pristine | 3,974 | 3,974 | 0 |
+| 16, contrib | 4,822 | 4,820 | 0 |
+| 17, pristine | 3,997 | 3,997 | 0 |
+| 17, contrib | 4,847 | 4,845 | 0 |
+
+- The two rows dropped on each pin are the two planted members: plpgsql, invoker, normal oid,
+  no `pg_init_privs` entry. Their verdict is empty on both versions of the filter. Leg 1 needs a
+  baseline oid or an init-privs entry. Legs 2 to 6 need native code. Leg 7 needs a definer. Every
+  shipped contrib member keeps its row through another clause.
+- Leg verdicts: with the clause restored, the 425 function-grants and probe tests give the same
+  results as the head, refusals included. On the contrib fixture the gate starts with and
+  without the clause, on both pins
+  (`measure_gate_outcome_with_contrib_extensions_and_member_triggers`, same SHA-256).
+- Conclusion: the builder's reason holds. The clause kept only rows that always pass.
+
+### Probe file
+
+`CipherProbePr51Pass2Test`, kept with the internal review material. No finding, so nothing for
+the fix pass to add. The suite may take it as is: it pins leg 3 for a definer constructor on
+both pins, and only a unit test pins that today.
