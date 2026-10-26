@@ -1233,7 +1233,7 @@ connection taken by reflection or through an ORM API. The starter's boot-time ma
 | M10 | Hikari credentials changed through its management bean | refused: `session_user` differs |
 | M11 | Connections opened before the target moved | accepted, and checked at each use |
 | M12 | A pooler (PgBouncer) in transaction mode | covered: check and work run in one transaction |
-| M13 | Spring's `LazyConnectionDataSourceProxy` or `TransactionAwareDataSourceProxy` as the context `DataSource` | accepted: they reach the verified database |
+| M13 | Spring's `LazyConnectionDataSourceProxy` or `TransactionAwareDataSourceProxy` as the context `DataSource` | accepted: they reach the verified database. The lazy proxy has a limit when it wraps the transaction-aware one: see M21x |
 | M14 | The starter's own boot reads after the gate | refused if the target moved: they go through the same check |
 | M15 | `SET ROLE` or `SET SESSION AUTHORIZATION` inside the connection | `current_user` and `session_user` are compared, and the login role too (C-PR-1c, next section) |
 | M16 | A physical copy of the verified cluster (backup restore, snapshot, PITR, staging clone) | not distinguishable at runtime: same facts by construction. See "Backups" above |
@@ -1242,6 +1242,8 @@ connection taken by reflection or through an ORM API. The starter's boot-time ma
 | M19 | A role-owned `=(name, name)` ahead of `pg_catalog` on the moved target | refused: every comparison is qualified, exactly one row is required |
 | M20 | A read/write-splitting driver that switches host on `Connection.setReadOnly(true)` | not triggered: the module never calls `setReadOnly`; read-only is set with SQL |
 | M21 | A read on a connection inside the application's own transaction | accepted and checked inside that transaction; the module does not commit, roll back or make it read-only |
+| M21w | A key write (`currentForWrite`, `recordEncryptions`, `rotate`) on a connection inside the application's own transaction (C-RC021-1) | refused with `SHRED-SCHEMA-008` before any statement; the caller's transaction is neither joined, committed nor rolled back. A key row that committed or rolled back with application rows would change the erasure-race reasoning |
+| M21x | transaction-aware proxy outermost | `LazyConnectionDataSourceProxy` around `TransactionAwareDataSourceProxy` (the wrong order, per Spring's own javadoc) is not detected in 0.2.1: the module cannot see the caller's transaction, so a key write, a read or the schema step can commit it (R50-1). Put the transaction-aware proxy outermost |
 
 **What the check resists, and what it does not.** It resists accident (a misrouted pool, a
 refreshed URL, a failover to the wrong cluster) and an unprivileged role on the wrong target. It
@@ -1673,7 +1675,9 @@ refused restore attached as suppressed, never replaced by an isolation code.
 `SHRED-SCHEMA-008` is the only `SHRED-SCHEMA-*` code that is never a startup condition and never
 means "re-apply the script": it means the connection was in auto-commit, or something moved
 `search_path` inside the erasure's transaction. The erasure's whole transaction rolls back — no key
-destroyed, no index half-cleared, no record appended.
+destroyed, no index half-cleared, no record appended. One exception to "never a startup condition":
+with `shredding.jdbc.initialize-schema=true`, the schema step run on a connection already inside the
+application's own transaction is refused with this code (R50-2), before any statement.
 
 **The window is one statement wide, and that is a property, not a style.** The erasure's own
 `UPDATE` runs outside it, on the path the transaction arrived with, with every name in it qualified

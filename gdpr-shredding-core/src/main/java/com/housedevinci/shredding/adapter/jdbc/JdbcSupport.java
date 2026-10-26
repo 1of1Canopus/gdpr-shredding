@@ -157,9 +157,19 @@ public final class JdbcSupport {
    * its target can move after verification; the server's own facts cannot. A refusal is {@code
    * SHRED-SCHEMA-012}, the transaction this class began is rolled back, and the work never runs. An
    * architecture rule refuses {@code getConnection} anywhere else in core and starter.
+   *
+   * <p><b>A key write runs in its own transaction (C-RC021-1).</b> A connection that arrives with
+   * auto-commit off is inside a transaction this class did not begin, for example through {@code
+   * TransactionAwareDataSourceProxy} inside the application's {@code @Transactional}. It is refused
+   * untouched with {@code SHRED-SCHEMA-008}, before any statement: the commit below would commit
+   * the application's rows and a later rollback could not undo them. The transaction is neither
+   * joined nor committed nor rolled back.
    */
   static <T> T inTransaction(VerifiedSchema schema, SqlWork<T> work) {
     try (Connection c = schema.dataSource().getConnection()) {
+      if (!c.getAutoCommit()) {
+        throw keyWriteInCallerTransaction();
+      }
       return inTransaction(
           c,
           conn -> {
@@ -173,10 +183,15 @@ public final class JdbcSupport {
 
   /**
    * The schema step only: DDL on a database nothing has verified yet, so there is no identity to
-   * compare with. Never used for a store.
+   * compare with. Never used for a store. A connection that arrives with auto-commit off is inside
+   * a transaction this class did not begin and is refused untouched with {@code SHRED-SCHEMA-008}
+   * (R50-2), as a key write is.
    */
   private static void inUncheckedTransaction(DataSource ds, SqlWork<Void> work) {
     try (Connection c = ds.getConnection()) {
+      if (!c.getAutoCommit()) {
+        throw schemaStepInCallerTransaction();
+      }
       inTransaction(c, work);
     } catch (SQLException e) {
       throw unavailable(e);
@@ -260,6 +275,25 @@ public final class JdbcSupport {
     }
     c.setAutoCommit(previous);
     return result;
+  }
+
+  private static ShreddingException keyWriteInCallerTransaction() {
+    return new ShreddingException(
+        ErrorCodes.SCHEMA_NAME_ISOLATION,
+        "shredding: a key write runs in its own transaction and must not commit the caller's; the"
+            + " connection arrived inside a transaction (auto-commit off), for example through"
+            + " TransactionAwareDataSourceProxy inside @Transactional. The key write was not"
+            + " performed: nothing was created, recorded or rotated, and the caller's transaction"
+            + " was left untouched.");
+  }
+
+  private static ShreddingException schemaStepInCallerTransaction() {
+    return new ShreddingException(
+        ErrorCodes.SCHEMA_NAME_ISOLATION,
+        "shredding: the schema step runs in its own transaction and must not commit the caller's;"
+            + " the connection arrived inside a transaction (auto-commit off), for example through"
+            + " TransactionAwareDataSourceProxy inside @Transactional. The schema step was not"
+            + " performed: nothing was created, and the caller's transaction was left untouched.");
   }
 
   private static ShreddingException notReadCommitted(String why, Throwable cause) {
@@ -783,6 +817,9 @@ public final class JdbcSupport {
       List<String> acceptedThirdPartyExtensions) {
     List<String> accepted = acceptedExtensions(acceptedThirdPartyExtensions);
     try (Connection c = ds.getConnection()) {
+      if (!c.getAutoCommit()) {
+        throw schemaStepInCallerTransaction();
+      }
       boolean previous = c.getAutoCommit();
       c.setAutoCommit(false);
       try {
