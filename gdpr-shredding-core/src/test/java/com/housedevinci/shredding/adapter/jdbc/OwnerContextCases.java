@@ -349,6 +349,27 @@ abstract class OwnerContextCases {
   }
 
   @Test
+  void fk_exclusion_operator_over_withheld_function_refuses() throws SQLException {
+    // A stored expression carries an operator's function oid, but an exclusion constraint keeps
+    // only the operator (conexclop): the only path to the function is the operator's oprcode.
+    var db = db();
+    plant(
+        db,
+        PARENT
+            + "|CREATE FUNCTION public.sdeq(int, int) RETURNS boolean LANGUAGE sql IMMUTABLE"
+            + " SECURITY DEFINER AS 'SELECT $1 = $2'"
+            + "|REVOKE EXECUTE ON FUNCTION public.sdeq(int, int) FROM PUBLIC"
+            + "|CREATE OPERATOR public.=== (LEFTARG = int, RIGHTARG = int,"
+            + " FUNCTION = public.sdeq, COMMUTATOR = OPERATOR(public.===))"
+            + "|CREATE OPERATOR CLASS public.eq_ops FOR TYPE int USING btree AS"
+            + " OPERATOR 3 public.===, FUNCTION 1 pg_catalog.btint4cmp(int, int)"
+            + "|CREATE TABLE public.ch (pid int REFERENCES public.par ON DELETE SET NULL,"
+            + " CONSTRAINT ex EXCLUDE USING btree (pid public.eq_ops WITH OPERATOR(public.===)))");
+    refusesO1(
+        db.app(), "public.sdeq(integer, integer)", "constraint", "constraint ex on public.ch");
+  }
+
+  @Test
   void o1_is_not_relaxed_by_allow_privileged_runtime_role() throws SQLException {
     var db = db();
     plant(
