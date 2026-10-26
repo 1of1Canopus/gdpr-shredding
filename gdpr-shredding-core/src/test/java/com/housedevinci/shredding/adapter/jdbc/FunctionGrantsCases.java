@@ -1948,6 +1948,26 @@ abstract class FunctionGrantsCases {
     verifies(db.app());
   }
 
+  /**
+   * Design page section 5: a contrib trigger function rewritten in place as native code is still an
+   * extension member, so leg 4 skips it; R5b names it on its trigger slot line.
+   */
+  @Test
+  void re_created_moddatetime_trigger_refuses_r5() throws SQLException {
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE EXTENSION moddatetime",
+        "CREATE OR REPLACE FUNCTION public.moddatetime() RETURNS trigger LANGUAGE internal AS"
+            + " 'suppress_redundant_updates_trigger'",
+        "REVOKE EXECUTE ON FUNCTION public.moddatetime() FROM PUBLIC",
+        "CREATE TABLE public.md (id int, m timestamp)",
+        "GRANT SELECT, INSERT, UPDATE ON public.md TO " + APP,
+        "CREATE TRIGGER md BEFORE UPDATE ON public.md FOR EACH ROW EXECUTE FUNCTION"
+            + " public.moddatetime(m)");
+    refuses(db.app(), slotLine("function", "trigger md on public.md", "public.moddatetime()"));
+  }
+
   @Test
   void foreign_key_internal_triggers_verify() throws SQLException {
     var db = db();
@@ -2110,6 +2130,41 @@ abstract class FunctionGrantsCases {
     String slot = slotAndFunction.substring(0, slotAndFunction.indexOf(':'));
     String fn = slotAndFunction.substring(slotAndFunction.indexOf(':') + 1);
     refuses(db.app(), slotLine(slot, "range type public.h_rc", fn));
+  }
+
+  /**
+   * C-PR51-1: {@code CREATE TYPE ... AS RANGE} makes five constructors itself (internal, in no
+   * extension, oid 16384 or above). They are not native code made by hand, with default grants or
+   * revoked: the type starts.
+   */
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void user_range_type_constructors_verify(boolean revoked) throws SQLException {
+    var db = db();
+    exec(db.su(), "CREATE TYPE public.floatrange AS RANGE (subtype = float8)");
+    if (revoked) {
+      exec(db.su(), "REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC");
+    }
+    verifies(db.app());
+  }
+
+  /**
+   * C-PR51-1: a function made by hand over a range constructor symbol has no internal dependency on
+   * the type, so leg 4 still names it, and only it.
+   */
+  @Test
+  void hand_made_function_over_range_constructor_symbol_refuses_leg_4() throws SQLException {
+    var db = db();
+    exec(
+        db.su(),
+        "CREATE TYPE public.floatrange AS RANGE (subtype = float8)",
+        "CREATE FUNCTION public.x(float8, float8) RETURNS public.floatrange LANGUAGE internal"
+            + " AS 'range_constructor2'");
+    var e = refusal(db.app());
+    assertThat(e.code()).isEqualTo(ErrorCodes.RUNTIME_ROLE_PRIVILEGED);
+    assertThat(e).hasMessageContaining(leg4("public.x(double precision, double precision)"));
+    assertThat(e.getMessage()).doesNotContain("function public.floatrange(");
+    assertThat(e.getMessage()).doesNotContain("function public.floatmultirange(");
   }
 
   /** N3c, N3d: the remaining no-check slots, one hand-made native function each. */

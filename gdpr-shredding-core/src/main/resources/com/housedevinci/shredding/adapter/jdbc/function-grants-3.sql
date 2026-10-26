@@ -154,8 +154,11 @@ UNION ALL
 -- with no EXECUTE check, whoever runs the statement. Every row of the database is read, whatever
 -- its table, its state (tgenabled, evtenabled) or its owner. An object with no owner column is
 -- given the bootstrap superuser (oid 10). Kept only when the verdict can refuse the function
--- (ruling 8): native, a shipped record, core (oid below 16384), an extension member, or
--- SECURITY DEFINER. Labels are built inside the pinned window, so regclass and regtype print
+-- (ruling 8): native, a shipped record, core (oid below 16384), or SECURITY DEFINER. An
+-- extension member needs no clause of its own (C-PR51-2): the verdict judges a member only when
+-- it is native, an aggregate (language internal) or SECURITY DEFINER, and a clause above keeps
+-- each of those; a non-native invoker member runs as the caller and always passes. Labels are
+-- built inside the pinned window, so regclass and regtype print
 -- the schema of every relation and type outside pg_catalog.
 SELECT x.kind, x.oid, x.label, x.owner, pg_catalog.pg_get_userbyid(x.owner)::pg_catalog.text, true,
        x.slot, f.oid,
@@ -306,8 +309,4 @@ SELECT x.kind, x.oid, x.label, x.owner, pg_catalog.pg_get_userbyid(x.owner)::pg_
                 WHERE (i.objoid OPERATOR(pg_catalog.=) f.oid)
                   AND (i.classoid OPERATOR(pg_catalog.=) 'pg_catalog.pg_proc'::pg_catalog.regclass)
                   AND (i.objsubid OPERATOR(pg_catalog.=) 0))
-    OR EXISTS (SELECT 1 FROM pg_catalog.pg_depend AS d
-                WHERE (d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_proc'::pg_catalog.regclass)
-                  AND (d.objid OPERATOR(pg_catalog.=) f.oid)
-                  AND (d.deptype OPERATOR(pg_catalog.=) 'e'))
  ORDER BY 1, 2, 7

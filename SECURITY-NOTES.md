@@ -1541,7 +1541,13 @@ but native code made by hand picks its own signature, so the old argument that t
 LANGUAGE internal AS 'suppress_redundant_updates_trigger'`, EXECUTE revoked, attached as a trigger
 on a table the runtime role updates, ran on every update. It now refuses twice: once because the
 function is native code made by hand (leg 4 no longer reads its grants: one line per function,
-whether or not it is attached), once naming the trigger. A trigger or event-trigger function is
+whether or not it is attached), once naming the trigger. The constructors the server makes for
+a range type are not native code made by hand (C-PR51-1): `CREATE TYPE public.floatrange AS
+RANGE (subtype = float8)` makes up to five functions in language `internal`, over the symbols
+`range_constructor2`, `range_constructor3` and `multirange_constructor0` to `2`, each with an
+internal dependency on its range or multirange type; they cannot be dropped apart from the type
+and only build a value. A function made by hand over the same symbol has no such dependency and
+still refuses. A trigger or event-trigger function is
 never called directly, so its own ACL plays no part in its verdict (a SQL `SECURITY DEFINER`
 trigger function gets the same verdict whether EXECUTE is revoked or granted; such functions run
 as their owner and are the subject of a follow-up check, C-RC021-2c). A PL/pgSQL or SQL invoker function in a

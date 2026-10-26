@@ -54,7 +54,11 @@ final class FunctionGrantsSql {
       String version,
       String targets) {}
 
-  /** One row of statement 2: one (function, grantee) pair, the grantee empty when none. */
+  /**
+   * One row of statement 2: one (function, grantee) pair, the grantee empty when none. {@code
+   * rangeOwned} is true when the function has an internal ({@code i}) dependency on a range or
+   * multirange type (C-PR51-1); {@link FunctionGrants#serverMade} reads it.
+   */
   record ExecuteFact(
       long oid,
       String label,
@@ -71,7 +75,8 @@ final class FunctionGrantsSql {
       long owner,
       String ownerName,
       String kind,
-      String library) {}
+      String library,
+      boolean rangeOwned) {}
 
   /**
    * One row of statement 3: one (caller object, slot, support function). {@code slot} is the
@@ -183,7 +188,8 @@ final class FunctionGrantsSql {
                   rs.getLong(13),
                   text(rs, 14),
                   text(rs, 15),
-                  text(rs, 16)));
+                  text(rs, 16),
+                  rs.getBoolean(17)));
         }
       }
     }

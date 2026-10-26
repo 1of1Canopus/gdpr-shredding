@@ -432,7 +432,9 @@ final class FunctionGrants {
     if (f.securityDefiner()) {
       return Optional.of(new Verdict(3, 0, "", ""));
     }
-    if (f.oid() >= FunctionGrantsSql.FIRST_NORMAL_OID && f.extension().isEmpty()) {
+    if (f.oid() >= FunctionGrantsSql.FIRST_NORMAL_OID
+        && f.extension().isEmpty()
+        && !serverMade(f)) {
       return Optional.of(new Verdict(4, 0, "", ""));
     }
     return index.r5a(f).or(() -> index.r5b(f, accepted));
@@ -443,7 +445,8 @@ final class FunctionGrants {
    * no extension, not an aggregate) refuses whatever its ACL, wherever it is attached or not. A
    * trigger, a type or another no-check slot runs it with no EXECUTE check, so a revoke does not
    * protect it. One label per function, in oid order; statement 2 lists every native function, with
-   * or without a grantee, so this needs no reach.
+   * or without a grantee, so this needs no reach. A range constructor the server made ({@link
+   * #serverMade}) is not made by hand.
    */
   static List<String> judgeHandMade(List<FunctionGrantsSql.ExecuteFact> facts) {
     var out = new TreeMap<Long, String>();
@@ -451,11 +454,36 @@ final class FunctionGrants {
       if (f.nativeCode()
           && !f.kind().equals("a")
           && f.oid() >= FunctionGrantsSql.FIRST_NORMAL_OID
-          && f.extension().isEmpty()) {
+          && f.extension().isEmpty()
+          && !serverMade(f)) {
         out.putIfAbsent(f.oid(), f.label());
       }
     }
     return List.copyOf(out.values());
+  }
+
+  /** The C symbols of the constructors {@code CREATE TYPE ... AS RANGE} makes (C-PR51-1). */
+  static final Set<String> RANGE_CONSTRUCTORS =
+      Set.of(
+          "range_constructor2",
+          "range_constructor3",
+          "multirange_constructor0",
+          "multirange_constructor1",
+          "multirange_constructor2");
+
+  /**
+   * C-PR51-1: a constructor the server made for a user range type. {@code CREATE TYPE ... AS RANGE}
+   * makes up to five functions in language internal, over one of {@link #RANGE_CONSTRUCTORS}, each
+   * with an internal dependency on its range or multirange type. They only build a range value and
+   * cannot be dropped apart from the type, so they are not native code made by hand: leg 4 skips
+   * them, and every other leg still applies. All three facts must hold: a hand-made function over
+   * the same symbol has no internal dependency, and a rewrite to another symbol or language is no
+   * longer the server's.
+   */
+  static boolean serverMade(FunctionGrantsSql.ExecuteFact f) {
+    return f.language().equals("internal")
+        && RANGE_CONSTRUCTORS.contains(f.symbol())
+        && f.rangeOwned();
   }
 
   static boolean inW(FunctionGrantsSql.ExecuteFact f, Set<Long> baselineOids) {
