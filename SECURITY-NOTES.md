@@ -1550,15 +1550,15 @@ and only build a value. A function made by hand over the same symbol has no such
 still refuses. A trigger or event-trigger function is
 never called directly, so its own ACL plays no part in its verdict (a SQL `SECURITY DEFINER`
 trigger function gets the same verdict whether EXECUTE is revoked or granted; such functions run
-as their owner and are the subject of a follow-up check, C-RC021-2c). A PL/pgSQL or SQL invoker function in a
+as their owner, and "Code that runs as another role" below covers them). A PL/pgSQL or SQL invoker function in a
 slot runs with the caller's rights and is not judged. Shipped trigger functions (the core
 `RI_FKey_*`, `suppress_redundant_updates_trigger`, `tsvector_update_trigger`, and the contrib
 `moddatetime`, `insert_username`, `autoinc`, `refint`, `tcn`, `lo`) verify; the pinned files
 already record them. Defaults, generated columns, `CHECK` and domain checks, index expressions
 and predicates, row-level security policies, views and rule actions, and a trigger's `WHEN` are
 checked as the caller for the runtime role's own statement (measured; a test pins each). During
-a foreign-key action some of them run as the referencing table's owner; that path is the subject of a follow-up
-check (C-RC021-2e). A cast's function and an operator's own function are checked as the caller (measured).
+a foreign-key action some of them run as the referencing table's owner; "Code that runs as
+another role" below covers that path. A cast's function and an operator's own function are checked as the caller (measured).
 
 **Core functions rewritten in place (R7).** `CREATE OR REPLACE FUNCTION` keeps a function's oid
 and may change its language, library and symbol. Example: a superuser rewrites
@@ -1594,6 +1594,90 @@ functions to their admin role; the reach leg already refuses those roles. Not me
 | `SECURITY DEFINER` SQL wrapper | attack above | limit L19 |
 | the same wrapper revoked from PUBLIC, as an aggregate's `sfunc` | `public.w(text, boolean)` over `pg_read_file` | refused (R6) |
 | catalogue made unreadable | `REVOKE SELECT ON pg_init_privs FROM PUBLIC` | `005` |
+
+
+### Code that runs as another role (C-RC021-2c, -2e, -2f, -2g, -2h)
+
+Some code runs as a role other than the one that wrote the row. Three cases matter here.
+
+- **A foreign-key action.** `ON DELETE CASCADE`, `SET NULL` and `SET DEFAULT` (and the same on
+  `UPDATE`) write the referencing table as that table's owner. Example: the runtime role deletes a
+  row of `par`; `ch` references it `ON DELETE SET DEFAULT`, and the default of `ch.k` is
+  `trim(pg_read_file('PG_VERSION'))`. The default runs as the owner of `ch`, and the server
+  version comes back in the error detail. A direct call by the runtime role is denied.
+- **A foreign-key check.** `RESTRICT` and `NO ACTION` write nothing, but the check query is
+  planned as the queried table's owner. Planning folds an immutable call with constant arguments
+  in that table's index expressions (measured on 16 and 17). Any session may also set
+  `constraint_exclusion = on`, and then the planner folds `CHECK` constraints too.
+- **A `SECURITY DEFINER` function**, in any language, runs as its owner.
+
+The gate applies three rules (startup code `SHRED-SCHEMA-004`).
+
+**O1, the expressions an action or a check runs.** For every table written by a foreign-key action
+and owned outside reach, each function its expressions call is judged like an aggregate's
+function: legs 1 to 7 of the function-grants check. The expressions are column defaults,
+generated columns, constraints, index expressions and predicates, the `WHEN` of `BEFORE` and
+`AFTER` triggers, rule actions, the partition key of the table and of each partitioned ancestor,
+and the default and `CHECK` of every domain its columns or expressions lead to, through arrays,
+composite types and ranges. An operator counts as its function. For a table a foreign-key check
+queries, the planner's sources are judged: constraints, index expressions and predicates,
+partition keys. The functions are read from the stored expression trees, not from `pg_depend`,
+which records no dependency on a built-in function. `allow-privileged-runtime-role` does not relax
+O1.
+
+**O2, names and objects that code reaches.** Code that runs as another role resolves names
+through the caller's `search_path` (temporary schema first) and writes tables it names. So when
+the database holds at least one entry point, the runtime role's reach and `PUBLIC` must hold no
+`CREATE` on any schema, and no role in reach may own a schema or any other object of the
+database. An entry point is a `SECURITY DEFINER` function or procedure owned outside reach, or a
+foreign key, of any action, with a table owned outside reach. Example: a trigger owned by
+`postgres` writes `public.olog` by its full name; the runtime role owns `olog`, sets a default
+over `pg_read_file` on it, deletes a parent row, and reads the file back from its own table.
+That now refuses: "owns table public.olog". With no entry point, O2 does not apply: one login that
+owns all of its own tables, and no definer function or foreign key involving another owner,
+starts. `allow-privileged-runtime-role` relaxes O2, with its warning at every start.
+
+The list of entry points is closed against the server's own source. The release records every
+file of the pinned PostgreSQL sources (16.14 and 17.11) where the server changes the current user
+(`SetUserIdAndSecContext`, `fmgr_security_definer`, `SwitchToUntrustedUser`), and maps each one
+to an entry point, to O3, or to a case that is not the runtime role's statement (parallel
+workers, transaction end, replication apply). A server major with no map, or a site that maps to
+nothing, makes O2 apply with no condition. `tools/owner-context-call-sites.sh` rebuilds the record
+at a pin bump; a test compares it with the map and with the pinned image's version.
+
+**O3, maintenance.** On PostgreSQL 17, a role holding `MAINTAIN` on a table runs `VACUUM`,
+`ANALYZE`, `CLUSTER`, `REINDEX` and `REFRESH MATERIALIZED VIEW`, and the table's index expressions
+run as the table's owner. Reach and `PUBLIC` may hold no `MAINTAIN` on a relation owned outside
+reach. Not relaxed by any mode. The database owner and `pg_maintain` were already refused.
+
+What to do when it refuses: drop the expression or the definer function, or make the foreign key
+`NO ACTION` and rebuild the expression over functions the runtime role may run itself (O1); give
+the object to the migration role, or revoke `CREATE` (O2); revoke `MAINTAIN` (O3). A separate
+migration role that owns the schema, as "Database roles" describes, passes all three.
+
+Limits. The body of a non-native function or trigger may call anything (limit L19); O2 keeps the
+names in it away from what the runtime role controls. A rule action or a trigger body that writes
+a second table runs that table's defaults and triggers as the owner too; they are not judged by
+O1, and O2 keeps the runtime role from owning that table. Autovacuum and replication apply are not
+the runtime role's statements.
+
+| Path | Example | Outcome |
+|---|---|---|
+| default under `SET DEFAULT` | `DEFAULT trim(pg_read_file('PG_VERSION'))` | refused (O1) |
+| domain default, domain `CHECK`, domain in an array or a composite | `CREATE DOMAIN d AS int CHECK (...)` | refused (O1) |
+| generated column, `CHECK`, index expression, partial index predicate | `GENERATED ALWAYS AS (f(pid)) STORED` | refused (O1) |
+| `WHEN` of a `BEFORE` or `AFTER` trigger, rule action | `DO ALSO INSERT ... VALUES (pg_read_file(...))` | refused (O1) |
+| partition key, measured under `UPDATE CASCADE` and `SET NULL` | `PARTITION BY RANGE (f(pid))` | refused (O1) |
+| operator in an expression | `CHECK (pid === pid)` over a revoked definer | refused (O1) |
+| index expression of a table a `RESTRICT` check queries | `CREATE INDEX ON rc ((f(1) + pid))` | refused (O1) |
+| `BEFORE` trigger resolving into a schema the role owns, each of 6 actions | `INSERT INTO audit_log ...` | refused (O2) |
+| `BEFORE` trigger resolving into the role's temporary schema | `CREATE TEMP TABLE audit_log` | refused (`TEMP`) |
+| role owns a table that owner code writes | R3 above | refused (O2) |
+| `CREATE` on any schema, to the role or `PUBLIC` | `GRANT CREATE ON SCHEMA s TO PUBLIC` | refused (O2) |
+| SQL definer trigger, revoked or not | `audit()` | O2 applies |
+| `AFTER` trigger function in a cascade | runs as the caller (measured) | not judged |
+| `MAINTAIN` on a table owned outside reach (17) | `GRANT MAINTAIN ON public.tm TO app` | refused (O3) |
+| no entry point | the role owns all its tables | O2 does not apply |
 
 ### The health endpoint publishes the posture
 

@@ -7,6 +7,21 @@ All notable changes to this project. The format follows
 ## [Unreleased]
 
 ### Security
+- **C-RC021-2c, -2e, -2f, -2g, -2h (MEDIUM): code that runs as another role was not judged.** A
+  foreign-key action (`CASCADE`, `SET NULL`, `SET DEFAULT`) writes the referencing table as its
+  owner, so a default such as `trim(pg_read_file('PG_VERSION'))` under `ON DELETE SET DEFAULT`
+  ran when the runtime role deleted a parent row, and the file came back in the error detail.
+  The same held for generated columns, constraints, index expressions and predicates, trigger
+  `WHEN` clauses, rule actions, partition keys and domain defaults and checks; a `RESTRICT` or
+  `NO ACTION` check plans its query as the owner and folds index expressions. Owner code also
+  resolved names into a schema the runtime role owned, and wrote tables it owned (a default on
+  its own table read a server file). On 17, `MAINTAIN` on another owner's table ran its index
+  expressions as that owner. Startup now refuses with `SHRED-SCHEMA-004`: each function those
+  expressions call is judged like an aggregate's (O1, not relaxed by any mode); when a definer
+  function or a foreign key involves another owner, the runtime role's reach may own no schema
+  and no object and hold no `CREATE` (O2, relaxed by `allow-privileged-runtime-role`); and no
+  `MAINTAIN` on a relation owned outside reach (O3, not relaxed). See SECURITY-NOTES, "Code that
+  runs as another role", and `docs/upgrading-0.2.1.md`.
 - **C-RC021-2 (MEDIUM): native code made by hand stayed reachable through a trigger.** A
   superuser's `CREATE FUNCTION public.t() RETURNS trigger LANGUAGE internal AS '...'`, with
   EXECUTE revoked from PUBLIC and attached as a trigger on a table the runtime role writes, ran

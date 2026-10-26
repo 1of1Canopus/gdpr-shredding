@@ -131,3 +131,29 @@ Each store connection leaves one session setting, `shredding.login_checked`, on 
 backend. It records that the backend's login was checked, so the next calls skip that read. It
 changes nothing else. `DISCARD ALL` and `RESET ALL` clear it, which only makes the next call read
 the login again.
+
+## Code that runs as another role is checked (C-RC021-2c to -2h)
+
+Startup now looks at code the server runs as another role because the runtime role wrote a row.
+Three new refusals, each `SHRED-SCHEMA-004`. Check them before you upgrade.
+
+1. **Foreign keys to tables of another owner.** Find each table written by a `CASCADE`,
+   `SET NULL` or `SET DEFAULT` action, or queried by any foreign-key check, whose owner is not
+   the runtime role. If one of its defaults, constraints, index expressions or trigger `WHEN`
+   clauses calls a function the runtime role may not run (for example `pg_read_file`), startup
+   refuses and names it. `allow-privileged-runtime-role` does not relax this.
+2. **What the runtime role owns.** If the database has a `SECURITY DEFINER` function owned by
+   another role, or a foreign key with a table of another owner, the runtime role may own no
+   schema and no other object, and neither it nor `PUBLIC` may hold `CREATE` on a schema. The
+   two-role layout of SECURITY-NOTES "Database roles" passes: the migration role owns
+   everything. This one is relaxed by `allow-privileged-runtime-role`.
+3. **`MAINTAIN` (PostgreSQL 17).** Revoke `MAINTAIN` on any table the runtime role does not own.
+
+To see what you hold before upgrading:
+
+```sql
+SELECT pg_describe_object(classid, objid, objsubid)
+  FROM pg_shdepend
+ WHERE deptype = 'o' AND refobjid = 'shredding_app'::regrole
+   AND dbid = (SELECT oid FROM pg_database WHERE datname = current_database());
+```
