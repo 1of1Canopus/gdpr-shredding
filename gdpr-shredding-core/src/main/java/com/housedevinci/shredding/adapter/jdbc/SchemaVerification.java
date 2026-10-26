@@ -90,6 +90,18 @@ final class SchemaVerification {
    */
   static SchemaVerdict verify(
       Connection connection, DataSource dataSource, boolean allowPrivilegedRuntimeRole) {
+    return verify(connection, dataSource, allowPrivilegedRuntimeRole, List.of());
+  }
+
+  /**
+   * As {@link #verify(Connection, DataSource, boolean)}, with the operator's accepted third-party
+   * extensions (C-PR45-3, rule R5b (ii)); already normalised by {@link AcceptedExtensions}.
+   */
+  static SchemaVerdict verify(
+      Connection connection,
+      DataSource dataSource,
+      boolean allowPrivilegedRuntimeRole,
+      List<String> acceptedExtensions) {
     boolean previousAutoCommit;
     try {
       previousAutoCommit = connection.getAutoCommit();
@@ -101,7 +113,7 @@ final class SchemaVerification {
       try (Statement st = connection.createStatement()) {
         st.execute(BEGIN_SQL);
       }
-      return run(connection, dataSource, allowPrivilegedRuntimeRole);
+      return run(connection, dataSource, allowPrivilegedRuntimeRole, acceptedExtensions);
     } catch (SQLException e) {
       throw unverifiable(e);
     } finally {
@@ -126,8 +138,18 @@ final class SchemaVerification {
    */
   static SchemaVerdict verifyInCallersTransaction(
       Connection connection, DataSource dataSource, boolean allowPrivilegedRuntimeRole) {
+    return verifyInCallersTransaction(
+        connection, dataSource, allowPrivilegedRuntimeRole, List.of());
+  }
+
+  /** As above, with the accepted third-party extensions (C-PR45-3). */
+  static SchemaVerdict verifyInCallersTransaction(
+      Connection connection,
+      DataSource dataSource,
+      boolean allowPrivilegedRuntimeRole,
+      List<String> acceptedExtensions) {
     try {
-      return run(connection, dataSource, allowPrivilegedRuntimeRole);
+      return run(connection, dataSource, allowPrivilegedRuntimeRole, acceptedExtensions);
     } catch (SQLException e) {
       throw unverifiable(e);
     }
@@ -148,7 +170,8 @@ final class SchemaVerification {
    * @param dataSource the object {@code c} was taken from. It is bound into the {@link
    *     VerifiedSchema} (C-PR-1), so a store can only write through the pool that was verified.
    */
-  private static SchemaVerdict run(Connection c, DataSource dataSource, boolean allowPrivileged)
+  private static SchemaVerdict run(
+      Connection c, DataSource dataSource, boolean allowPrivileged, List<String> accepted)
       throws SQLException {
     // §4.9, in this order and before any leg: capture the session facts through qualified names,
     // pin the path so a name somebody forgets to prefix later still resolves in pg_catalog, and
@@ -204,7 +227,7 @@ final class SchemaVerification {
 
     var excess = new ArrayList<String>();
     var underprivileged = new ArrayList<String>();
-    checkRole(c, session, relations, indexes, functions, excess, underprivileged);
+    checkRole(c, session, relations, indexes, functions, accepted, excess, underprivileged);
     var legs = List.copyOf(new LinkedHashSet<>(excess));
     excess.clear();
     excess.addAll(legs);
@@ -561,11 +584,17 @@ final class SchemaVerification {
    * whether or not the setting took, and outside a transaction block a local {@code set_config}
    * takes no effect, raises nothing, and leaves every later leg qualified in text and unqualified
    * in substance.
+   *
+   * <p>The same statement turns JIT off for the transaction (C-PR45-3-18): the function-grants
+   * statements read every row of {@code pg_proc}, and JIT compiling them costs more than it saves.
+   * It changes speed only, never a row, and is local like the pin, so it ends at commit or
+   * rollback.
    */
   private static void pinSearchPath(Connection c) throws SQLException {
     try (PreparedStatement ps =
             c.prepareStatement(
-                "SELECT pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true)");
+                "SELECT pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true),"
+                    + " pg_catalog.set_config('jit', 'off', true)");
         ResultSet rs = ps.executeQuery()) {
       rs.next();
     }
@@ -1406,6 +1435,7 @@ final class SchemaVerification {
       Map<String, Relation> relations,
       Map<String, Relation> indexes,
       Map<String, Function> functions,
+      List<String> accepted,
       List<String> excess,
       List<String> missing)
       throws SQLException {
@@ -1469,6 +1499,18 @@ final class SchemaVerification {
     checkObjectGrants(c, session, reach, excess);
     checkColumnGrants(c, session.schemaOid(), relations, reach, excess);
     checkParameterGrants(c, reach, excess);
+    checkFunctionGrants(c, reach, accepted, excess);
+  }
+
+  /**
+   * C-PR45-3: EXECUTE on withheld functions, their aliases, native SECURITY DEFINER code, native
+   * code made by hand, and shipped extension members no longer as shipped, judged by reach and
+   * PUBLIC against the pinned files of {@link PinnedCatalogue}. Same connection, same pinned
+   * window, same reach array as the parameter leg.
+   */
+  private static void checkFunctionGrants(
+      Connection c, Reach reach, List<String> accepted, List<String> excess) throws SQLException {
+    FunctionGrants.check(c, reach, accepted, excess);
   }
 
   /**

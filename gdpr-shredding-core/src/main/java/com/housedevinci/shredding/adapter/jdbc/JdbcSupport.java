@@ -17,6 +17,7 @@ import java.sql.Statement;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Objects;
 import javax.sql.DataSource;
 import org.slf4j.Logger;
@@ -156,9 +157,19 @@ public final class JdbcSupport {
    * its target can move after verification; the server's own facts cannot. A refusal is {@code
    * SHRED-SCHEMA-012}, the transaction this class began is rolled back, and the work never runs. An
    * architecture rule refuses {@code getConnection} anywhere else in core and starter.
+   *
+   * <p><b>A key write runs in its own transaction (C-RC021-1).</b> A connection that arrives with
+   * auto-commit off is inside a transaction this class did not begin, for example through {@code
+   * TransactionAwareDataSourceProxy} inside the application's {@code @Transactional}. It is refused
+   * untouched with {@code SHRED-SCHEMA-008}, before any statement: the commit below would commit
+   * the application's rows and a later rollback could not undo them. The transaction is neither
+   * joined nor committed nor rolled back.
    */
   static <T> T inTransaction(VerifiedSchema schema, SqlWork<T> work) {
     try (Connection c = schema.dataSource().getConnection()) {
+      if (!c.getAutoCommit()) {
+        throw keyWriteInCallerTransaction();
+      }
       return inTransaction(
           c,
           conn -> {
@@ -172,10 +183,15 @@ public final class JdbcSupport {
 
   /**
    * The schema step only: DDL on a database nothing has verified yet, so there is no identity to
-   * compare with. Never used for a store.
+   * compare with. Never used for a store. A connection that arrives with auto-commit off is inside
+   * a transaction this class did not begin and is refused untouched with {@code SHRED-SCHEMA-008}
+   * (R50-2), as a key write is.
    */
   private static void inUncheckedTransaction(DataSource ds, SqlWork<Void> work) {
     try (Connection c = ds.getConnection()) {
+      if (!c.getAutoCommit()) {
+        throw schemaStepInCallerTransaction();
+      }
       inTransaction(c, work);
     } catch (SQLException e) {
       throw unavailable(e);
@@ -259,6 +275,25 @@ public final class JdbcSupport {
     }
     c.setAutoCommit(previous);
     return result;
+  }
+
+  private static ShreddingException keyWriteInCallerTransaction() {
+    return new ShreddingException(
+        ErrorCodes.SCHEMA_NAME_ISOLATION,
+        "shredding: a key write runs in its own transaction and must not commit the caller's; the"
+            + " connection arrived inside a transaction (auto-commit off), for example through"
+            + " TransactionAwareDataSourceProxy inside @Transactional. The key write was not"
+            + " performed: nothing was created, recorded or rotated, and the caller's transaction"
+            + " was left untouched.");
+  }
+
+  private static ShreddingException schemaStepInCallerTransaction() {
+    return new ShreddingException(
+        ErrorCodes.SCHEMA_NAME_ISOLATION,
+        "shredding: the schema step runs in its own transaction and must not commit the caller's;"
+            + " the connection arrived inside a transaction (auto-commit off), for example through"
+            + " TransactionAwareDataSourceProxy inside @Transactional. The schema step was not"
+            + " performed: nothing was created, and the caller's transaction was left untouched.");
   }
 
   private static ShreddingException notReadCommitted(String why, Throwable cause) {
@@ -690,8 +725,26 @@ public final class JdbcSupport {
    *     this method logs. {@code SHRED-SCHEMA-007} is never downgraded.
    */
   public static SchemaVerdict verifySchema(DataSource ds, boolean allowPrivilegedRuntimeRole) {
+    return verifySchema(ds, allowPrivilegedRuntimeRole, List.of());
+  }
+
+  /**
+   * As {@link #verifySchema(DataSource, boolean)}, with the third-party extensions whose native
+   * functions the function-grants leg trusts as shipped (C-PR45-3, limit L20 in SECURITY-NOTES).
+   * Empty is the secure default: a native function of an extension the pinned manifest does not
+   * know refuses. Each entry is trimmed; a blank entry, or the name of an extension the pinned
+   * PostgreSQL image ships, refuses with {@code SHRED-CONFIG-001}. A non-empty list logs a WARN at
+   * every call.
+   *
+   * @param acceptedThirdPartyExtensions extension names, exactly as in {@code pg_extension}
+   */
+  public static SchemaVerdict verifySchema(
+      DataSource ds,
+      boolean allowPrivilegedRuntimeRole,
+      List<String> acceptedThirdPartyExtensions) {
+    List<String> accepted = acceptedExtensions(acceptedThirdPartyExtensions);
     try (Connection c = ds.getConnection()) {
-      return logVerdict(SchemaVerification.verify(c, ds, allowPrivilegedRuntimeRole));
+      return logVerdict(SchemaVerification.verify(c, ds, allowPrivilegedRuntimeRole, accepted));
     } catch (SQLException e) {
       throw new ShreddingException(
           ErrorCodes.SCHEMA_UNVERIFIABLE,
@@ -701,6 +754,15 @@ public final class JdbcSupport {
               + "). Unverifiable is not clean, so this is a refusal.",
           e);
     }
+  }
+
+  /** Normalised, and a WARN at every call while not empty (C-PR45-3, revision 4). */
+  private static List<String> acceptedExtensions(List<String> names) {
+    List<String> accepted = AcceptedExtensions.normalise(names);
+    if (!accepted.isEmpty()) {
+      log.warn(AcceptedExtensions.warning(accepted));
+    }
+    return accepted;
   }
 
   /**
@@ -742,7 +804,22 @@ public final class JdbcSupport {
    */
   public static SchemaVerdict initializeAndVerifySchema(
       DataSource ds, boolean allowPrivilegedRuntimeRole) {
+    return initializeAndVerifySchema(ds, allowPrivilegedRuntimeRole, List.of());
+  }
+
+  /**
+   * As {@link #initializeAndVerifySchema(DataSource, boolean)}, with the accepted third-party
+   * extensions of {@link #verifySchema(DataSource, boolean, List)}.
+   */
+  public static SchemaVerdict initializeAndVerifySchema(
+      DataSource ds,
+      boolean allowPrivilegedRuntimeRole,
+      List<String> acceptedThirdPartyExtensions) {
+    List<String> accepted = acceptedExtensions(acceptedThirdPartyExtensions);
     try (Connection c = ds.getConnection()) {
+      if (!c.getAutoCommit()) {
+        throw schemaStepInCallerTransaction();
+      }
       boolean previous = c.getAutoCommit();
       c.setAutoCommit(false);
       try {
@@ -769,7 +846,8 @@ public final class JdbcSupport {
         // The caller's transaction, which has just run the DDL under the script's advisory lock:
         // not read-only and not a fresh snapshot, and it must not be made either (C-13-4).
         SchemaVerdict verdict =
-            SchemaVerification.verifyInCallersTransaction(c, ds, allowPrivilegedRuntimeRole);
+            SchemaVerification.verifyInCallersTransaction(
+                c, ds, allowPrivilegedRuntimeRole, accepted);
         c.commit();
         return logVerdict(verdict);
       } catch (RuntimeException e) {

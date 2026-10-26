@@ -23,6 +23,37 @@ final class TwoRoleCluster {
   static final String IMAGE =
       "postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777";
 
+  static final String IMAGE_17 =
+      "postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24";
+
+  /** The pinned image of {@code major}. */
+  static String image(int major) {
+    return switch (major) {
+      case 16 -> IMAGE;
+      case 17 -> IMAGE_17;
+      default -> throw new IllegalArgumentException("no pinned image for PostgreSQL " + major);
+    };
+  }
+
+  /**
+   * A container of {@code image} with nothing added (no init script), limited to 512 MB and two
+   * CPUs: the generator of the pinned files reads the image as it ships.
+   */
+  static PostgreSQLContainer<?> pristine(String image) {
+    return new PostgreSQLContainer<>(
+            DockerImageName.parse(image).asCompatibleSubstituteFor("postgres"))
+        .withCreateContainerCmdModifier(
+            cmd -> cmd.getHostConfig().withMemory(512L * 1024 * 1024).withNanoCPUs(2_000_000_000L))
+        .withStartupTimeout(java.time.Duration.ofMinutes(2));
+  }
+
+  /**
+   * As {@link #container()}, on the pinned image of {@code major}, limited as {@link #pristine}.
+   */
+  static PostgreSQLContainer<?> container(int major) {
+    return pristine(image(major)).withInitScript("shredding-test/statistics-off.sql");
+  }
+
   static final String OWNER = "shred_owner";
   static final String APP = "shredding_app";
   static final String PASSWORD = "pw";

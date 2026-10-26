@@ -7,6 +7,55 @@ All notable changes to this project. The format follows
 ## [Unreleased]
 
 ### Security
+- **C-RC021-1 (MEDIUM): a key write committed the application's own transaction.** Through
+  `TransactionAwareDataSourceProxy` inside `@Transactional`, `currentForWrite`,
+  `recordEncryptions` and `rotate` committed the transaction the connection arrived in, so the
+  application rows written before them stayed after a rollback. Present since 0.2.0. A key write
+  on a connection that arrives with auto-commit off is now refused with `SHRED-SCHEMA-008` before
+  any statement, as the erasure path already does. There is no mode that joins the caller's
+  transaction. See `docs/upgrading-0.2.1.md` and SECURITY-NOTES, row M21w.
+- **R50-2 (LOW): the schema step committed the application's own transaction.**
+  `JdbcSupport.initializeSchema(DataSource)` ran its DDL on whatever connection arrived and
+  committed it, so a call inside `@Transactional` through `TransactionAwareDataSourceProxy`
+  committed the application's rows. It now refuses a connection with auto-commit off with
+  `SHRED-SCHEMA-008`, before any statement. With `shredding.jdbc.initialize-schema=true` this
+  can appear at startup; `docs/index.md` says so.
+- **R50-4 (LOW): the startup schema path committed the application's own transaction.**
+  `JdbcSupport.initializeAndVerifySchema` now refuses a connection with auto-commit off with
+  `SHRED-SCHEMA-008`, before any statement.
+- **R50-5 (INFO): documented limit.** A `LazyConnectionDataSourceProxy` outside a
+  `TransactionAwareDataSourceProxy` is not detected; SECURITY-NOTES row M21x and
+  `docs/upgrading-0.2.1.md` say to put the transaction-aware proxy outermost.
+- **C-PR45-3 (MEDIUM): EXECUTE on a function the server ships withheld passed the gate.**
+  `GRANT EXECUTE ON FUNCTION pg_catalog.lo_export(oid, text) TO shredding_app` let the runtime
+  role write any file as the server's user, and startup reported it unprivileged. Startup now
+  refuses with `SHRED-SCHEMA-004` when the login role, any role it can reach, or PUBLIC holds
+  EXECUTE on a function the server or a shipped extension withholds, on a native alias of one, on
+  native `SECURITY DEFINER` code, on native code made by hand outside an extension, or on an
+  extension member that is no longer as shipped. The record is compared with pinned files for
+  PostgreSQL 16 and 17 in the core jar; another major, a rewritten baseline signature or an
+  extension version the files do not list refuses with `SHRED-SCHEMA-005`. New property
+  `shredding.jdbc.accepted-third-party-extensions` (empty by default, WARN at every startup when
+  set) trusts the native functions of a named third-party extension such as `vector`. See
+  SECURITY-NOTES, "Functions the server ships withheld, and native code".
+- **C-PR45-3-15 (MEDIUM): an aggregate handed out a withheld function.** PostgreSQL checks
+  EXECUTE on an aggregate's support functions as the aggregate's owner. A superuser's
+  `CREATE AGGREGATE public.readall(bool) (sfunc = pg_catalog.pg_read_file, ...)` let the runtime
+  role read any file. Startup now refuses, with `SHRED-SCHEMA-004`, an aggregate, trusted
+  language or operator that reach or PUBLIC may use, whose support function, validator,
+  handler or estimator falls under the function-grants rules (R6). An aggregate is judged only
+  when a role outside reach owns it; a language or an operator is judged whoever owns it,
+  because the server checks nothing on those slots (C-PR47-1). A slot function that is a
+  `SECURITY DEFINER` wrapper reach may not execute itself also refuses, even in another schema
+  under the shipped key (C-PR47-2). "May execute" counts only roles whose rights the login may
+  use: a role granted `WITH INHERIT FALSE, SET FALSE` does not count (C-PR47-4). Refusal labels
+  quote the schema and name, and every message escapes invisible format characters such as
+  U+200B (C-PR47-5). A hand-made aggregate over ordinary functions no longer refuses. The extension manifest gains a
+  seventh column, the support functions of each contrib aggregate.
+- **C-PR45-3-17 (MEDIUM): a core function rewritten in place passed.** `CREATE OR REPLACE` keeps
+  the oid of `pg_catalog.lower(text)` while it changes its language, library and symbol. A new
+  pinned file per major, `pg-core-native-<major>.tsv`, records every core native function;
+  a rewritten, missing or unrecorded one refuses with `SHRED-SCHEMA-005` (R7).
 - **C-PR-1d (LOW): core stayed silent in the weaker privileged mode.**
   `JdbcSupport.verifySchema(ds, true)` and `initializeAndVerifySchema(ds, true)` accepted a
   privileged runtime role and logged nothing. The javadoc left the WARN to the caller, so a team
