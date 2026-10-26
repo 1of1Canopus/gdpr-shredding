@@ -1525,17 +1525,40 @@ function in another schema gains nothing otherwise: native outside an extension 
 one it is R5, and plain SQL runs with the caller's rights. Four withheld built-ins fit a language validator's `(oid)`
 slot on 16 and 17: the three `pg_stat_reset_*(oid)` functions and `pg_ls_tmpdir(oid)`.
 
-**Paths the server refuses by signature.** Type input and output (and receive, send,
-typmod, analyze, subscript), range canonical and subtype-diff functions, operator class support
-functions, access method handlers, conversions, text search parsers and templates, foreign-data
-wrapper handlers and validators, transforms, triggers and event triggers. Each slot takes or
-returns `cstring` or `internal`, or has a shape that no withheld function, built-in or shipped
-extension, fits. A test counts the fits on each pin, with every manifest extension created, and
-expects zero, so a pin bump that adds one turns the build red. Two slots R6 reads have fits, and
-the test names them: the four validator fits above, and `dblink_connect_u(text, text)` in the
-aggregate combine slot `(s, s) -> s`, which R6 refuses. A cast is not
-in this list: a withheld function may fit a new cast (`lo_import(text)` returns `oid`; not tried), but the
-server checks EXECUTE on a cast's function as the caller (measured), as for an operator's.
+**No-check slots (C-RC021-2).** The server calls a function with no EXECUTE check, whoever
+runs the statement, from these slots: triggers (row, statement, `TRUNCATE`, constraint,
+`INSTEAD OF`, on partitions, inheritance children, rule targets and view base tables), event
+triggers (`ddl_command_start` fires even for a role with no `CREATE` and no `TEMP`, and `login`
+on 17 fires on every connection), the eight function columns of a type (input, output, receive,
+send, typmod in and out, analyze, subscript), range canonical and subtype-diff, operator family
+support functions, access method handlers, text search parsers and templates, foreign-data
+wrapper handlers and validators, conversions, transforms, and planner support functions. A
+revoke does not protect a function there. Statement 3 reads every such row of the database,
+whatever its table, its state (a disabled or replica-only trigger is one `ALTER` from firing) or
+its owner, and R6 judges the function behind it. The withheld built-ins fit few of these slots,
+but native code made by hand picks its own signature, so the old argument that these slots are
+"refused by signature" no longer stands. Example: `CREATE FUNCTION public.t() RETURNS trigger
+LANGUAGE internal AS 'suppress_redundant_updates_trigger'`, EXECUTE revoked, attached as a trigger
+on a table the runtime role updates, ran on every update. It now refuses twice: once because the
+function is native code made by hand (leg 4 no longer reads its grants: one line per function,
+whether or not it is attached), once naming the trigger. The constructors the server makes for
+a range type are not native code made by hand (C-PR51-1): `CREATE TYPE public.floatrange AS
+RANGE (subtype = float8)` makes up to five functions in language `internal`, over the symbols
+`range_constructor2`, `range_constructor3` and `multirange_constructor0` to `2`, each with an
+internal dependency on its range or multirange type; they cannot be dropped apart from the type
+and only build a value. A function made by hand over the same symbol has no such dependency and
+still refuses. A trigger or event-trigger function is
+never called directly, so its own ACL plays no part in its verdict (a SQL `SECURITY DEFINER`
+trigger function gets the same verdict whether EXECUTE is revoked or granted; such functions run
+as their owner and are the subject of a follow-up check, C-RC021-2c). A PL/pgSQL or SQL invoker function in a
+slot runs with the caller's rights and is not judged. Shipped trigger functions (the core
+`RI_FKey_*`, `suppress_redundant_updates_trigger`, `tsvector_update_trigger`, and the contrib
+`moddatetime`, `insert_username`, `autoinc`, `refint`, `tcn`, `lo`) verify; the pinned files
+already record them. Defaults, generated columns, `CHECK` and domain checks, index expressions
+and predicates, row-level security policies, views and rule actions, and a trigger's `WHEN` are
+checked as the caller for the runtime role's own statement (measured; a test pins each). During
+a foreign-key action some of them run as the referencing table's owner; that path is the subject of a follow-up
+check (C-RC021-2e). A cast's function and an operator's own function are checked as the caller (measured).
 
 **Core functions rewritten in place (R7).** `CREATE OR REPLACE FUNCTION` keeps a function's oid
 and may change its language, library and symbol. Example: a superuser rewrites

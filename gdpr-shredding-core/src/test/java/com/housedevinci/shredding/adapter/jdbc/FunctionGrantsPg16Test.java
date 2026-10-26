@@ -47,7 +47,7 @@ class FunctionGrantsPg16Test extends FunctionGrantsCases {
         "CREATE EXTENSION adminpack",
         "ALTER EXTENSION adminpack DROP FUNCTION " + PFW,
         "GRANT EXECUTE ON FUNCTION " + PFW + " TO " + APP);
-    refuses(db.app(), held(PFW) + ", native code created outside any extension");
+    refuses(db.app(), "function " + PFW + " is native code made by hand outside any extension");
   }
 
   @Test

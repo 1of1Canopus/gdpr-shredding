@@ -54,7 +54,11 @@ final class FunctionGrantsSql {
       String version,
       String targets) {}
 
-  /** One row of statement 2: one (function, grantee) pair, the grantee empty when none. */
+  /**
+   * One row of statement 2: one (function, grantee) pair, the grantee empty when none. {@code
+   * rangeOwned} is true when the function has an internal ({@code i}) dependency on a range or
+   * multirange type (C-PR51-1); {@link FunctionGrants#serverMade} reads it.
+   */
   record ExecuteFact(
       long oid,
       String label,
@@ -71,7 +75,8 @@ final class FunctionGrantsSql {
       long owner,
       String ownerName,
       String kind,
-      String library) {}
+      String library,
+      boolean rangeOwned) {}
 
   /**
    * One row of statement 3: one (caller object, slot, support function). {@code slot} is the
@@ -183,7 +188,8 @@ final class FunctionGrantsSql {
                   rs.getLong(13),
                   text(rs, 14),
                   text(rs, 15),
-                  text(rs, 16)));
+                  text(rs, 16),
+                  rs.getBoolean(17)));
         }
       }
     }
@@ -191,13 +197,13 @@ final class FunctionGrantsSql {
   }
 
   /** The number of binds of statement 3. */
-  static final int STATEMENT_THREE_BINDS = 11;
+  static final int STATEMENT_THREE_BINDS = 14;
 
   /**
    * The binds of statement 3 that take the login oid, one per branch (C-PR47-4); every other bind
    * takes the reach oids.
    */
-  static final Set<Integer> STATEMENT_THREE_LOGIN_BINDS = Set.of(4, 7, 11);
+  static final Set<Integer> STATEMENT_THREE_LOGIN_BINDS = Set.of(4, 7, 11, 14);
 
   /**
    * Statement 3: the caller objects (design revision 5, rule R6).

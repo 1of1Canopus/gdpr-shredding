@@ -7,6 +7,19 @@ All notable changes to this project. The format follows
 ## [Unreleased]
 
 ### Security
+- **C-RC021-2 (MEDIUM): native code made by hand stayed reachable through a trigger.** A
+  superuser's `CREATE FUNCTION public.t() RETURNS trigger LANGUAGE internal AS '...'`, with
+  EXECUTE revoked from PUBLIC and attached as a trigger on a table the runtime role writes, ran
+  on every write and passed the gate: the server calls a trigger with no EXECUTE check. Startup
+  now refuses, with `SHRED-SCHEMA-004`, every native function made by hand outside an extension,
+  whatever its grants (one line per function), and judges the function behind every no-check
+  slot of the database: triggers of any kind and state, event triggers, type input, output and
+  the other six type functions, range canonical and subtype-diff, operator family support,
+  access method handlers, text search parsers and templates, foreign-data wrapper handlers and
+  validators, conversions, transforms and planner support functions (C-RC021-2a, -2b, -2d). A
+  trigger or event-trigger function's own ACL plays no part in its verdict. The constructors the
+  server makes for a user range type (`CREATE TYPE ... AS RANGE`) are not counted as made by hand,
+  so a schema with a range type still starts (C-PR51-1). See SECURITY-NOTES, "No-check slots".
 - **C-RC021-1 (MEDIUM): a key write committed the application's own transaction.** Through
   `TransactionAwareDataSourceProxy` inside `@Transactional`, `currentForWrite`,
   `recordEncryptions` and `rotate` committed the transaction the connection arrived in, so the

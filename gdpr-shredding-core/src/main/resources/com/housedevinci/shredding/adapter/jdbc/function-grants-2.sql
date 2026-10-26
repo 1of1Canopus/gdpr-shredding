@@ -2,6 +2,7 @@
 -- with a shipped record. One row per (function, grantee); a function nobody of interest may
 -- execute still gives one row with a NULL grantee, so its symbol is known (leg 2, the generator).
 -- Facts only: Java applies legs 1 to 3, R3, R5a, R5b and R7 to the rows (FunctionGrants).
+-- Java also decides from range_owned which functions the server made for a range type.
 -- Runs inside the gate's pinned window. House dialect: every name qualified, no CTE.
 -- Binds: 1 reach oids (_oid); 2 baseline oids (_oid).
 SELECT p.oid AS oid,
@@ -25,7 +26,16 @@ SELECT p.oid AS oid,
        p.proowner AS owner,
        pg_catalog.pg_get_userbyid(p.proowner)::pg_catalog.text AS owner_name,
        p.prokind::pg_catalog.text AS kind,
-       p.probin AS library
+       p.probin AS library,
+       -- C-PR51-1: an internal dependency on a range or multirange type. CREATE TYPE ... AS
+       -- RANGE makes its constructors with one; Java decides what the fact means.
+       EXISTS (SELECT 1 FROM pg_catalog.pg_depend AS r
+                 JOIN pg_catalog.pg_type AS rt ON (rt.oid OPERATOR(pg_catalog.=) r.refobjid)
+                WHERE (r.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_proc'::pg_catalog.regclass)
+                  AND (r.objid OPERATOR(pg_catalog.=) p.oid)
+                  AND (r.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_type'::pg_catalog.regclass)
+                  AND (r.deptype OPERATOR(pg_catalog.=) 'i')
+                  AND (rt.typtype OPERATOR(pg_catalog.=) ANY ('{r,m}'::pg_catalog._char))) AS range_owned
   FROM pg_catalog.pg_proc AS p
   JOIN pg_catalog.pg_namespace AS n ON (n.oid OPERATOR(pg_catalog.=) p.pronamespace)
   JOIN pg_catalog.pg_language AS l ON (l.oid OPERATOR(pg_catalog.=) p.prolang)

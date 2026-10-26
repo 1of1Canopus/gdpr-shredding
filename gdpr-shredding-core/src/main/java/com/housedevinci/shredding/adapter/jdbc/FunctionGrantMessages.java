@@ -115,8 +115,32 @@ final class FunctionGrantMessages {
         + " (limit L20)";
   }
 
+  /** Leg 4 closure (C-RC021-2): one line per native function made by hand, no grantee. */
+  static String handMade(String label) {
+    return "function "
+        + text(label)
+        + " is native code made by hand outside any extension; a trigger, a type or another slot"
+        + " runs it with no EXECUTE check, so its grants do not protect it. Drop it, or install it"
+        + " as an extension and accept it with "
+        + PROPERTY
+        + " (R5, limit L20)";
+  }
+
   /** R6: a caller object that calls a judged function for reach or PUBLIC (revision 5). */
   static String caller(FunctionGrants.CallerRow row, PinnedCatalogue catalogue) {
+    if (FunctionGrants.NO_CHECK_KINDS.contains(row.kind())) {
+      return "the server calls function "
+          + text(row.function())
+          + " as the "
+          + text(row.slot())
+          + " of "
+          + noCheckObject(row)
+          + ", owned by "
+          + text(row.ownerName())
+          + ", with no EXECUTE check for whoever runs the statement, so the object hands out "
+          + reason(row, catalogue)
+          + ". Drop the object, or rebuild it over shipped functions (R6, C-RC021-2)";
+    }
     String what =
         switch (row.kind()) {
           case "agg" -> "aggregate " + text(row.label());
@@ -140,6 +164,25 @@ final class FunctionGrantMessages {
         + "; the server runs it with no EXECUTE check for the caller, so the object hands out "
         + reason(row, catalogue)
         + ". Drop the object, or rebuild it over functions reach may execute itself (R6)";
+  }
+
+  private static String noCheckObject(FunctionGrants.CallerRow row) {
+    String what =
+        switch (row.kind()) {
+          case "trg" -> "trigger ";
+          case "evt" -> "event trigger ";
+          case "typ" -> "type ";
+          case "rng" -> "range type ";
+          case "amp" -> "operator family ";
+          case "am" -> "access method ";
+          case "tsp" -> "text search parser ";
+          case "tst" -> "text search template ";
+          case "fdw" -> "foreign-data wrapper ";
+          case "cnv" -> "conversion ";
+          case "trf" -> "transform ";
+          default -> "function ";
+        };
+    return what + text(row.label());
   }
 
   private static String reason(FunctionGrants.CallerRow row, PinnedCatalogue catalogue) {
