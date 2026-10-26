@@ -18,33 +18,37 @@
 --   col and edge rows also come from every type an expression names (a domain it coerces to).
 -- The functions are read from the stored expression trees, not from pg_depend (see below).
 -- A trigger's own function is not in its tree (statement 3 judges it): only its WHEN is.
--- Each fn and dfn row also carries the function's key, label, rights mode and whether reach
--- may run it as itself, as statement 3 computes them (C-PR47-2, C-PR47-4).
+-- Each fn and dfn row also carries the function's label, its rights mode and, for a SECURITY
+-- DEFINER function, whether reach may run it as itself, as statement 3 computes it (C-PR47-2,
+-- C-PR47-4).
 -- Binds, in text order (3): reach oids twice (_oid), the login oid.
+-- The table filters are uncorrelated = ANY (subquery) filters, so the planner hashes each once: a
+-- correlated EXISTS over conrelid OR confrelid scanned pg_constraint per row (0.9 s at 500
+-- foreign-key tables).
 -- Runs inside the gate's pinned window. House dialect: every name qualified, no CTE.
-SELECT DISTINCT x.kind, x.rel, x.label, x.owner, x.slot, x.typ, x.fn,
-       pg_catalog.concat(f.proname, '(',
-         (SELECT pg_catalog.string_agg(t.typname::pg_catalog.text, ',' ORDER BY arg.ordinality)
-            FROM pg_catalog.unnest(f.proargtypes::pg_catalog._oid) WITH ORDINALITY AS arg
-            JOIN pg_catalog.pg_type AS t ON (t.oid OPERATOR(pg_catalog.=) arg.arg)), ')') AS fn_key,
+SELECT x.kind, x.rel, x.label, x.owner, x.slot, x.typ, x.fn,
+       -- The support key is read for aggregates only (statement 3); an O1 row never needs it.
+       ''::pg_catalog.text AS fn_key,
        pg_catalog.concat(pg_catalog.quote_ident(fs.nspname), '.', pg_catalog.quote_ident(f.proname), '(',
                          pg_catalog.pg_get_function_identity_arguments(f.oid), ')') AS fn_label,
        f.prosecdef AS fn_definer,
-       ((CASE WHEN (f.proowner OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))
-              THEN (pg_catalog.pg_has_role(me.login, f.proowner, 'USAGE')
-                    OR pg_catalog.pg_has_role(me.login, f.proowner, 'SET'))
-              ELSE false END)
-        OR EXISTS (SELECT 1 FROM pg_catalog.aclexplode(CASE WHEN f.proacl IS NULL
-                                                         THEN pg_catalog.acldefault('f', f.proowner)
-                                                         ELSE f.proacl END) AS h
-                    WHERE (h.privilege_type OPERATOR(pg_catalog.=) 'EXECUTE')
-                      AND (CASE WHEN (h.grantee OPERATOR(pg_catalog.=) 0::pg_catalog.oid) THEN true
-                                WHEN (h.grantee OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))
-                                THEN (pg_catalog.pg_has_role(me.login, h.grantee, 'USAGE')
-                                      OR pg_catalog.pg_has_role(me.login, h.grantee, 'SET'))
-                                ELSE false END))) AS fn_reach,
+       -- Read for a SECURITY DEFINER function only (leg 7); any other function gets true.
+       (CASE WHEN NOT f.prosecdef THEN true
+             ELSE ((CASE WHEN (f.proowner OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))
+                         THEN (pg_catalog.pg_has_role(me.login, f.proowner, 'USAGE')
+                               OR pg_catalog.pg_has_role(me.login, f.proowner, 'SET'))
+                         ELSE false END)
+                   OR EXISTS (SELECT 1 FROM pg_catalog.aclexplode(CASE WHEN f.proacl IS NULL
+                                                                    THEN pg_catalog.acldefault('f', f.proowner)
+                                                                    ELSE f.proacl END) AS h
+                               WHERE (h.privilege_type OPERATOR(pg_catalog.=) 'EXECUTE')
+                                 AND (CASE WHEN (h.grantee OPERATOR(pg_catalog.=) 0::pg_catalog.oid) THEN true
+                                           WHEN (h.grantee OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))
+                                           THEN (pg_catalog.pg_has_role(me.login, h.grantee, 'USAGE')
+                                                 OR pg_catalog.pg_has_role(me.login, h.grantee, 'SET'))
+                                           ELSE false END))) END) AS fn_reach,
        pg_catalog.pg_get_userbyid(x.owner)::pg_catalog.text AS owner_name
-  FROM (SELECT 'tgt'::pg_catalog.text AS kind, c.oid AS rel,
+  FROM (SELECT DISTINCT u.kind, u.rel, u.label, u.owner, u.slot, u.typ, u.fn FROM (SELECT 'tgt'::pg_catalog.text AS kind, c.oid AS rel,
                c.oid::pg_catalog.regclass::pg_catalog.text AS label, c.relowner AS owner,
                0::pg_catalog.int4 AS slot, 0::pg_catalog.oid AS typ, 0::pg_catalog.oid AS fn
           FROM pg_catalog.pg_class AS c
@@ -62,10 +66,11 @@ SELECT DISTINCT x.kind, x.rel, x.label, x.owner, x.slot, x.typ, x.fn,
         SELECT 'chk', c.oid, c.oid::pg_catalog.regclass::pg_catalog.text, c.relowner, 0,
                0::pg_catalog.oid, 0::pg_catalog.oid
           FROM pg_catalog.pg_class AS c
-         WHERE EXISTS (SELECT 1 FROM pg_catalog.pg_constraint AS k
-                        WHERE (k.contype OPERATOR(pg_catalog.=) 'f')
-                          AND ((k.conrelid OPERATOR(pg_catalog.=) c.oid)
-                               OR (k.confrelid OPERATOR(pg_catalog.=) c.oid)))
+         WHERE (c.oid OPERATOR(pg_catalog.=) ANY (SELECT k.conrelid FROM pg_catalog.pg_constraint AS k
+                           WHERE (k.contype OPERATOR(pg_catalog.=) 'f')
+                          UNION ALL
+                          SELECT k.confrelid FROM pg_catalog.pg_constraint AS k
+                           WHERE (k.contype OPERATOR(pg_catalog.=) 'f')))
         UNION ALL
         SELECT 'col', a.attrelid, '', 0::pg_catalog.oid, 0, a.atttypid, 0::pg_catalog.oid
           FROM pg_catalog.pg_attribute AS a
@@ -73,11 +78,10 @@ SELECT DISTINCT x.kind, x.rel, x.label, x.owner, x.slot, x.typ, x.fn,
          WHERE (a.attnum OPERATOR(pg_catalog.>) 0) AND NOT a.attisdropped
            AND ((y.typtype OPERATOR(pg_catalog.=) ANY ('{d,c,r,m}'::pg_catalog._char))
                 OR (y.typelem OPERATOR(pg_catalog.<>) 0::pg_catalog.oid))
-           AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint AS k
-                        WHERE (k.conrelid OPERATOR(pg_catalog.=) a.attrelid)
-                          AND (k.contype OPERATOR(pg_catalog.=) 'f')
-                          AND ((k.confdeltype OPERATOR(pg_catalog.=) ANY ('{c,n,d}'::pg_catalog._char))
-                               OR (k.confupdtype OPERATOR(pg_catalog.=) ANY ('{c,n,d}'::pg_catalog._char))))
+           AND (a.attrelid OPERATOR(pg_catalog.=) ANY (SELECT k.conrelid FROM pg_catalog.pg_constraint AS k
+                                 WHERE (k.contype OPERATOR(pg_catalog.=) 'f')
+                                   AND ((k.confdeltype OPERATOR(pg_catalog.=) ANY ('{c,n,d}'::pg_catalog._char))
+                                        OR (k.confupdtype OPERATOR(pg_catalog.=) ANY ('{c,n,d}'::pg_catalog._char)))))
         UNION ALL
         SELECT 'edge', y.oid, '', 0::pg_catalog.oid, 0, y.typbasetype, 0::pg_catalog.oid
           FROM pg_catalog.pg_type AS y
@@ -109,8 +113,9 @@ SELECT DISTINCT x.kind, x.rel, x.label, x.owner, x.slot, x.typ, x.fn,
         -- pg_read_file has no pg_depend row at all (measured on 16 and 17). Function oids are
         -- funcid, opfuncid, aggfnoid, winfnoid, tsmhandler, hashfuncid and negfuncid; operator
         -- oids (opno, eqop, sortop, the list of opnos, and a constraint's operator arrays) give
-        -- their oprcode; a type oid (any field ending in "type") gives a type row, so a domain
-        -- the expression coerces to is followed like a column type.
+        -- their oprcode; a result type (resulttype, the field a CoerceToDomain node stores)
+        -- gives a type row, so a domain the expression coerces to is followed like a column
+        -- type. Column types themselves come from pg_attribute (col rows above).
         -- Sources on a target (fn and its types as col): defaults and generated columns (1, 2),
         -- table constraints of every kind with their operators (3), index expressions and
         -- predicates (4), the WHEN of BEFORE (5) and AFTER (6) triggers, rule qualifications
@@ -138,10 +143,11 @@ SELECT DISTINCT x.kind, x.rel, x.label, x.owner, x.slot, x.typ, x.fn,
                   JOIN pg_catalog.pg_attribute AS a
                     ON (a.attrelid OPERATOR(pg_catalog.=) ad.adrelid)
                    AND (a.attnum OPERATOR(pg_catalog.=) ad.adnum)
-                 WHERE EXISTS (SELECT 1 FROM pg_catalog.pg_constraint AS fk
-                                WHERE (fk.contype OPERATOR(pg_catalog.=) 'f')
-                                  AND ((fk.conrelid OPERATOR(pg_catalog.=) ad.adrelid)
-                                       OR (fk.confrelid OPERATOR(pg_catalog.=) ad.adrelid)))
+                 WHERE (ad.adrelid OPERATOR(pg_catalog.=) ANY (SELECT fk.conrelid FROM pg_catalog.pg_constraint AS fk
+                                  WHERE (fk.contype OPERATOR(pg_catalog.=) 'f')
+                                 UNION ALL
+                                 SELECT fk.confrelid FROM pg_catalog.pg_constraint AS fk
+                                  WHERE (fk.contype OPERATOR(pg_catalog.=) 'f')))
                 UNION ALL
                 SELECT 'fn', k.conrelid,
                        pg_catalog.concat('constraint ', pg_catalog.quote_ident(k.conname), ' on ',
@@ -154,20 +160,22 @@ SELECT DISTINCT x.kind, x.rel, x.label, x.owner, x.slot, x.typ, x.fn,
                          k.conppeqop::pg_catalog._oid,
                          k.conffeqop::pg_catalog._oid))
                   FROM pg_catalog.pg_constraint AS k
-                 WHERE EXISTS (SELECT 1 FROM pg_catalog.pg_constraint AS fk
-                                WHERE (fk.contype OPERATOR(pg_catalog.=) 'f')
-                                  AND ((fk.conrelid OPERATOR(pg_catalog.=) k.conrelid)
-                                       OR (fk.confrelid OPERATOR(pg_catalog.=) k.conrelid)))
+                 WHERE (k.conrelid OPERATOR(pg_catalog.=) ANY (SELECT fk.conrelid FROM pg_catalog.pg_constraint AS fk
+                                  WHERE (fk.contype OPERATOR(pg_catalog.=) 'f')
+                                 UNION ALL
+                                 SELECT fk.confrelid FROM pg_catalog.pg_constraint AS fk
+                                  WHERE (fk.contype OPERATOR(pg_catalog.=) 'f')))
                 UNION ALL
                 SELECT 'fn', i.indrelid,
                        pg_catalog.concat('index ', i.indexrelid::pg_catalog.regclass::pg_catalog.text), 4,
                        pg_catalog.concat(i.indexprs::pg_catalog.text, ' ', i.indpred::pg_catalog.text),
                        '{}'::pg_catalog._oid
                   FROM pg_catalog.pg_index AS i
-                 WHERE EXISTS (SELECT 1 FROM pg_catalog.pg_constraint AS fk
-                                WHERE (fk.contype OPERATOR(pg_catalog.=) 'f')
-                                  AND ((fk.conrelid OPERATOR(pg_catalog.=) i.indrelid)
-                                       OR (fk.confrelid OPERATOR(pg_catalog.=) i.indrelid)))
+                 WHERE (i.indrelid OPERATOR(pg_catalog.=) ANY (SELECT fk.conrelid FROM pg_catalog.pg_constraint AS fk
+                                  WHERE (fk.contype OPERATOR(pg_catalog.=) 'f')
+                                 UNION ALL
+                                 SELECT fk.confrelid FROM pg_catalog.pg_constraint AS fk
+                                  WHERE (fk.contype OPERATOR(pg_catalog.=) 'f')))
                 UNION ALL
                 SELECT 'fn', t.tgrelid,
                        pg_catalog.concat('trigger ', pg_catalog.quote_ident(t.tgname), ' on ',
@@ -176,10 +184,11 @@ SELECT DISTINCT x.kind, x.rel, x.label, x.owner, x.slot, x.typ, x.fn,
                                    OPERATOR(pg_catalog.<>) 0) THEN 5 ELSE 6 END),
                        pg_catalog.concat(t.tgqual::pg_catalog.text), '{}'::pg_catalog._oid
                   FROM pg_catalog.pg_trigger AS t
-                 WHERE EXISTS (SELECT 1 FROM pg_catalog.pg_constraint AS fk
-                                WHERE (fk.contype OPERATOR(pg_catalog.=) 'f')
-                                  AND ((fk.conrelid OPERATOR(pg_catalog.=) t.tgrelid)
-                                       OR (fk.confrelid OPERATOR(pg_catalog.=) t.tgrelid)))
+                 WHERE (t.tgrelid OPERATOR(pg_catalog.=) ANY (SELECT fk.conrelid FROM pg_catalog.pg_constraint AS fk
+                                  WHERE (fk.contype OPERATOR(pg_catalog.=) 'f')
+                                 UNION ALL
+                                 SELECT fk.confrelid FROM pg_catalog.pg_constraint AS fk
+                                  WHERE (fk.contype OPERATOR(pg_catalog.=) 'f')))
                 UNION ALL
                 SELECT 'fn', r.ev_class,
                        pg_catalog.concat('rule ', pg_catalog.quote_ident(r.rulename), ' on ',
@@ -187,10 +196,11 @@ SELECT DISTINCT x.kind, x.rel, x.label, x.owner, x.slot, x.typ, x.fn,
                        pg_catalog.concat(r.ev_qual::pg_catalog.text, ' ', r.ev_action::pg_catalog.text),
                        '{}'::pg_catalog._oid
                   FROM pg_catalog.pg_rewrite AS r
-                 WHERE EXISTS (SELECT 1 FROM pg_catalog.pg_constraint AS fk
-                                WHERE (fk.contype OPERATOR(pg_catalog.=) 'f')
-                                  AND ((fk.conrelid OPERATOR(pg_catalog.=) r.ev_class)
-                                       OR (fk.confrelid OPERATOR(pg_catalog.=) r.ev_class)))
+                 WHERE (r.ev_class OPERATOR(pg_catalog.=) ANY (SELECT fk.conrelid FROM pg_catalog.pg_constraint AS fk
+                                  WHERE (fk.contype OPERATOR(pg_catalog.=) 'f')
+                                 UNION ALL
+                                 SELECT fk.confrelid FROM pg_catalog.pg_constraint AS fk
+                                  WHERE (fk.contype OPERATOR(pg_catalog.=) 'f')))
                 UNION ALL
                 -- The ancestors function returns the relation itself first, and nothing for a
                 -- table outside any partition tree.
@@ -202,10 +212,11 @@ SELECT DISTINCT x.kind, x.rel, x.label, x.owner, x.slot, x.typ, x.fn,
                   JOIN pg_catalog.pg_partitioned_table AS pt
                     ON (pt.partrelid OPERATOR(pg_catalog.=) an.relid)
                  WHERE (c.relispartition OR (c.relkind OPERATOR(pg_catalog.=) 'p'))
-                   AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint AS fk
-                                WHERE (fk.contype OPERATOR(pg_catalog.=) 'f')
-                                  AND ((fk.conrelid OPERATOR(pg_catalog.=) c.oid)
-                                       OR (fk.confrelid OPERATOR(pg_catalog.=) c.oid)))
+                   AND (c.oid OPERATOR(pg_catalog.=) ANY (SELECT fk.conrelid FROM pg_catalog.pg_constraint AS fk
+                                  WHERE (fk.contype OPERATOR(pg_catalog.=) 'f')
+                                 UNION ALL
+                                 SELECT fk.confrelid FROM pg_catalog.pg_constraint AS fk
+                                  WHERE (fk.contype OPERATOR(pg_catalog.=) 'f')))
                 UNION ALL
                 SELECT 'dfn', y.oid, pg_catalog.concat('domain ', y.oid::pg_catalog.regtype::pg_catalog.text),
                        9, pg_catalog.concat(y.typdefaultbin::pg_catalog.text), '{}'::pg_catalog._oid
@@ -229,10 +240,10 @@ SELECT DISTINCT x.kind, x.rel, x.label, x.owner, x.slot, x.typ, x.fn,
                        ' '), '([0-9]+)', ':opno \1', 'g'), ' ',
                    pg_catalog.regexp_replace(pg_catalog.array_to_string(s.ops, ' '),
                                              '([0-9]+)', ':opno \1', 'g')),
-                 ':(funcid|opfuncid|aggfnoid|winfnoid|tsmhandler|hashfuncid|negfuncid|opno|eqop|sortop|[a-z]*type) ([0-9]+)',
+                 ':(funcid|opfuncid|aggfnoid|winfnoid|tsmhandler|hashfuncid|negfuncid|opno|eqop|sortop|resulttype) ([0-9]+)',
                  'g') AS mt
          WHERE (pg_catalog.split_part(pg_catalog.array_to_string(mt.mt, ' '), ' ', 2) OPERATOR(pg_catalog.<>) '0')
-) AS x
+) AS u) AS x
   LEFT JOIN pg_catalog.pg_proc AS f ON (f.oid OPERATOR(pg_catalog.=) x.fn)
   LEFT JOIN pg_catalog.pg_namespace AS fs ON (fs.oid OPERATOR(pg_catalog.=) f.pronamespace)
   CROSS JOIN (SELECT ?::pg_catalog.oid AS login) AS me
