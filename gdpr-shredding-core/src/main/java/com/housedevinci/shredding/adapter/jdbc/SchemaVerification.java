@@ -227,10 +227,13 @@ final class SchemaVerification {
 
     var excess = new ArrayList<String>();
     var underprivileged = new ArrayList<String>();
-    checkRole(c, session, relations, indexes, functions, accepted, excess, underprivileged);
+    // Owner-context rules O1 and O3 (C-RC021-2e, -2f, -2h): 004 lines no mode relaxes.
+    var strict = new ArrayList<String>();
+    checkRole(c, session, relations, indexes, functions, accepted, excess, strict, underprivileged);
     var legs = List.copyOf(new LinkedHashSet<>(excess));
     excess.clear();
     excess.addAll(legs);
+    var strictLegs = List.copyOf(new LinkedHashSet<>(strict));
 
     // §4.7: every leg has run, and one refusal lists everything that is wrong, so an operator
     // fixes the database in one round rather than restarting N times to discover the next object.
@@ -244,6 +247,7 @@ final class SchemaVerification {
     if (!allowPrivileged) {
       problems.addAll(excess);
     }
+    problems.addAll(strictLegs);
     if (!problems.isEmpty()) {
       var remedies = new ArrayList<String>();
       if (!guards.isEmpty()) {
@@ -257,6 +261,9 @@ final class SchemaVerification {
       }
       if (!allowPrivileged && !excess.isEmpty()) {
         remedies.add(privilegedRemedy());
+      }
+      if (!strictLegs.isEmpty()) {
+        remedies.add(ownerContextRemedy());
       }
       throw refusal(code(guards, shape, underprivileged), problems, session, remedies);
     }
@@ -1437,6 +1444,7 @@ final class SchemaVerification {
       Map<String, Function> functions,
       List<String> accepted,
       List<String> excess,
+      List<String> strict,
       List<String> missing)
       throws SQLException {
     Reach reach = session.reach();
@@ -1499,7 +1507,9 @@ final class SchemaVerification {
     checkObjectGrants(c, session, reach, excess);
     checkColumnGrants(c, session.schemaOid(), relations, reach, excess);
     checkParameterGrants(c, reach, excess);
-    checkFunctionGrants(c, reach, accepted, excess);
+    checkFunctionGrants(c, reach, accepted, excess, strict);
+    // Owner-context rules O2 and O3 (C-RC021-2c, -2f, -2g): facts in owner-context.sql.
+    OwnerContext.check(c, reach, excess, strict);
   }
 
   /**
@@ -1509,8 +1519,9 @@ final class SchemaVerification {
    * window, same reach array as the parameter leg.
    */
   private static void checkFunctionGrants(
-      Connection c, Reach reach, List<String> accepted, List<String> excess) throws SQLException {
-    FunctionGrants.check(c, reach, accepted, excess);
+      Connection c, Reach reach, List<String> accepted, List<String> excess, List<String> strict)
+      throws SQLException {
+    FunctionGrants.check(c, reach, accepted, excess, strict);
   }
 
   /**
@@ -1919,6 +1930,13 @@ final class SchemaVerification {
         + " restores the guard bodies and sets all seven triggers to ENABLE ALWAYS. A rule, a"
         + " policy or an extra trigger has to be dropped by hand, by the owner. See"
         + " docs/upgrading-0.2.0.md.";
+  }
+
+  private static String ownerContextRemedy() {
+    return "The lines marked O1 and O3 are not relaxed by allow-privileged-runtime-role: an"
+        + " expression a foreign-key action runs as another role, and maintenance on a table reach"
+        + " does not own, run code with rights the runtime role was never given. Fix the database;"
+        + " SECURITY-NOTES.md, \"Code that runs as another role\", gives each step.";
   }
 
   private static String privilegedRemedy() {

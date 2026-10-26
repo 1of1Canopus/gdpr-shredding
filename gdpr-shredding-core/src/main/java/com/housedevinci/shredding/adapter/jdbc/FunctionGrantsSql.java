@@ -31,6 +31,7 @@ final class FunctionGrantsSql {
   static final String STATEMENT_ONE = "function-grants-1.sql";
   static final String STATEMENT_TWO = "function-grants-2.sql";
   static final String STATEMENT_THREE = "function-grants-3.sql";
+  static final String STATEMENT_FOUR = "function-grants-4.sql";
 
   /** The first oid PostgreSQL assigns after initdb (FirstNormalObjectId). */
   static final long FIRST_NORMAL_OID = 16_384;
@@ -102,6 +103,28 @@ final class FunctionGrantsSql {
       boolean fnDefiner,
       boolean fnReach) {}
 
+  /**
+   * One row of statement 4 (C-RC021-2e, owner-context page Rev 2, rule O1). {@code kind} is {@code
+   * tgt} (an FK-action target: {@code rel}, its label, its owner), {@code col} (a type a target's
+   * column or expression names: {@code rel}, {@code typ}), {@code edge} (a type that leads to
+   * {@code typ}: {@code rel} is the type), {@code fn} (a function an expression on target {@code
+   * rel} calls, in {@code slot}) or {@code dfn} (a function a domain default or domain CHECK calls:
+   * {@code rel} is the domain). The function facts are as in {@link CallerFact}.
+   */
+  record OwnerFact(
+      String kind,
+      long rel,
+      String label,
+      long owner,
+      String ownerName,
+      int slot,
+      long typ,
+      long fn,
+      String fnKey,
+      String fnLabel,
+      boolean fnDefiner,
+      boolean fnReach) {}
+
   static int major(Connection c) throws SQLException {
     try (PreparedStatement ps =
             c.prepareStatement(
@@ -127,6 +150,11 @@ final class FunctionGrantsSql {
   /** The text of statement 3, read from the jar. */
   static String statementThree() {
     return resource(STATEMENT_THREE);
+  }
+
+  /** The text of statement 4, read from the jar. */
+  static String statementFour() {
+    return resource(STATEMENT_FOUR);
   }
 
   static List<RecordFact> records(
@@ -237,6 +265,38 @@ final class FunctionGrantsSql {
                   text(rs, 10),
                   rs.getBoolean(11),
                   rs.getBoolean(12)));
+        }
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Statement 4: the owner-context expressions of FK-action targets (rule O1). Binds: the reach
+   * oids twice, then the login oid.
+   */
+  static List<OwnerFact> owners(Connection c, long[] reachOids, long loginOid) throws SQLException {
+    var out = new ArrayList<OwnerFact>();
+    try (PreparedStatement ps = c.prepareStatement(statementFour())) {
+      ps.setArray(1, c.createArrayOf("oid", boxed(reachOids)));
+      ps.setArray(2, c.createArrayOf("oid", boxed(reachOids)));
+      ps.setLong(3, loginOid);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          out.add(
+              new OwnerFact(
+                  text(rs, 1),
+                  rs.getLong(2),
+                  text(rs, 3),
+                  rs.getLong(4),
+                  text(rs, 12),
+                  rs.getInt(5),
+                  rs.getLong(6),
+                  rs.getLong(7),
+                  text(rs, 8),
+                  text(rs, 9),
+                  rs.getBoolean(10),
+                  rs.getBoolean(11)));
         }
       }
     }

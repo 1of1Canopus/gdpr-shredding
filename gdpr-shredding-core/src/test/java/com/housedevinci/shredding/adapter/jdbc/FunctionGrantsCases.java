@@ -179,7 +179,7 @@ abstract class FunctionGrantsCases {
 
   static void refuses(DataSource app, String... lines) {
     var e = refusal(app);
-    assertThat(e.code()).isEqualTo(ErrorCodes.RUNTIME_ROLE_PRIVILEGED);
+    assertThat(e.code()).describedAs(e.getMessage()).isEqualTo(ErrorCodes.RUNTIME_ROLE_PRIVILEGED);
     for (String line : lines) {
       assertThat(e).hasMessageContaining(line);
     }
@@ -946,7 +946,12 @@ abstract class FunctionGrantsCases {
       assertThatThrownBy(
               () ->
                   FunctionGrants.check(
-                      c, reach, List.of(), new ArrayList<>(), m -> Optional.empty()))
+                      c,
+                      reach,
+                      List.of(),
+                      new ArrayList<>(),
+                      new ArrayList<>(),
+                      m -> Optional.empty()))
           .isInstanceOfSatisfying(
               ShreddingException.class,
               e -> assertThat(e.code()).isEqualTo(ErrorCodes.SCHEMA_UNVERIFIABLE))

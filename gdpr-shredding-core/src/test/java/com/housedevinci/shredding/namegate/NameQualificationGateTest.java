@@ -305,12 +305,17 @@ class NameQualificationGateTest {
     }
   }
 
-  /** The statement files of the function-grants check, as {@code FunctionGrantsSql} names them. */
+  /**
+   * The statement files of the function-grants check, as {@code FunctionGrantsSql} names them, and
+   * the owner-context facts of {@code OwnerContext}.
+   */
   private static final List<String> STATEMENT_FILES =
       List.of(
           "/com/housedevinci/shredding/adapter/jdbc/function-grants-1.sql",
           "/com/housedevinci/shredding/adapter/jdbc/function-grants-2.sql",
-          "/com/housedevinci/shredding/adapter/jdbc/function-grants-3.sql");
+          "/com/housedevinci/shredding/adapter/jdbc/function-grants-3.sql",
+          "/com/housedevinci/shredding/adapter/jdbc/function-grants-4.sql",
+          "/com/housedevinci/shredding/adapter/jdbc/owner-context.sql");
 
   /**
    * C-PR45-3, ruling item 4: each statement file is lexed whole under the strict rule, and the file

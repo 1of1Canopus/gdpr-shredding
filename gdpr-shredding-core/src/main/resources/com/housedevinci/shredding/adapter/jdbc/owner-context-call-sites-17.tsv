@@ -1,0 +1,29 @@
+# Owner-context call-site map for PostgreSQL 17.11 (design page Rev 2, section "Closure").
+# One line per source file where the server changes the current user, as recorded by
+# tools/owner-context-call-sites.sh: file, then the outcome it maps to.
+#   i  definer function owned outside reach      ii  foreign key (O2 entry points)
+#   O3 maintenance as the table owner             caller  the caller itself, restricted
+#   refused  needs CREATE on the database, already refused
+#   not-reach  not reach's statement (parallel worker, transaction end, replication apply)
+#   definition  defines the switch function, or names it in a comment (guc.c)
+# A site with no line, or with another outcome, makes O2 apply with no condition.
+contrib/amcheck/verify_nbtree.c	O3
+src/backend/access/brin/brin.c	O3
+src/backend/access/transam/parallel.c	not-reach
+src/backend/access/transam/xact.c	not-reach
+src/backend/catalog/index.c	O3
+src/backend/commands/analyze.c	O3
+src/backend/commands/cluster.c	O3
+src/backend/commands/extension.c	refused
+src/backend/commands/indexcmds.c	O3
+src/backend/commands/matview.c	O3
+src/backend/commands/schemacmds.c	refused
+src/backend/commands/tablecmds.c	not-reach
+src/backend/commands/vacuum.c	O3
+src/backend/replication/logical/tablesync.c	not-reach
+src/backend/replication/logical/worker.c	not-reach
+src/backend/utils/adt/ri_triggers.c	ii
+src/backend/utils/fmgr/fmgr.c	i
+src/backend/utils/init/miscinit.c	definition
+src/backend/utils/init/usercontext.c	definition
+src/backend/utils/misc/guc.c	definition
