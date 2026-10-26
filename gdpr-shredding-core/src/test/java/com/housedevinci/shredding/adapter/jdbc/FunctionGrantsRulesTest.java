@@ -164,7 +164,11 @@ class FunctionGrantsRulesTest {
     var keyed = with(shipped, "key", "pgstattuple(text)");
     var copy = fn(20_100, "public.copy(text)", "pgstattuple");
     assertThat(judge(keyed)).isEmpty();
-    assertThat(judge(keyed, copy)).singleElement().satisfies(r -> assertThat(r.leg()).isEqualTo(4));
+    // C-RC021-2: leg 4 gives one line per function, whatever its grants, from judgeHandMade; the
+    // per-grantee rows stay empty, so an alias (leg 2) row would still show here.
+    assertThat(judge(keyed, copy)).isEmpty();
+    assertThat(FunctionGrants.judgeHandMade(List.of(keyed, copy)))
+        .containsExactly("public.copy(text)");
   }
 
   @Test
@@ -258,8 +262,27 @@ class FunctionGrantsRulesTest {
 
   @Test
   void a_native_function_made_by_hand_outside_any_extension_is_r3() {
-    var rows = judge(fn(20_002, "public.write_any(text, text, boolean)", "custom_symbol"));
-    assertThat(rows).singleElement().satisfies(r -> assertThat(r.leg()).isEqualTo(4));
+    var f = fn(20_002, "public.write_any(text, text, boolean)", "custom_symbol");
+    // C-RC021-2: leg 4 is one line per function from judgeHandMade, never a per-grantee row.
+    assertThat(judge(f)).isEmpty();
+    assertThat(FunctionGrants.judgeHandMade(List.of(f)))
+        .containsExactly("public.write_any(text, text, boolean)");
+  }
+
+  @Test
+  void leg_4_closure_gives_one_line_per_hand_made_native_function_whatever_its_grants() {
+    // C-RC021-2, ruling 2: a revoked function (no grantee row) still refuses; two grantee rows of
+    // one function give one line; core, extension members and aggregates are not leg 4; oid order.
+    var revoked = with(fn(20_010, "public.b()", "b_sym"), "grantee", OptionalLong.empty());
+    var granted = fn(20_005, "public.a()", "a_sym");
+    var grantedTwice = with(granted, "grantee", OptionalLong.of(OWNER));
+    var core = fn(12_500, "pg_catalog.x()", "x_sym");
+    var member = with(fn(20_020, "public.m()", "m_sym"), "extension", new String[] {"e", "1"});
+    var aggregate = with(fn(20_030, "public.g(int4)", "g_sym"), "kind", "a");
+    assertThat(
+            FunctionGrants.judgeHandMade(
+                List.of(revoked, granted, grantedTwice, core, member, aggregate)))
+        .containsExactly("public.a()", "public.b()");
   }
 
   @Test

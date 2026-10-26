@@ -2239,4 +2239,37 @@ abstract class FunctionGrantsCases {
             "public.h_trg()",
             "public.moddatetime()");
   }
+
+  /**
+   * Addendum ruling 12: statement 3's time is recorded, with no threshold. Every installable
+   * contrib extension and the module schema installed; first call, then the median of five.
+   */
+  @Test
+  void statement_3_time_with_every_contrib_extension_is_recorded() throws SQLException {
+    var db = db();
+    var catalogue = PinnedCatalogue.forMajor(major).orElseThrow();
+    for (String ext : catalogue.installableExtensions()) {
+      exec(db.su(), "CREATE EXTENSION IF NOT EXISTS \"" + ext + "\" CASCADE");
+    }
+    long login =
+        Long.parseLong(
+            scalar(db.su(), "SELECT oid FROM pg_catalog.pg_roles WHERE rolname = '" + APP + "'"));
+    var times = new ArrayList<Double>();
+    int rows = 0;
+    try (Connection c = pinned(db.app())) {
+      for (int i = 0; i < 6; i++) {
+        long t0 = System.nanoTime();
+        rows = FunctionGrantsSql.callers(c, new long[] {login}, login).size();
+        times.add((System.nanoTime() - t0) / 1e6);
+      }
+      c.rollback();
+    }
+    double first = times.get(0);
+    var rest = new ArrayList<>(times.subList(1, times.size()));
+    rest.sort(null);
+    System.out.printf(
+        "MEASURE pg%d: statement 3 with %d extensions, %d rows: first %.1f ms, median %.1f ms%n",
+        major, catalogue.installableExtensions().size(), rows, first, rest.get(rest.size() / 2));
+    assertThat(rows).isPositive();
+  }
 }
