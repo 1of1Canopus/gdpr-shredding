@@ -6,6 +6,8 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-27
+
 ### Security
 - **C-RC021B-1 (LOW): the default verify-only startup path ended the application's own
   transaction.** `JdbcSupport.verifySchema`, the path of every start with
