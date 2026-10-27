@@ -45,7 +45,7 @@ final class OwnerContext {
   static final String STATEMENT = "owner-context.sql";
 
   /** The binds of the statement: each takes the reach oids. */
-  static final int BINDS = 5;
+  static final int BINDS = 6;
 
   /** The call-site map of a major: one line per source file, {@code file<TAB>outcome}. */
   static String callSitesResource(int major) {
@@ -146,6 +146,21 @@ final class OwnerContext {
                     + " indexes, and runs their expressions, as that owner. Give the parent to the"
                     + " partition's owner; allow-privileged-runtime-role does not relax this (O3,"
                     + " C-PR53-3)"));
+      } else if (f.kind().equals("nso") && !reach.contains(f.other())) {
+        String[] pair = f.label().split("\\t", 2);
+        o3.add(
+            new Line(
+                f.owner(),
+                "owns schema "
+                    + text(pair[0])
+                    + ", which holds relation "
+                    + text(pair.length == 2 ? pair[1] : "")
+                    + ", owned by "
+                    + text(f.ownerName())
+                    + " outside reach: REINDEX SCHEMA by the schema's owner rebuilds that"
+                    + " relation's indexes, and runs their expressions, as its owner. Give the"
+                    + " schema to the relation's owner, or move the relation out;"
+                    + " allow-privileged-runtime-role does not relax this (O3, C-PR53-6)"));
       }
     }
     if (entries.isEmpty() && mapped) {

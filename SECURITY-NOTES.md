@@ -1653,7 +1653,11 @@ controls over code the owner runs belong here. `TRIGGER` on a table owned outsid
 runtime role add a trigger whose `WHEN` runs as the owner on a foreign-key write (C-PR53-1):
 refused. A partitioned table the runtime role owns, with a partition owned outside reach, lets
 `REINDEX` on the parent rebuild the partition's indexes as the partition's owner (C-PR53-3):
-refused. `CLUSTER` skips such a partition (measured on 17).
+refused. `CLUSTER` skips such a partition (measured on 17). A schema the runtime role owns, holding a table
+owned outside reach, lets `REINDEX SCHEMA` rebuild that table's indexes as the table's owner,
+while `REINDEX TABLE` on it is refused (C-PR53-6, measured on 16 and 17). Example: the runtime
+role owns `s2`; `s2.t`, owned by another role, has an expression index over a revoked function;
+`REINDEX SCHEMA s2` runs it as `t`'s owner. Refused.
 
 What to do when it refuses: drop the expression or the definer function, or make the foreign key
 `NO ACTION` and rebuild the expression over functions the runtime role may run itself (O1); give
@@ -1664,11 +1668,14 @@ Limits. The body of a non-native function or trigger may call anything (limit L1
 names in it away from what the runtime role controls. Autovacuum and replication apply are not
 the runtime role's statements.
 
-Second-hop writes are a stated limit for 0.2.1 (C-PR53-4). A rule action or a trigger body on a
-foreign-key target may write a second table, and that table's defaults and triggers then run as
-the owner. O1 does not follow the write. Example, measured on 16 and 17: a rule on `c4` inserts
+Second-hop writes are a stated limit for 0.2.1 (C-PR53-4, C-PR53-7). A rule action
+or a trigger body on a foreign-key target may write a second table. Everything the server runs
+for that write runs as the owner: the second table's defaults, generated columns, CHECK and
+domain checks, index expressions, triggers and rules. A rule there may write a third table, and
+so on. O1 follows none of these writes. Example, measured on 16 and 17: a rule on `c4` inserts
 into `rlog`, and `rlog`'s default reads a server file as the owner when the runtime role deletes
-a parent row. O2 is what keeps the runtime role out of `rlog`: it may not own it, and may not
+a parent row. `rlog`'s CHECK ran as the owner too, and a rule on `rlog` that inserts into `r3`
+ran `r3`'s default as the owner. O2 is what keeps the runtime role out of `rlog`: it may not own it, and may not
 create a table a name could resolve to. So that default is the owner's own code, set by the owner.
 Following rule and trigger writes to their end would be a new check, with its own design.
 
@@ -1690,6 +1697,7 @@ Following rule and trigger writes to their end would be a new check, with its ow
 | `MAINTAIN` on a table owned outside reach (17) | `GRANT MAINTAIN ON public.tm TO app` | refused (O3) |
 | `TRIGGER` on a table owned outside reach | `GRANT TRIGGER ON public.ch TO app` | refused (O3) |
 | partitioned table owned by the role, partition owned outside reach | `REINDEX TABLE pp` rebuilds `pp1x` as its owner | refused (O3) |
+| schema owned by the role, holding a table owned outside reach | `REINDEX SCHEMA s2` rebuilds `s2.t`'s index as its owner | refused (O3) |
 | extended statistics expression on a foreign-key table | `CREATE STATISTICS ON (f(1) + pid) FROM rc` | refused (O1) |
 | `JSON_VALUE ... RETURNING` a domain (17) | default over `RETURNING dj` | refused (O1) |
 | no entry point | the role owns all its tables | O2 does not apply |

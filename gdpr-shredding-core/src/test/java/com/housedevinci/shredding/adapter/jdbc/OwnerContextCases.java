@@ -803,6 +803,46 @@ abstract class OwnerContextCases {
         "(O3, C-PR53-3)");
   }
 
+  static final String OWNED_SCHEMA_OVER_FOREIGN_TABLE =
+      "CREATE FUNCTION public.spy(int) RETURNS int LANGUAGE plpgsql IMMUTABLE AS"
+          + " 'BEGIN RAISE NOTICE ''SPY as %'', current_user; RETURN $1; END'"
+          + "|REVOKE EXECUTE ON FUNCTION public.spy(int) FROM PUBLIC"
+          + "|CREATE SCHEMA s2 AUTHORIZATION "
+          + APP
+          + "|CREATE TABLE s2.t (i int)|INSERT INTO s2.t VALUES (1)"
+          + "|CREATE INDEX tx ON s2.t ((public.spy(i)))";
+
+  @Test
+  void owned_schema_holding_a_relation_owned_outside_reach_refuses() throws SQLException {
+    // C-PR53-6: REINDEX SCHEMA by the schema's owner rebuilds s2.t's index as t's owner, while
+    // REINDEX TABLE on it is refused. Shown first, then refused.
+    var db = db();
+    plant(db, OWNED_SCHEMA_OVER_FOREIGN_TABLE);
+    assertThatThrownBy(() -> exec(db.app(), "REINDEX TABLE s2.t"))
+        .hasMessageMatching("(?s).*(must be owner|permission denied).*");
+    var seen = new ArrayList<String>();
+    try (var c = db.app().getConnection();
+        var s = c.createStatement()) {
+      s.execute("REINDEX SCHEMA s2");
+      for (SQLWarning w = s.getWarnings(); w != null; w = w.getNextWarning()) {
+        seen.add(w.getMessage());
+      }
+    }
+    assertThat(seen).contains("SPY as " + SU);
+    refuses(
+        db.app(),
+        "login role " + APP + " owns schema s2, which holds relation s2.t, owned by " + SU,
+        "(O3, C-PR53-6)");
+  }
+
+  @Test
+  void owned_schema_rule_is_not_relaxed_by_allow_privileged_runtime_role() throws SQLException {
+    var db = db();
+    plant(db, OWNED_SCHEMA_OVER_FOREIGN_TABLE);
+    assertThatThrownBy(() -> JdbcSupport.verifySchema(db.app(), true, List.of()))
+        .hasMessageContaining("(O3, C-PR53-6)");
+  }
+
   // ------------------------------------------------------------- Q5: O3 and the existing legs
 
   @Test

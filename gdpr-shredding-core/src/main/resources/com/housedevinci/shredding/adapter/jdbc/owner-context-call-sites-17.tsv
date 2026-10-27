@@ -11,6 +11,9 @@
 # rebuilds a partition's indexes as the partition's owner, so O3 refuses a parent owned in reach
 # with a partition owned outside reach (C-PR53-3). cluster.c skips a partition the caller does
 # not own (measured on 17), so it needs no more than O3's MAINTAIN leg.
+# indexcmds.c also serves REINDEX SCHEMA: the schema's owner rebuilds every table's indexes
+# in it, each as the table's owner, so O3 refuses a schema owned in reach that holds a relation
+# owned outside reach (C-PR53-6).
 contrib/amcheck/verify_nbtree.c	O3
 src/backend/access/brin/brin.c	O3
 src/backend/access/transam/parallel.c	not-reach

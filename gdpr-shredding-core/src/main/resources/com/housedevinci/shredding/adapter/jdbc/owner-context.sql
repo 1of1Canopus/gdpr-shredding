@@ -15,7 +15,10 @@
 --   ptn  a partitioned table or index owned by a role in reach, with a partition (any depth)
 --        of another owner (C-PR53-3): oid the parent, label "parent<TAB>partition", owner the
 --        parent's owner, owner_name the partition owner's name, other the partition's owner.
--- Binds, in text order (5): reach oids (_oid), five times.
+--   nso  a schema owned by a role in reach that holds a relation (any relkind) owned by another
+--        role (C-PR53-6): oid the schema, label "schema<TAB>relation", owner the schema's
+--        owner, owner_name the relation owner's name, other the relation's owner.
+-- Binds, in text order (6): reach oids (_oid), six times.
 -- Runs inside the gate's pinned window. House dialect: every name qualified, no CTE.
 SELECT 'def'::pg_catalog.text AS kind, p.oid AS oid,
        p.oid::pg_catalog.regprocedure::pg_catalog.text AS label, p.proowner AS owner,
@@ -86,4 +89,13 @@ SELECT 'ptn', c.oid,
  WHERE (c.relkind OPERATOR(pg_catalog.=) ANY ('{p,I}'::pg_catalog._char))
    AND (c.relowner OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))
    AND (d.relowner OPERATOR(pg_catalog.<>) c.relowner)
+UNION ALL
+SELECT 'nso', n.oid,
+       pg_catalog.concat(pg_catalog.quote_ident(n.nspname), pg_catalog.chr(9),
+                         c.oid::pg_catalog.regclass::pg_catalog.text),
+       n.nspowner, pg_catalog.pg_get_userbyid(c.relowner)::pg_catalog.text, c.relowner
+  FROM pg_catalog.pg_namespace AS n
+  JOIN pg_catalog.pg_class AS c ON (c.relnamespace OPERATOR(pg_catalog.=) n.oid)
+ WHERE (n.nspowner OPERATOR(pg_catalog.=) ANY (?::pg_catalog._oid))
+   AND (c.relowner OPERATOR(pg_catalog.<>) n.nspowner)
  ORDER BY 1, 3, 2, 6
