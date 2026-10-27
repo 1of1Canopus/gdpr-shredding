@@ -30,8 +30,9 @@ import java.util.Set;
  *       against the server's identity-switch call sites ({@link #CALL_SITES}): a major whose list
  *       is missing, or has a site that maps to none of the known outcomes, makes O2 apply with no
  *       condition. Relaxed by {@code allow-privileged-runtime-role}, with its WARN.
- *   <li><b>O3.</b> Reach and PUBLIC hold no {@code MAINTAIN} on a relation owned outside reach
- *       (PostgreSQL 17). Not relaxed by any mode.
+ *   <li><b>O3.</b> Reach and PUBLIC hold no {@code MAINTAIN} (PostgreSQL 17) and no {@code TRIGGER}
+ *       (C-PR53-1) on a relation owned outside reach, and reach owns no partitioned table or index
+ *       with a partition owned outside reach (C-PR53-3). Not relaxed by any mode.
  * </ul>
  *
  * <p>The facts come from the statement file {@value #STATEMENT}, beside the pinned files, in the
@@ -42,6 +43,9 @@ final class OwnerContext {
   private OwnerContext() {}
 
   static final String STATEMENT = "owner-context.sql";
+
+  /** The binds of the statement: each takes the reach oids. */
+  static final int BINDS = 5;
 
   /** The call-site map of a major: one line per source file, {@code file<TAB>outcome}. */
   static String callSitesResource(int major) {
@@ -112,6 +116,36 @@ final class OwnerContext {
                     + " outside reach: VACUUM, ANALYZE, CLUSTER, REINDEX and REFRESH MATERIALIZED"
                     + " VIEW run its index expressions as the owner. Revoke it;"
                     + " allow-privileged-runtime-role does not relax this (O3, C-RC021-2f)"));
+      }
+    }
+    for (Fact f : facts) {
+      if (f.kind().equals("trg") && !reach.contains(f.owner())) {
+        o3.add(
+            new Line(
+                f.other(),
+                "holds TRIGGER on relation "
+                    + text(f.label())
+                    + ", owned by "
+                    + text(f.ownerName())
+                    + " outside reach: a trigger it adds fires for every writer, and its WHEN runs"
+                    + " as the owner when a foreign-key action or the owner's own session writes."
+                    + " Revoke it; allow-privileged-runtime-role does not relax this (O3,"
+                    + " C-PR53-1)"));
+      } else if (f.kind().equals("ptn") && !reach.contains(f.other())) {
+        String[] pair = f.label().split("\t", 2);
+        o3.add(
+            new Line(
+                f.owner(),
+                "owns partitioned relation "
+                    + text(pair[0])
+                    + ", whose partition "
+                    + text(pair.length == 2 ? pair[1] : "")
+                    + " is owned by "
+                    + text(f.ownerName())
+                    + " outside reach: REINDEX on the parent rebuilds the partition's"
+                    + " indexes, and runs their expressions, as that owner. Give the parent to the"
+                    + " partition's owner; allow-privileged-runtime-role does not relax this (O3,"
+                    + " C-PR53-3)"));
       }
     }
     if (entries.isEmpty() && mapped) {
@@ -194,7 +228,7 @@ final class OwnerContext {
   static List<Fact> facts(Connection c, long[] reachOids) throws SQLException {
     var out = new ArrayList<Fact>();
     try (PreparedStatement ps = c.prepareStatement(ownerContextStatement())) {
-      for (int i = 1; i <= 3; i++) {
+      for (int i = 1; i <= BINDS; i++) {
         ps.setArray(i, c.createArrayOf("oid", boxed(reachOids)));
       }
       try (ResultSet rs = ps.executeQuery()) {

@@ -704,6 +704,105 @@ abstract class OwnerContextCases {
         "constraint k on public.rp, planned by a foreign-key check on table public.rp");
   }
 
+  // ------------------------------------------------------------- pass 1 fixes (PR 53)
+
+  @Test
+  void fk_statistics_expression_over_withheld_function_refuses() throws SQLException {
+    // C-PR53-2: the planner folds an extended statistics expression as the target's owner.
+    var db = db();
+    plant(
+        db,
+        PARENT
+            + "|"
+            + SDI
+            + "|CREATE TABLE public.ch (pid int REFERENCES public.par ON DELETE CASCADE)"
+            + "|CREATE STATISTICS public.chd ON (public.sdi(2) + pid) FROM public.ch");
+    refusesO1(
+        db.app(),
+        SDI_LABEL,
+        "statistics expression",
+        "statistics object public.chd on public.ch, written by a foreign-key action");
+  }
+
+  @Test
+  void fk_check_statistics_expression_over_withheld_function_refuses() throws SQLException {
+    var db = db();
+    plant(
+        db,
+        PARENT
+            + "|"
+            + SDI
+            + "|CREATE TABLE public.rc (pid int REFERENCES public.par ON DELETE RESTRICT)"
+            + "|CREATE STATISTICS public.rcd ON (public.sdi(1) + pid) FROM public.rc");
+    refusesO1(
+        db.app(),
+        SDI_LABEL,
+        "statistics expression",
+        "statistics object public.rcd on public.rc, planned by a foreign-key check");
+  }
+
+  @Test
+  void trigger_grant_on_a_table_owned_outside_reach_refuses() throws SQLException {
+    // C-PR53-1: the runtime role may add a trigger whose WHEN runs as the owner on a cascade.
+    var db = db();
+    plant(
+        db,
+        PARENT
+            + "|CREATE TABLE public.ch (pid int REFERENCES public.par ON DELETE CASCADE)"
+            + "|GRANT TRIGGER ON public.ch TO "
+            + APP);
+    refuses(
+        db.app(),
+        "login role " + APP + " holds TRIGGER on relation public.ch, owned by " + SU,
+        "(O3, C-PR53-1)");
+  }
+
+  @Test
+  void trigger_grant_to_public_refuses() throws SQLException {
+    var db = db();
+    plant(db, "CREATE TABLE public.t (i int)|GRANT TRIGGER ON public.t TO PUBLIC");
+    refuses(db.app(), "PUBLIC holds TRIGGER on relation public.t");
+  }
+
+  @Test
+  void trigger_grant_is_not_relaxed_by_allow_privileged_runtime_role() throws SQLException {
+    var db = db();
+    plant(db, "CREATE TABLE public.t (i int)|GRANT TRIGGER ON public.t TO " + APP);
+    assertThatThrownBy(() -> JdbcSupport.verifySchema(db.app(), true, List.of()))
+        .hasMessageContaining("(O3, C-PR53-1)");
+  }
+
+  @Test
+  void owned_partitioned_parent_over_partition_owned_outside_reach_refuses() throws SQLException {
+    // C-PR53-3: REINDEX on the parent the runtime role owns rebuilds the partition's index as
+    // the partition's owner. Shown first, then refused.
+    var db = db();
+    plant(
+        db,
+        "CREATE FUNCTION public.spy(int) RETURNS int LANGUAGE plpgsql IMMUTABLE AS"
+            + " 'BEGIN RAISE NOTICE ''SPY as %'', current_user; RETURN $1; END'"
+            + "|REVOKE EXECUTE ON FUNCTION public.spy(int) FROM PUBLIC"
+            + "|CREATE TABLE public.pp (i int) PARTITION BY RANGE (i)"
+            + "|CREATE TABLE public.pp1 (i int)|INSERT INTO public.pp1 VALUES (1)"
+            + "|CREATE INDEX pp1x ON public.pp1 ((public.spy(i)))"
+            + "|ALTER TABLE public.pp ATTACH PARTITION public.pp1 FOR VALUES FROM (0) TO (10)"
+            + "|ALTER TABLE public.pp OWNER TO "
+            + APP);
+    var seen = new ArrayList<String>();
+    try (var c = db.app().getConnection();
+        var s = c.createStatement()) {
+      s.execute("REINDEX TABLE public.pp");
+      for (SQLWarning w = s.getWarnings(); w != null; w = w.getNextWarning()) {
+        seen.add(w.getMessage());
+      }
+    }
+    assertThat(seen).contains("SPY as " + SU);
+    refuses(
+        db.app(),
+        "login role " + APP + " owns partitioned relation public.pp, whose partition public.pp1",
+        "(O3, C-PR53-3)");
+  }
+
   // ------------------------------------------------------------- Q5: O3 and the existing legs
 
   @Test

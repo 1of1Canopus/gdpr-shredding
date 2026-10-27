@@ -1621,7 +1621,7 @@ generated columns, constraints, index expressions and predicates, the `WHEN` of 
 and the default and `CHECK` of every domain its columns or expressions lead to, through arrays,
 composite types and ranges. An operator counts as its function. For a table a foreign-key check
 queries, the planner's sources are judged: constraints, index expressions and predicates,
-partition keys. The functions are read from the stored expression trees, not from `pg_depend`,
+partition keys, and extended statistics expressions (C-PR53-2). The functions are read from the stored expression trees, not from `pg_depend`,
 which records no dependency on a built-in function. `allow-privileged-runtime-role` does not relax
 O1.
 
@@ -1648,7 +1648,12 @@ at a pin bump; a test compares it with the map and with the pinned image's versi
 **O3, maintenance.** On PostgreSQL 17, a role holding `MAINTAIN` on a table runs `VACUUM`,
 `ANALYZE`, `CLUSTER`, `REINDEX` and `REFRESH MATERIALIZED VIEW`, and the table's index expressions
 run as the table's owner. Reach and `PUBLIC` may hold no `MAINTAIN` on a relation owned outside
-reach. Not relaxed by any mode. The database owner and `pg_maintain` were already refused.
+reach. Not relaxed by any mode. The database owner and `pg_maintain` were already refused. Two more
+controls over code the owner runs belong here. `TRIGGER` on a table owned outside reach lets the
+runtime role add a trigger whose `WHEN` runs as the owner on a foreign-key write (C-PR53-1):
+refused. A partitioned table the runtime role owns, with a partition owned outside reach, lets
+`REINDEX` on the parent rebuild the partition's indexes as the partition's owner (C-PR53-3):
+refused. `CLUSTER` skips such a partition (measured on 17).
 
 What to do when it refuses: drop the expression or the definer function, or make the foreign key
 `NO ACTION` and rebuild the expression over functions the runtime role may run itself (O1); give
@@ -1656,10 +1661,16 @@ the object to the migration role, or revoke `CREATE` (O2); revoke `MAINTAIN` (O3
 migration role that owns the schema, as "Database roles" describes, passes all three.
 
 Limits. The body of a non-native function or trigger may call anything (limit L19); O2 keeps the
-names in it away from what the runtime role controls. A rule action or a trigger body that writes
-a second table runs that table's defaults and triggers as the owner too; they are not judged by
-O1, and O2 keeps the runtime role from owning that table. Autovacuum and replication apply are not
+names in it away from what the runtime role controls. Autovacuum and replication apply are not
 the runtime role's statements.
+
+Second-hop writes are a stated limit for 0.2.1 (C-PR53-4). A rule action or a trigger body on a
+foreign-key target may write a second table, and that table's defaults and triggers then run as
+the owner. O1 does not follow the write. Example, measured on 16 and 17: a rule on `c4` inserts
+into `rlog`, and `rlog`'s default reads a server file as the owner when the runtime role deletes
+a parent row. O2 is what keeps the runtime role out of `rlog`: it may not own it, and may not
+create a table a name could resolve to. So that default is the owner's own code, set by the owner.
+Following rule and trigger writes to their end would be a new check, with its own design.
 
 | Path | Example | Outcome |
 |---|---|---|
@@ -1677,6 +1688,10 @@ the runtime role's statements.
 | SQL definer trigger, revoked or not | `audit()` | O2 applies |
 | `AFTER` trigger function in a cascade | runs as the caller (measured) | not judged |
 | `MAINTAIN` on a table owned outside reach (17) | `GRANT MAINTAIN ON public.tm TO app` | refused (O3) |
+| `TRIGGER` on a table owned outside reach | `GRANT TRIGGER ON public.ch TO app` | refused (O3) |
+| partitioned table owned by the role, partition owned outside reach | `REINDEX TABLE pp` rebuilds `pp1x` as its owner | refused (O3) |
+| extended statistics expression on a foreign-key table | `CREATE STATISTICS ON (f(1) + pid) FROM rc` | refused (O1) |
+| `JSON_VALUE ... RETURNING` a domain (17) | default over `RETURNING dj` | refused (O1) |
 | no entry point | the role owns all its tables | O2 does not apply |
 
 ### The health endpoint publishes the posture

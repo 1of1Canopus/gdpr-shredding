@@ -7,6 +7,10 @@
 #   not-reach  not reach's statement (parallel worker, transaction end, replication apply)
 #   definition  defines the switch function, or names it in a comment (guc.c)
 # A site with no line, or with another outcome, makes O2 apply with no condition.
+# O3 for indexcmds.c also covers a partition tree: REINDEX on a partitioned parent reach owns
+# rebuilds a partition's indexes as the partition's owner, so O3 refuses a parent owned in reach
+# with a partition owned outside reach (C-PR53-3). cluster.c skips a partition the caller does
+# not own (measured on 17), so it needs no more than O3's MAINTAIN leg.
 contrib/amcheck/verify_nbtree.c	O3
 src/backend/access/brin/brin.c	O3
 src/backend/access/transam/parallel.c	not-reach

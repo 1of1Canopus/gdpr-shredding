@@ -113,22 +113,24 @@ SELECT x.kind, x.rel, x.label, x.owner, x.slot, x.typ, x.fn,
         -- pg_read_file has no pg_depend row at all (measured on 16 and 17). Function oids are
         -- funcid, opfuncid, aggfnoid, winfnoid, tsmhandler, hashfuncid and negfuncid; operator
         -- oids (opno, eqop, sortop, the list of opnos, and a constraint's operator arrays) give
-        -- their oprcode; a result type (resulttype, the field a CoerceToDomain node stores)
+        -- their oprcode; a result type (resulttype, the field a CoerceToDomain node stores, and
+        -- typid, the only field naming the domain of JSON_VALUE ... RETURNING on 17, C-PR53-5)
         -- gives a type row, so a domain the expression coerces to is followed like a column
         -- type. Column types themselves come from pg_attribute (col rows above).
         -- Sources on a target (fn and its types as col): defaults and generated columns (1, 2),
         -- table constraints of every kind with their operators (3), index expressions and
         -- predicates (4), the WHEN of BEFORE (5) and AFTER (6) triggers, rule qualifications
         -- and actions (7), the partition key of the target and of each partitioned ancestor
-        -- (8). Sources on a domain (dfn and its types as edge): its default (9) and its CHECK
-        -- constraints (10).
-        SELECT (CASE WHEN (pg_catalog.right(pg_catalog.split_part(pg_catalog.array_to_string(mt.mt, ' '), ' ', 1), 4) OPERATOR(pg_catalog.=) 'type')
+        -- (8), extended statistics expressions (11, C-PR53-2: the planner folds them). Sources
+        -- on a domain (dfn and its types as edge): its default (9) and its CHECK constraints
+        -- (10).
+        SELECT (CASE WHEN (pg_catalog.split_part(pg_catalog.array_to_string(mt.mt, ' '), ' ', 1) OPERATOR(pg_catalog.=) ANY ('{resulttype,typid}'::pg_catalog._text))
                      THEN (CASE WHEN (s.kind OPERATOR(pg_catalog.=) 'fn') THEN 'col' ELSE 'edge' END)
                      ELSE s.kind END),
                s.rel, s.label, 0::pg_catalog.oid, s.slot,
-               (CASE WHEN (pg_catalog.right(pg_catalog.split_part(pg_catalog.array_to_string(mt.mt, ' '), ' ', 1), 4) OPERATOR(pg_catalog.=) 'type')
+               (CASE WHEN (pg_catalog.split_part(pg_catalog.array_to_string(mt.mt, ' '), ' ', 1) OPERATOR(pg_catalog.=) ANY ('{resulttype,typid}'::pg_catalog._text))
                      THEN pg_catalog.split_part(pg_catalog.array_to_string(mt.mt, ' '), ' ', 2)::pg_catalog.oid ELSE 0::pg_catalog.oid END),
-               (CASE WHEN (pg_catalog.right(pg_catalog.split_part(pg_catalog.array_to_string(mt.mt, ' '), ' ', 1), 4) OPERATOR(pg_catalog.=) 'type')
+               (CASE WHEN (pg_catalog.split_part(pg_catalog.array_to_string(mt.mt, ' '), ' ', 1) OPERATOR(pg_catalog.=) ANY ('{resulttype,typid}'::pg_catalog._text))
                      THEN 0::pg_catalog.oid
                      WHEN (pg_catalog.split_part(pg_catalog.array_to_string(mt.mt, ' '), ' ', 1) OPERATOR(pg_catalog.=) ANY ('{opno,eqop,sortop}'::pg_catalog._text))
                      THEN (SELECT o.oprcode::pg_catalog.oid FROM pg_catalog.pg_operator AS o
@@ -202,6 +204,19 @@ SELECT x.kind, x.rel, x.label, x.owner, x.slot, x.typ, x.fn,
                                  SELECT fk.confrelid FROM pg_catalog.pg_constraint AS fk
                                   WHERE (fk.contype OPERATOR(pg_catalog.=) 'f')))
                 UNION ALL
+                SELECT 'fn', x.stxrelid,
+                       pg_catalog.concat('statistics object ', pg_catalog.quote_ident(xn.nspname), '.',
+                                         pg_catalog.quote_ident(x.stxname), ' on ',
+                                         x.stxrelid::pg_catalog.regclass::pg_catalog.text), 11,
+                       pg_catalog.concat(x.stxexprs::pg_catalog.text), '{}'::pg_catalog._oid
+                  FROM pg_catalog.pg_statistic_ext AS x
+                  JOIN pg_catalog.pg_namespace AS xn ON (xn.oid OPERATOR(pg_catalog.=) x.stxnamespace)
+                 WHERE (x.stxrelid OPERATOR(pg_catalog.=) ANY (SELECT fk.conrelid FROM pg_catalog.pg_constraint AS fk
+                                  WHERE (fk.contype OPERATOR(pg_catalog.=) 'f')
+                                 UNION ALL
+                                 SELECT fk.confrelid FROM pg_catalog.pg_constraint AS fk
+                                  WHERE (fk.contype OPERATOR(pg_catalog.=) 'f')))
+                UNION ALL
                 -- The ancestors function returns the relation itself first, and nothing for a
                 -- table outside any partition tree.
                 SELECT 'fn', c.oid,
@@ -240,7 +255,7 @@ SELECT x.kind, x.rel, x.label, x.owner, x.slot, x.typ, x.fn,
                        ' '), '([0-9]+)', ':opno \1', 'g'), ' ',
                    pg_catalog.regexp_replace(pg_catalog.array_to_string(s.ops, ' '),
                                              '([0-9]+)', ':opno \1', 'g')),
-                 ':(funcid|opfuncid|aggfnoid|winfnoid|tsmhandler|hashfuncid|negfuncid|opno|eqop|sortop|resulttype) ([0-9]+)',
+                 ':(funcid|opfuncid|aggfnoid|winfnoid|tsmhandler|hashfuncid|negfuncid|opno|eqop|sortop|resulttype|typid) ([0-9]+)',
                  'g') AS mt
          WHERE (pg_catalog.split_part(pg_catalog.array_to_string(mt.mt, ' '), ' ', 2) OPERATOR(pg_catalog.<>) '0')
 ) AS u) AS x

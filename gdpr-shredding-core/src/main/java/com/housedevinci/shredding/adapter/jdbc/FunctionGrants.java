@@ -126,7 +126,9 @@ final class FunctionGrants {
                   "rule",
                   "partition key",
                   "domain default",
-                  "domain check")));
+                  "domain check",
+                  // C-PR53-2: the planner folds these when it plans a query on the table.
+                  "statistics expression")));
 
   /**
    * The kinds statement 3 reads for C-RC021-2: every slot runs with no EXECUTE check, so R6 judges
@@ -366,9 +368,9 @@ final class FunctionGrants {
   /**
    * The {@code own} slots a planner folds when it plans a query on the table: constraints (under
    * {@code constraint_exclusion = on}, which any session may set), index expressions and
-   * predicates, and partition keys.
+   * predicates, partition keys, and extended statistics expressions (C-PR53-2).
    */
-  static final Set<Integer> PLANNER_SLOTS = Set.of(3, 4, 8);
+  static final Set<Integer> PLANNER_SLOTS = Set.of(3, 4, 8, 11);
 
   /** Every type reachable from {@code start} through {@code edges}, {@code start} included. */
   static Set<Long> closure(Set<Long> start, Map<Long, Set<Long>> edges) {

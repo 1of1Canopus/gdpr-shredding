@@ -62,4 +62,52 @@ class OwnerContextPg17Test extends OwnerContextCases {
     exec(db.su(), "GRANT pg_maintain TO " + APP);
     refuses(db.app(), "role pg_maintain, reachable from login role " + APP);
   }
+
+  /** C-PR53-5: on 17 the domain of JSON_VALUE ... RETURNING is stored only as a typid. */
+  @Test
+  void fk_json_returning_domain_check_over_withheld_function_refuses_on_17() throws SQLException {
+    var db = db();
+    plant(
+        db,
+        PARENT
+            + "|"
+            + SDI
+            + "|CREATE DOMAIN public.dj AS int CONSTRAINT djc CHECK (public.sdi(VALUE) = VALUE)"
+            + "|CREATE TABLE public.ch (pid int DEFAULT"
+            + " (JSON_VALUE(jsonb '1', '$' RETURNING public.dj))::int"
+            + " REFERENCES public.par ON DELETE SET DEFAULT)");
+    refusesO1(db.app(), SDI_LABEL, "domain check", "constraint djc on domain public.dj");
+  }
+
+  /**
+   * C-PR53-3, CLUSTER variant, measured: unlike REINDEX, CLUSTER on the parent skips a partition
+   * the role does not own, so it runs nothing as that owner. The parent still refuses (REINDEX).
+   */
+  @Test
+  void owned_partitioned_parent_cluster_skips_the_partition_on_17() throws SQLException {
+    var db = db();
+    plant(
+        db,
+        "CREATE FUNCTION public.spy(int) RETURNS int LANGUAGE plpgsql IMMUTABLE AS"
+            + " 'BEGIN RAISE NOTICE ''SPY as %'', current_user; RETURN $1; END'"
+            + "|REVOKE EXECUTE ON FUNCTION public.spy(int) FROM PUBLIC"
+            + "|CREATE TABLE public.pp (i int) PARTITION BY RANGE (i)"
+            + "|CREATE INDEX ppi ON public.pp (i)"
+            + "|CREATE TABLE public.pp1 (i int)|INSERT INTO public.pp1 VALUES (1)"
+            + "|CREATE INDEX pp1x ON public.pp1 ((public.spy(i)))"
+            + "|ALTER TABLE public.pp ATTACH PARTITION public.pp1 FOR VALUES FROM (0) TO (10)"
+            + "|ALTER TABLE public.pp OWNER TO "
+            + APP);
+    var seen = new java.util.ArrayList<String>();
+    try (var c = db.app().getConnection();
+        var s = c.createStatement()) {
+      s.execute("CLUSTER public.pp USING ppi");
+      for (var w = s.getWarnings(); w != null; w = w.getNextWarning()) {
+        seen.add(w.getMessage());
+      }
+    }
+    assertThat(seen).contains("permission denied to cluster \"pp1\", skipping it");
+    assertThat(seen).noneMatch(n -> n.equals("SPY as " + SU));
+    refuses(db.app(), "owns partitioned relation public.pp, whose partition public.pp1");
+  }
 }
