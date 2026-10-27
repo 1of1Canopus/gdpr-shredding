@@ -148,6 +148,24 @@ Three new refusals, each `SHRED-SCHEMA-004`. Check them before you upgrade.
    two-role layout of SECURITY-NOTES "Database roles" passes: the migration role owns
    everything. This one is relaxed by `allow-privileged-runtime-role`.
 3. **`MAINTAIN` (PostgreSQL 17).** Revoke `MAINTAIN` on any table the runtime role does not own.
+4. **Three more refusals that no setting switches off.** Not even
+   `allow-privileged-runtime-role` relaxes them:
+   - the runtime role (or `PUBLIC`) holds `TRIGGER` on a table owned outside its reach. Revoke it.
+   - the runtime role owns a partitioned table, and a partition of it is owned outside its
+     reach. Give the partition and the parent to the same owner.
+   - the runtime role owns a schema that holds a table owned by another role. Move the schema to
+     the migration role, or move the table.
+
+   Example. The runtime role `shredding_app` owns schema `app`, and a migration role created
+   `app.audit`. This ran on 0.2.0. After the upgrade, startup is refused with
+   `SHRED-SCHEMA-004`, because `REINDEX SCHEMA app` would rebuild `app.audit`'s indexes as the
+   migration role. Fix: `ALTER SCHEMA app OWNER TO <migration role>`. SECURITY-NOTES, "O3,
+   maintenance", has the reasoning; it is not repeated here.
+
+Also in this release: `JdbcSupport.verifySchema`, the default verify-only startup path, now
+refuses a connection with auto-commit off (the application's own transaction) with
+`SHRED-SCHEMA-008`, before any statement. Before, it ended that transaction (C-RC021B-1). Call
+it outside a transaction, or give it a plain `DataSource`.
 
 To see what you hold before upgrading:
 
