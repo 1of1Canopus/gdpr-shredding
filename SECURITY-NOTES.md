@@ -1241,7 +1241,7 @@ connection taken by reflection or through an ORM API. The starter's boot-time ma
 | M18 | A read replica or hot standby still replaying | refused for reads and writes: it can serve a key the primary already destroyed. Refused at startup too (`SHRED-SCHEMA-005`) |
 | M19 | A role-owned `=(name, name)` ahead of `pg_catalog` on the moved target | refused: every comparison is qualified, exactly one row is required |
 | M20 | A read/write-splitting driver that switches host on `Connection.setReadOnly(true)` | not triggered: the module never calls `setReadOnly`; read-only is set with SQL |
-| M21 | A read on a connection inside the application's own transaction | accepted and checked inside that transaction; the module does not commit, roll back or make it read-only |
+| M21 | A read on a connection inside the application's own transaction | accepted and checked inside that transaction; the module does not commit, roll back or make it read-only. The schema verification (`verifySchema`, the default startup path) is not a read: it is refused with `SHRED-SCHEMA-008` before any statement (C-RC021B-1) |
 | M21w | A key write (`currentForWrite`, `recordEncryptions`, `rotate`) on a connection inside the application's own transaction (C-RC021-1) | refused with `SHRED-SCHEMA-008` before any statement; the caller's transaction is neither joined, committed nor rolled back. A key row that committed or rolled back with application rows would change the erasure-race reasoning |
 | M21x | transaction-aware proxy outermost | `LazyConnectionDataSourceProxy` around `TransactionAwareDataSourceProxy` (the wrong order, per Spring's own javadoc) is not detected in 0.2.1: the module cannot see the caller's transaction, so a key write, a read or the schema step can commit it (R50-1). Put the transaction-aware proxy outermost |
 
@@ -1789,8 +1789,9 @@ refused restore attached as suppressed, never replaced by an isolation code.
 means "re-apply the script": it means the connection was in auto-commit, or something moved
 `search_path` inside the erasure's transaction. The erasure's whole transaction rolls back — no key
 destroyed, no index half-cleared, no record appended. One exception to "never a startup condition":
-with `shredding.jdbc.initialize-schema=true`, the schema step run on a connection already inside the
-application's own transaction is refused with this code (R50-2), before any statement.
+the schema step, and the verify-only check `verifySchema` that is the default startup path, run on a
+connection already inside the application's own transaction are refused with this code (R50-2,
+C-RC021B-1), before any statement.
 
 **The window is one statement wide, and that is a property, not a style.** The erasure's own
 `UPDATE` runs outside it, on the path the transaction arrived with, with every name in it qualified
