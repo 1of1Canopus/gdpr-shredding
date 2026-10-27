@@ -1,0 +1,21 @@
+# postgresql 17.11
+contrib/amcheck/verify_nbtree.c
+src/backend/access/brin/brin.c
+src/backend/access/transam/parallel.c
+src/backend/access/transam/xact.c
+src/backend/catalog/index.c
+src/backend/commands/analyze.c
+src/backend/commands/cluster.c
+src/backend/commands/extension.c
+src/backend/commands/indexcmds.c
+src/backend/commands/matview.c
+src/backend/commands/schemacmds.c
+src/backend/commands/tablecmds.c
+src/backend/commands/vacuum.c
+src/backend/replication/logical/tablesync.c
+src/backend/replication/logical/worker.c
+src/backend/utils/adt/ri_triggers.c
+src/backend/utils/fmgr/fmgr.c
+src/backend/utils/init/miscinit.c
+src/backend/utils/init/usercontext.c
+src/backend/utils/misc/guc.c
