@@ -169,7 +169,7 @@ caught. But one variant of C-PR53-3 is a new path, graded MEDIUM, and one line o
 text is not exact (INFO). Under the no-allowance rule both are fixed before merge. Neither needs
 a new mechanism: C-PR53-6 is one more fact kind in O3, shaped like `ptn`; C-PR53-7 is text.
 This was the last planned pass. The two fixes are small, so a check of their two probes by the
-verifier (Ra) is enough; no third full review is asked for.
+verifier is enough; no third full review is asked for.
 
 ### Numbers on this head
 
@@ -214,7 +214,7 @@ server lets a schema owner reindex every non-shared table in the schema, on both
 schema is read only by O2 (`nsp`), and O2 applies only with an entry point. Here there is none,
 as in C-PR53-3, so the gate starts. Same class as C-PR53-3: an object reach owns makes the server
 rebuild a child it does not own.
-Fix (Thor or Isis, no new mechanism): `owner-context.sql` gets a kind `nso`, shaped like `ptn`:
+Fix (the builder or the fix pass, no new mechanism): `owner-context.sql` gets a kind `nso`, shaped like `ptn`:
 a schema owned by a role in reach that holds a relation (any `relkind`) owned by a role outside
 reach. Label "schema<TAB>relation", owner the schema owner, owner_name and other the relation's
 owner. `OwnerContext.judge` refuses it as a strict O3 line, with no entry-point condition and no
