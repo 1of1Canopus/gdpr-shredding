@@ -6,7 +6,24 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-27
+
 ### Security
+- **C-RC021B-1 (LOW): the default verify-only startup path ended the application's own
+  transaction.** `JdbcSupport.verifySchema`, the path of every start with
+  `shredding.jdbc.initialize-schema=false`, was the one schema entry point without the refusal
+  that R50-2 and R50-4 gave the others. Inside `@Transactional`, through
+  `TransactionAwareDataSourceProxy`, the caller inserted a row, the check was refused with the
+  wrong code (`SHRED-SCHEMA-005`) and the row was gone. It now refuses a connection with
+  auto-commit off with `SHRED-SCHEMA-008`, before any statement, and the caller's transaction is
+  left as it was. See SECURITY-NOTES, row M21.
+- **C-RC021B-2 (LOW, documentation): three startup refusals that no setting switches off were not
+  listed.** Besides `MAINTAIN` on a table owned outside the runtime role's reach, startup also
+  refuses `TRIGGER` on such a table, a partitioned table the role owns with a partition owned
+  outside reach, and a schema the role owns that holds another owner's table. Example: the runtime
+  role owns schema `app`, and a migration role created `app.audit`. After the upgrade, startup is
+  refused with `SHRED-SCHEMA-004`. `docs/upgrading-0.2.1.md` says what to do, and SECURITY-NOTES,
+  "O3, maintenance", has the detail.
 - **C-RC021-2c, -2e, -2f, -2g, -2h (MEDIUM): code that runs as another role was not judged.** A
   foreign-key action (`CASCADE`, `SET NULL`, `SET DEFAULT`) writes the referencing table as its
   owner, so a default such as `trim(pg_read_file('PG_VERSION'))` under `ON DELETE SET DEFAULT`

@@ -708,7 +708,9 @@ public final class JdbcSupport {
    *     schema and database that were verified" and "the ones written to" are the same by
    *     construction (design §16, C-PR-1).
    * @throws com.housedevinci.shredding.domain.ShreddingException {@code SHRED-SCHEMA-001} to {@code
-   *     -005} and {@code -007}; see {@link ErrorCodes}
+   *     -005}, {@code -007}, and {@code -008} when the connection arrives inside the caller's own
+   *     transaction (auto-commit off), refused before any statement (C-RC021B-1); see {@link
+   *     ErrorCodes}
    */
   public static SchemaVerdict verifySchema(DataSource ds) {
     return verifySchema(ds, false);
@@ -744,6 +746,9 @@ public final class JdbcSupport {
       List<String> acceptedThirdPartyExtensions) {
     List<String> accepted = acceptedExtensions(acceptedThirdPartyExtensions);
     try (Connection c = ds.getConnection()) {
+      if (!c.getAutoCommit()) {
+        throw schemaStepInCallerTransaction();
+      }
       return logVerdict(SchemaVerification.verify(c, ds, allowPrivilegedRuntimeRole, accepted));
     } catch (SQLException e) {
       throw new ShreddingException(
