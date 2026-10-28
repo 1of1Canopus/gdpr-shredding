@@ -131,3 +131,47 @@ Each store connection leaves one session setting, `shredding.login_checked`, on 
 backend. It records that the backend's login was checked, so the next calls skip that read. It
 changes nothing else. `DISCARD ALL` and `RESET ALL` clear it, which only makes the next call read
 the login again.
+
+## Code that runs as another role is checked (C-RC021-2c to -2h)
+
+Startup now looks at code the server runs as another role because the runtime role wrote a row.
+Three new refusals, each `SHRED-SCHEMA-004`. Check them before you upgrade.
+
+1. **Foreign keys to tables of another owner.** Find each table written by a `CASCADE`,
+   `SET NULL` or `SET DEFAULT` action, or queried by any foreign-key check, whose owner is not
+   the runtime role. If one of its defaults, constraints, index expressions or trigger `WHEN`
+   clauses calls a function the runtime role may not run (for example `pg_read_file`), startup
+   refuses and names it. `allow-privileged-runtime-role` does not relax this.
+2. **What the runtime role owns.** If the database has a `SECURITY DEFINER` function owned by
+   another role, or a foreign key with a table of another owner, the runtime role may own no
+   schema and no other object, and neither it nor `PUBLIC` may hold `CREATE` on a schema. The
+   two-role layout of SECURITY-NOTES "Database roles" passes: the migration role owns
+   everything. This one is relaxed by `allow-privileged-runtime-role`.
+3. **`MAINTAIN` (PostgreSQL 17).** Revoke `MAINTAIN` on any table the runtime role does not own.
+4. **Three more refusals that no setting switches off.** Not even
+   `allow-privileged-runtime-role` relaxes them:
+   - the runtime role (or `PUBLIC`) holds `TRIGGER` on a table owned outside its reach. Revoke it.
+   - the runtime role owns a partitioned table, and a partition of it is owned outside its
+     reach. Give the partition and the parent to the same owner.
+   - the runtime role owns a schema that holds a table owned by another role. Move the schema to
+     the migration role, or move the table.
+
+   Example. The runtime role `shredding_app` owns schema `app`, and a migration role created
+   `app.audit`. This ran on 0.2.0. After the upgrade, startup is refused with
+   `SHRED-SCHEMA-004`, because `REINDEX SCHEMA app` would rebuild `app.audit`'s indexes as the
+   migration role. Fix: `ALTER SCHEMA app OWNER TO <migration role>`. SECURITY-NOTES, "O3,
+   maintenance", has the reasoning; it is not repeated here.
+
+Also in this release: `JdbcSupport.verifySchema`, the default verify-only startup path, now
+refuses a connection with auto-commit off (the application's own transaction) with
+`SHRED-SCHEMA-008`, before any statement. Before, it ended that transaction (C-RC021B-1). Call
+it outside a transaction, or give it a plain `DataSource`.
+
+To see what you hold before upgrading:
+
+```sql
+SELECT pg_describe_object(classid, objid, objsubid)
+  FROM pg_shdepend
+ WHERE deptype = 'o' AND refobjid = 'shredding_app'::regrole
+   AND dbid = (SELECT oid FROM pg_database WHERE datname = current_database());
+```

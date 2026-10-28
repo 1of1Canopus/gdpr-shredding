@@ -23,7 +23,9 @@ import java.util.function.IntFunction;
  * longer as shipped. The record those rules read is itself checked against the pinned files of
  * {@link PinnedCatalogue}. Design revision 5 adds R6: no object that calls a function with its
  * owner's rights, or with no EXECUTE check, and that reach or PUBLIC may use, calls such a function
- * for a role outside reach; and R7: every core native function is as initdb ships it.
+ * for a role outside reach; and R7: every core native function is as initdb ships it. Rule O1 of
+ * the owner-context page (C-RC021-2e, -2h) judges the expressions an FK action evaluates as the
+ * owner of its target; its lines go to {@code strict}, which no mode relaxes.
  *
  * <p>Runs on the verification's connection, inside its pinned window, after the parameter leg. A
  * finding is a {@code SHRED-SCHEMA-004} line. A server major with no pinned files, a baseline oid
@@ -110,7 +112,23 @@ final class FunctionGrants {
           Map.entry("fdw", List.of("handler", "validator")),
           Map.entry("cnv", List.of("function")),
           Map.entry("trf", List.of("fromsql", "tosql")),
-          Map.entry("sup", List.of("support")));
+          Map.entry("sup", List.of("support")),
+          // C-RC021-2e/-2h, rule O1: the sources statement 4 reads on an FK-action target.
+          Map.entry(
+              "own",
+              List.of(
+                  "column default",
+                  "generated column",
+                  "constraint",
+                  "index expression or predicate",
+                  "BEFORE trigger WHEN",
+                  "AFTER trigger WHEN",
+                  "rule",
+                  "partition key",
+                  "domain default",
+                  "domain check",
+                  // C-PR53-2: the planner folds these when it plans a query on the table.
+                  "statistics expression")));
 
   /**
    * The kinds statement 3 reads for C-RC021-2: every slot runs with no EXECUTE check, so R6 judges
@@ -131,8 +149,14 @@ final class FunctionGrants {
    * a slot when the owner is in reach: the check then runs as reach.
    */
   static boolean ownerChecked(String kind, int slot) {
-    return kind.equals("agg") && slot >= 1;
+    return (kind.equals("agg") || kind.equals(OWNER_CONTEXT)) && slot >= 1;
   }
+
+  /**
+   * Rule O1 (owner-context page Rev 2): an expression on an FK-action target owned outside reach.
+   * Each of its functions is judged as an owner-checked slot, by legs 1 to 7.
+   */
+  static final String OWNER_CONTEXT = "own";
 
   /**
    * True when the server calls the slot's function with no EXECUTE check at all: a language's
@@ -148,9 +172,13 @@ final class FunctionGrants {
   }
 
   static void check(
-      Connection c, SchemaVerification.Reach reach, List<String> accepted, List<String> excess)
+      Connection c,
+      SchemaVerification.Reach reach,
+      List<String> accepted,
+      List<String> excess,
+      List<String> strict)
       throws SQLException {
-    check(c, reach, accepted, excess, PinnedCatalogue::forMajor);
+    check(c, reach, accepted, excess, strict, PinnedCatalogue::forMajor);
   }
 
   /** As {@link #check}, with the pinned files chosen by {@code lookup}: the seam for R0 tests. */
@@ -159,6 +187,7 @@ final class FunctionGrants {
       SchemaVerification.Reach reach,
       List<String> accepted,
       List<String> excess,
+      List<String> strict,
       IntFunction<Optional<PinnedCatalogue>> lookup)
       throws SQLException {
     int major = FunctionGrantsSql.major(c);
@@ -225,12 +254,162 @@ final class FunctionGrants {
     for (CallerRow row : judgeCallers(callers, facts, catalogue, accepted, reachOids)) {
       lines.add(FunctionGrantMessages.caller(row, catalogue));
     }
+    // Rule O1, statement 4: judged with the same context as statement 3 (its aggregates' support
+    // columns included), and refused whatever allow-privileged-runtime-role says.
+    var owners =
+        ownerContextCallers(FunctionGrantsSql.owners(c, reach.oids(), reach.loginOid()), reachOids);
+    var ownerLines = new ArrayList<String>();
+    for (CallerRow row :
+        judgeOwnerContext(owners, callers, facts, catalogue, accepted, reachOids)) {
+      ownerLines.add(FunctionGrantMessages.caller(row, catalogue));
+    }
     if (!rewritten.isEmpty()) {
       // R7 first: a rewritten core function means the record the other legs read is not the
       // one this module verified. What they saw is still listed, as "also seen".
-      throw unverifiable(rewritten, lines);
+      var seen = new ArrayList<String>(lines);
+      seen.addAll(ownerLines);
+      throw unverifiable(rewritten, seen);
     }
     excess.addAll(lines);
+    strict.addAll(ownerLines);
+  }
+
+  /**
+   * Rule O1 over the {@code own} callers of {@link #ownerContextCallers}: R6's verdict with the
+   * aggregate supports of statement 3, so a shipped aggregate is judged as R6 judges it.
+   */
+  static List<CallerRow> judgeOwnerContext(
+      List<FunctionGrantsSql.CallerFact> owners,
+      List<FunctionGrantsSql.CallerFact> callers,
+      List<FunctionGrantsSql.ExecuteFact> facts,
+      PinnedCatalogue catalogue,
+      List<String> accepted,
+      Set<Long> reach) {
+    var all = new ArrayList<FunctionGrantsSql.CallerFact>(callers);
+    all.addAll(owners);
+    return judgeCallers(all, facts, catalogue, accepted, reach).stream()
+        .filter(r -> r.kind().equals(OWNER_CONTEXT))
+        .toList();
+  }
+
+  /**
+   * Rule O1 (C-RC021-2e, -2h): the facts of statement 4 as {@code own} caller rows, one per (FK-
+   * action target owned outside reach, source, function), then one per (table a foreign-key check
+   * queries, owned outside reach, planner source, function). A target's sources are its own
+   * expressions and the partition keys of its partitioned ancestors ({@code fn} rows), and the
+   * default and CHECK constraints of every domain its columns and expressions lead to ({@code dfn}
+   * rows). The types are followed here, through every {@code edge} row (domain to base type, array
+   * to element, composite to attribute, range to subtype, multirange to range) until none is new,
+   * so a domain inside an array or a composite is not missed. In (target, slot, label, function)
+   * order.
+   */
+  static List<FunctionGrantsSql.CallerFact> ownerContextCallers(
+      List<FunctionGrantsSql.OwnerFact> rows, Set<Long> reach) {
+    var targets = new TreeMap<Long, FunctionGrantsSql.OwnerFact>();
+    var checked = new TreeMap<Long, FunctionGrantsSql.OwnerFact>();
+    var starts = new HashMap<Long, Set<Long>>();
+    var edges = new HashMap<Long, Set<Long>>();
+    var fns = new HashMap<Long, List<FunctionGrantsSql.OwnerFact>>();
+    var domainFns = new HashMap<Long, List<FunctionGrantsSql.OwnerFact>>();
+    for (var r : rows) {
+      switch (r.kind()) {
+        case "tgt" -> {
+          if (!reach.contains(r.owner())) {
+            targets.put(r.rel(), r);
+          }
+        }
+        case "chk" -> {
+          if (!reach.contains(r.owner())) {
+            checked.put(r.rel(), r);
+          }
+        }
+        case "col" -> starts.computeIfAbsent(r.rel(), k -> new HashSet<>()).add(r.typ());
+        case "edge" -> edges.computeIfAbsent(r.rel(), k -> new HashSet<>()).add(r.typ());
+        case "fn" -> fns.computeIfAbsent(r.rel(), k -> new ArrayList<>()).add(r);
+        case "dfn" -> domainFns.computeIfAbsent(r.rel(), k -> new ArrayList<>()).add(r);
+        default -> {
+          // A kind this release does not know cannot be judged: refuse rather than skip it.
+          throw new com.housedevinci.shredding.domain.ShreddingException(
+              ErrorCodes.SCHEMA_UNVERIFIABLE,
+              "shredding: statement 4 of the function-grants check returned a row of kind "
+                  + r.kind()
+                  + ", which this release does not judge. Unverifiable is not clean.");
+        }
+      }
+    }
+    var out = new TreeMap<String, FunctionGrantsSql.CallerFact>();
+    for (var target : targets.values()) {
+      String writes = ", written by a foreign-key action on table " + target.label();
+      for (var f : fns.getOrDefault(target.rel(), List.of())) {
+        add(out, target, f, f.label() + writes);
+      }
+      for (long type : closure(starts.getOrDefault(target.rel(), Set.of()), edges)) {
+        for (var f : domainFns.getOrDefault(type, List.of())) {
+          add(out, target, f, f.label() + ", a type in table " + target.label() + writes);
+        }
+      }
+    }
+    // A table a foreign-key check queries: its query is planned as the owner, and planning folds
+    // the sources below (Q6, measured). An FK-action target has every slot judged above already.
+    for (var table : checked.values()) {
+      if (targets.containsKey(table.rel())) {
+        continue;
+      }
+      String plans = ", planned by a foreign-key check on table " + table.label();
+      for (var f : fns.getOrDefault(table.rel(), List.of())) {
+        if (PLANNER_SLOTS.contains(f.slot())) {
+          add(out, table, f, f.label() + plans);
+        }
+      }
+    }
+    return List.copyOf(out.values());
+  }
+
+  /**
+   * The {@code own} slots a planner folds when it plans a query on the table: constraints (under
+   * {@code constraint_exclusion = on}, which any session may set), index expressions and
+   * predicates, partition keys, and extended statistics expressions (C-PR53-2).
+   */
+  static final Set<Integer> PLANNER_SLOTS = Set.of(3, 4, 8, 11);
+
+  /** Every type reachable from {@code start} through {@code edges}, {@code start} included. */
+  static Set<Long> closure(Set<Long> start, Map<Long, Set<Long>> edges) {
+    var seen = new java.util.TreeSet<Long>(start);
+    var todo = new java.util.ArrayDeque<Long>(start);
+    while (!todo.isEmpty()) {
+      for (long next : edges.getOrDefault(todo.pop(), Set.of())) {
+        if (seen.add(next)) {
+          todo.push(next);
+        }
+      }
+    }
+    return seen;
+  }
+
+  private static void add(
+      Map<String, FunctionGrantsSql.CallerFact> out,
+      FunctionGrantsSql.OwnerFact target,
+      FunctionGrantsSql.OwnerFact f,
+      String label) {
+    if (f.fn() == 0 || f.fnLabel().isEmpty()) {
+      return; // an oid no pg_proc row has: nothing the server can call
+    }
+    String key = String.format("%020d\t%02d\t%s\t%020d", target.rel(), f.slot(), label, f.fn());
+    out.putIfAbsent(
+        key,
+        new FunctionGrantsSql.CallerFact(
+            OWNER_CONTEXT,
+            target.rel(),
+            label,
+            target.owner(),
+            target.ownerName(),
+            true,
+            f.slot(),
+            f.fn(),
+            f.fnKey(),
+            f.fnLabel(),
+            f.fnDefiner(),
+            f.fnReach()));
   }
 
   static List<FunctionGrantsSql.RecordFact> records(Connection c, PinnedCatalogue catalogue)

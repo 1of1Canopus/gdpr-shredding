@@ -128,6 +128,21 @@ final class FunctionGrantMessages {
 
   /** R6: a caller object that calls a judged function for reach or PUBLIC (revision 5). */
   static String caller(FunctionGrants.CallerRow row, PinnedCatalogue catalogue) {
+    if (row.kind().equals(FunctionGrants.OWNER_CONTEXT)) {
+      return "the server runs function "
+          + text(row.function())
+          + " as the "
+          + text(row.slot())
+          + " of "
+          + text(row.label())
+          + ", as the table's owner "
+          + text(row.ownerName())
+          + " outside reach, whoever wrote the referenced row, so the foreign key hands out "
+          + reason(row, catalogue)
+          + ". Drop the expression, make the action NO ACTION, or rebuild it over functions reach"
+          + " may execute itself; allow-privileged-runtime-role does not relax this (O1,"
+          + " C-RC021-2e)";
+    }
     if (FunctionGrants.NO_CHECK_KINDS.contains(row.kind())) {
       return "the server calls function "
           + text(row.function())
