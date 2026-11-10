@@ -2145,12 +2145,12 @@ exit "${FAKE_OSV_RC:-1}"
 FAKE
     chmod +x "$work/bin/osv-scanner"
     # Exit 1 with a MEDIUM-only report: the scan step and then the severity step must both pass.
-    RUNNER_TEMP="$work" FAKE_OSV_RC=1 bash -e -c "$scan" >>"$PROBE_CAPTURE" 2>&1; rc=$?
+    RUNNER_TEMP="$work" FAKE_OSV_RC=1 bash -e -c "$scan" >>"${PROBE_CAPTURE:-/dev/null}" 2>&1; rc=$?
     if [ "$rc" -ne 0 ]; then rm -r "$work"; return 0; fi
-    RUNNER_TEMP="$work" bash -e -c "$gate" >>"$PROBE_CAPTURE" 2>&1; rc=$?
+    RUNNER_TEMP="$work" bash -e -c "$gate" >>"${PROBE_CAPTURE:-/dev/null}" 2>&1; rc=$?
     if [ "$rc" -ne 0 ]; then rm -r "$work"; return 0; fi
     # Exit 127 (the scan did not happen) must still fail the scan step.
-    RUNNER_TEMP="$work" FAKE_OSV_RC=127 bash -e -c "$scan" >>"$PROBE_CAPTURE" 2>&1; rc=$?
+    RUNNER_TEMP="$work" FAKE_OSV_RC=127 bash -e -c "$scan" >>"${PROBE_CAPTURE:-/dev/null}" 2>&1; rc=$?
     rm -r "$work"
     [ "$rc" -ne 0 ] || return 0
   done
