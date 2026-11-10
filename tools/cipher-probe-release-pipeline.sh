@@ -2114,6 +2114,51 @@ probe probe_reference_guard_upper_case_not_in_self_test "B-NG-26 the self-test p
 probe probe_reference_guard_lower_case_private_name     "B-NG-27 a lower-case private file name passes"        probe_lower_case_private_file_name_passes
 probe probe_reference_guard_slug_rescan_unkilled        "B-NG-27 the slug re-scan has no killing self-test case"  probe_slug_rescan_has_no_killing_case
 
+# AG-CI-1 - the scan step reads osv-scanner's exit code on the NEXT line, and GitHub runs `run:`
+#      blocks as `bash -e`, so exit 1 (a finding of any severity) ends the step before the
+#      severity step runs: a MEDIUM-only advisory turns the check red although the threshold
+#      (fail on HIGH or CRITICAL) passes. Runs the real scan step body and the real severity step
+#      body from each workflow under `bash -e` with a fake scanner that exits 1 and writes a
+#      MEDIUM-only report. Weak when the scan step fails, the severity step does not pass, or an
+#      exit code other than 0 or 1 (127) no longer fails the scan step.
+_osv_step_run() { # _osv_step_run <workflow> <n>: the n-th `run: |` body from the scan step on
+  awk -v n="$2" '
+    /- name: Scan the resolved dependency graph/ { seen=1 }
+    seen && /^        run: \|/ { k++; inrun=(k==n); next }
+    inrun && /^      - name:/ { exit }
+    inrun { print }
+  ' "$1"
+}
+probe_scanner_exit_one_stops_the_scan_step() {
+  local wf scan gate work rc
+  for wf in .github/workflows/ci.yml .github/workflows/security-scan.yml; do
+    [ -f "$wf" ] || continue
+    scan="$(_osv_step_run "$wf" 1)"; gate="$(_osv_step_run "$wf" 2)"
+    { [ -n "$scan" ] && [ -n "$gate" ]; } || return 0   # step vanished: unverifiable is weak
+    work="$(mktemp -d)"; mkdir "$work/bin"
+    cat > "$work/bin/osv-scanner" <<'FAKE'
+#!/usr/bin/env bash
+out=""
+while [ $# -gt 0 ]; do [ "$1" = "--output-file" ] && out="$2"; shift; done
+printf '%s' '{"results":[{"source":{"path":"pom.xml"},"packages":[{"package":{"name":"org.example:thing","version":"1.0"},"vulnerabilities":[{"id":"GHSA-med","database_specific":{"severity":"MEDIUM"}}]}]}]}' > "$out"
+exit "${FAKE_OSV_RC:-1}"
+FAKE
+    chmod +x "$work/bin/osv-scanner"
+    # Exit 1 with a MEDIUM-only report: the scan step and then the severity step must both pass.
+    RUNNER_TEMP="$work" FAKE_OSV_RC=1 bash -e -c "$scan" >>"$PROBE_CAPTURE" 2>&1; rc=$?
+    if [ "$rc" -ne 0 ]; then rm -r "$work"; return 0; fi
+    RUNNER_TEMP="$work" bash -e -c "$gate" >>"$PROBE_CAPTURE" 2>&1; rc=$?
+    if [ "$rc" -ne 0 ]; then rm -r "$work"; return 0; fi
+    # Exit 127 (the scan did not happen) must still fail the scan step.
+    RUNNER_TEMP="$work" FAKE_OSV_RC=127 bash -e -c "$scan" >>"$PROBE_CAPTURE" 2>&1; rc=$?
+    rm -r "$work"
+    [ "$rc" -ne 0 ] || return 0
+  done
+  return 1
+}
+
+probe probe_scanner_exit_one_stops_the_scan_step         "AG-CI-1 a scanner exit of 1 ends the scan step before the severity step"  probe_scanner_exit_one_stops_the_scan_step
+
 echo
 echo "still weak: $pass    fixed: $flipped    error: $errors"
 [ "$pass" -eq 0 ] && [ "$errors" -eq 0 ]
