@@ -111,8 +111,8 @@
     -->
     <jackson-bom.version>3.1.7</jackson-bom.version>
     <archunit.version>1.5.1</archunit.version>
-    <errorprone.version>2.51.0</errorprone.version>
-    <spotless.version>3.10.4</spotless.version>
+    <errorprone.version>2.52.0</errorprone.version>
+    <spotless.version>3.11.0</spotless.version>
     <google-java-format.version>1.36.1</google-java-format.version>
     <jacoco.version>0.8.16</jacoco.version>
     <enforcer.version>3.7.0</enforcer.version>
