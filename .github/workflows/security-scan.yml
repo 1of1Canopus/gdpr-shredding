@@ -28,6 +28,9 @@ jobs:
       - name: Scan the resolved dependency graph
         run: |
           set -uo pipefail
+          # Read the exit code on the same line: GitHub runs this as `bash -e`, so a bare
+          # `rc=$?` on the next line is never reached when the scanner exits 1 (a finding).
+          rc=0
           "${RUNNER_TEMP}/bin/osv-scanner" scan source \
             --data-source=native --maven-registry=https://repo.maven.apache.org/maven2 \
             --all-packages \
@@ -35,8 +38,7 @@ jobs:
             -L pom.xml:pom.xml \
             -L pom.xml:gdpr-shredding-core/pom.xml \
             -L pom.xml:gdpr-shredding-spring-boot-starter/pom.xml \
-            -L pom.xml:gdpr-shredding-sample/pom.xml
-          rc=$?
+            -L pom.xml:gdpr-shredding-sample/pom.xml || rc=$?
           if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
             echo "::error::osv-scanner exited $rc: the weekly scan did not complete"
             exit 1
